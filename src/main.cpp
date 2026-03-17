@@ -35433,6 +35433,7 @@ uint16_t fadeInFromBlack(uint16_t color_le, uint8_t nowStep, uint8_t Step)
     return faded_le;
 }
 
+//开机动画
 void task_LogoFadeInAndMove(void *pvParameters)
 {
     uint16_t LogoTemp[8100] = {0x0000};
