@@ -35170,7 +35170,7 @@ void setup() {
   Serial.begin(115200);
 
   // 初始化 TFT 屏幕
-  Key_init();
+  Key_init();go
   tft.init();
   tft.setRotation(1);  // 设置旋转方向
   tft.fillScreen(TFT_BLACK);

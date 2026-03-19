@@ -1,9 +1,9 @@
 #include <Key_Drv.h>
 
-#define UP_PIN 33
-#define DOWN_PIN 35
-#define LEFT_PIN 32
-#define RIGHT_PIN 34
+#define UP_PIN 15
+#define DOWN_PIN 16
+#define LEFT_PIN 2
+#define RIGHT_PIN 17
 
 uint8_t Keycode = 255;
 
