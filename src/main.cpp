@@ -1,5 +1,5 @@
 #include <Arduino.h>
-#include<TFT_eSPI.h>
+#include <TFT_eSPI.h>
 #include <FS.h>
 #include <LittleFS.h>
 #include <Logo_MOON_B.h>
@@ -28,12 +28,12 @@ void setup() {
   tft.fillScreen(TFT_BLACK);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);  
   delay(500);
-
+  
   ledcSetup(0,40000,8);
   ledcAttachPin(14,0);
   ledcWrite(0,0);
   pinMode(42,OUTPUT);
-  digitalWrite(42, LOW);
+  digitalWrite(42, HIGH);
 
   Key_init();
 
@@ -87,8 +87,8 @@ void setup() {
   Text.loadFont("simhei15",LittleFS);
   Text.setTextColor(0x07ff, TFT_BLACK);
   delay(8000);
-  mixer.setInsertGain(0.35f);
-  mixer.setBgGain(0.35f);
+  mixer.setInsertGain(1.0f);
+  mixer.setBgGain(1.0f);
   mixer.playBG("/BG.wav");
   mixer.playInsert("/BGstart.wav");
   showGlitchEffectUTF8(message);

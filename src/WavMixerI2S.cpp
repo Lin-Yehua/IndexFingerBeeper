@@ -325,7 +325,7 @@ bool WavMixerI2S::initI2S() {
     i2s_config.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
     i2s_config.sample_rate = _cfg.sampleRate;
     i2s_config.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
-    i2s_config.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;
+    i2s_config.channel_format = I2S_CHANNEL_FMT_ONLY_RIGHT;
     i2s_config.communication_format = I2S_COMM_FORMAT_STAND_I2S;
     i2s_config.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
     i2s_config.dma_buf_count = 8;
