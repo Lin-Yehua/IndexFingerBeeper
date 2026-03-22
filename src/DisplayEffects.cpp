@@ -10,14 +10,29 @@
 #include "Key_Drv.h"
 
 void showGlitchEffectUTF8(const char *text) {
-  String chars[32];
+  static constexpr int kMaxChars = 128;
+  static String chars[kMaxChars];
+  static bool wrongActive[kMaxChars];
+  static String wrongChars[kMaxChars];
+  static bool engFlickerActive[kMaxChars];
+  static uint8_t engFlickerLeft[kMaxChars];
+  static char engFlickerChar[kMaxChars];
+  static String displayToken[kMaxChars];
+  static String shown[kMaxChars];
+  static bool incorrectNow[kMaxChars];
+  static int prevCurrentLineCount = -1;
+  static int prevFrozenVisiblePrefix = -1;
+  static int prevBaseY = -1;
   int charCount = 0;
   int keycode = 255;
   bool rollbackEnabled = gEnableReprint;
   bool forceFinishNow = false;
   bool keyLatch = false;
+  prevCurrentLineCount = -1;
+  prevFrozenVisiblePrefix = -1;
+  prevBaseY = -1;
 
-  for (int i = 0; text[i] != '\0' && charCount < 32;) {
+  for (int i = 0; text[i] != '\0' && charCount < kMaxChars;) {
     uint8_t c = (uint8_t)text[i];
     int charLen = 1;
 
@@ -97,11 +112,13 @@ void showGlitchEffectUTF8(const char *text) {
     return String(out);
   };
 
-  bool wrongActive[32] = {false};
-  String wrongChars[32];
-  bool engFlickerActive[32] = {false};
-  uint8_t engFlickerLeft[32] = {0};
-  char engFlickerChar[32] = {0};
+  for (int j = 0; j < kMaxChars; ++j) {
+    wrongActive[j] = false;
+    wrongChars[j] = "";
+    engFlickerActive[j] = false;
+    engFlickerLeft[j] = 0;
+    engFlickerChar[j] = 0;
+  }
   int rollbackCooldown = 0;
   const char *kEnChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
@@ -109,7 +126,10 @@ void showGlitchEffectUTF8(const char *text) {
     const int lineH = 18;
     const int y0 = 0;
     const int areaH = 100;
+    const int areaW = 320;
     const int kDisturbWidth = 5;  // zones: decoded | disturbed | junk
+    const int kLayoutShiftPerLine = lineH / 2;
+
     auto tokenUnit = [&](const String &s) -> float {
       if (!s.length()) return 0.0f;
       bool allAscii = true;
@@ -130,11 +150,8 @@ void showGlitchEffectUTF8(const char *text) {
       return fullLineCount - 1;
     };
 
-    Text.fillRect(0, y0, tft.width(), areaH, TFT_BLACK);
     const int decodeFront = progressI - kDisturbWidth;
-
     for (int ln = 0; ln < fullLineCount; ++ln) {
-      // Freeze only when this whole line is fully inside the decoded zone.
       if (!lineFrozen[ln] && (fullLineEnd[ln] - 1) <= decodeFront) {
         String fix = "";
         for (int j = fullLineStart[ln]; j < fullLineEnd[ln]; ++j) fix += chars[j];
@@ -143,7 +160,6 @@ void showGlitchEffectUTF8(const char *text) {
       }
     }
 
-    String displayToken[32];
     for (int j = 0; j < charCount; ++j) {
       int ln = finalLineOf(j);
       displayToken[j] = lineFrozen[ln] ? chars[j] : shown[j];
@@ -180,18 +196,60 @@ void showGlitchEffectUTF8(const char *text) {
       }
     }
 
-    Text.pushImage(160 - 60, (currentLineCount - 1) * lineH - 60, 120, 120, (uint16_t *)Index_B);
-    int leftAlignedX = 20;
+    int frozenPrefixFinal = 0;
+    while (frozenPrefixFinal < fullLineCount && lineFrozen[frozenPrefixFinal]) {
+      frozenPrefixFinal++;
+    }
 
+    int frozenVisiblePrefix = 0;
     for (int ln = 0; ln < currentLineCount; ++ln) {
+      bool allFrozen = true;
+      for (int j = currentLineStart[ln]; j < currentLineEnd[ln]; ++j) {
+        if (finalLineOf(j) >= frozenPrefixFinal) {
+          allFrozen = false;
+          break;
+        }
+      }
+      if (allFrozen) {
+        frozenVisiblePrefix++;
+      } else {
+        break;
+      }
+    }
+
+    const bool layoutChanged =
+        (currentLineCount != prevCurrentLineCount) ||
+        (frozenVisiblePrefix != prevFrozenVisiblePrefix);
+
+    const int baseY = 150 - (currentLineCount - 1) * kLayoutShiftPerLine;
+    const int imageY = (currentLineCount - 1) * kLayoutShiftPerLine - 60;
+    const int clearTop = (frozenVisiblePrefix <= 0) ? y0 : (12 + frozenVisiblePrefix * lineH - 10);
+    const int clippedTop = constrain(clearTop, y0, y0 + areaH);
+    const int clippedH = (y0 + areaH) - clippedTop;
+
+    if (layoutChanged) {
+      Text.fillRect(0, y0, areaW, areaH, TFT_BLACK);
+      Text.pushImage(160 - 60, imageY, 120, 120, (uint16_t *)Index_B);
+    } else {
+      if (clippedH > 0) {
+        Text.fillRect(0, clippedTop, areaW, clippedH, TFT_BLACK);
+      }
+      Text.pushImage(160 - 60, imageY, 120, 120, (uint16_t *)Index_B);
+    }
+
+    String firstLineText = "";
+    for (int j = currentLineStart[0]; j < currentLineEnd[0]; ++j) firstLineText += displayToken[j];
+    int firstLineWidth = Text.textWidth(firstLineText);
+    int leftAlignedX = 160 - firstLineWidth / 2;
+    if (leftAlignedX < 0) leftAlignedX = 0;
+
+    const int drawStartLn = layoutChanged ? 0 : frozenVisiblePrefix;
+    for (int ln = drawStartLn; ln < currentLineCount; ++ln) {
       String lineText = "";
       for (int j = currentLineStart[ln]; j < currentLineEnd[ln]; ++j) lineText += displayToken[j];
 
       int y = 12 + ln * lineH;
       if (ln == 0) {
-        int firstLineWidth = Text.textWidth(lineText);
-        leftAlignedX = 160 - firstLineWidth / 2;
-        if (leftAlignedX < 0) leftAlignedX = 0;
         Text.setTextDatum(MC_DATUM);
         Text.drawString(lineText, 160, y);
       } else {
@@ -199,7 +257,29 @@ void showGlitchEffectUTF8(const char *text) {
         Text.drawString(lineText, leftAlignedX, y - 8);
       }
     }
-    Text.pushSprite(0, 150 - (currentLineCount - 1) * lineH, 0, y0, 320, areaH);
+
+    if (layoutChanged) {
+      Text.pushSprite(0, baseY, 0, y0, areaW, areaH);
+    } else if (clippedH > 0) {
+      Text.pushSprite(0, baseY + (clippedTop - y0), 0, clippedTop, areaW, clippedH);
+    }
+
+    // If vertical anchor moved due line-count change/rollback, clear only uncovered strip.
+    if (prevBaseY >= 0 && baseY != prevBaseY) {
+      if (baseY < prevBaseY) {
+        const int stripY = baseY + areaH;
+        const int stripH = prevBaseY - baseY;
+        if (stripH > 0) tft.fillRect(0, stripY, areaW, stripH, TFT_BLACK);
+      } else {
+        const int stripY = prevBaseY;
+        const int stripH = baseY - prevBaseY;
+        if (stripH > 0) tft.fillRect(0, stripY, areaW, stripH, TFT_BLACK);
+      }
+    }
+
+    prevCurrentLineCount = currentLineCount;
+    prevFrozenVisiblePrefix = frozenVisiblePrefix;
+    prevBaseY = baseY;
   };
 
   auto tryActivateWrong = [&](int j, int wrongProb) {
@@ -223,8 +303,6 @@ void showGlitchEffectUTF8(const char *text) {
     int steps = 2 + random(3);
 
     for (int s = 0; s < steps; s++) {
-      String shown[32];
-
       for (int j = 0; j < charCount; j++) {
         if (j < i) {
           int dist = i - j;
@@ -280,8 +358,7 @@ void showGlitchEffectUTF8(const char *text) {
     }
     if (forceFinishNow) break;
 
-    String shown[32];
-    bool incorrectNow[32] = {false};
+    memset(incorrectNow, 0, sizeof(incorrectNow));
     for (int j = 0; j < charCount; j++) {
       if (j <= i) {
         const int dist = i - j;
@@ -381,7 +458,6 @@ void showGlitchEffectUTF8(const char *text) {
     }
   }
 
-  String shown[32];
   for (int j = 0; j < charCount; ++j) shown[j] = chars[j];
   drawWrapped(shown, charCount + 8);
 }

@@ -348,7 +348,7 @@ bool initProjectResources() {
   Text.loadFont("Oxta14", LittleFS);
   Text.setTextDatum(MC_DATUM);
   Text.setTextColor(0xff36, 0x0000);
-  Text.drawString("PROJECT MOON", 185, 60);
+  Text.drawString("PROJECT MOON", 180, 60);
   Text.setTextWrap(true, true);
 
   xTaskCreate(task_LogoFadeInAndMove, "LogoFadeMove", 20480, NULL, 1, NULL);
@@ -396,9 +396,16 @@ void processAppLoop() {
       }
       mixer.playBG("/BG.wav");
       mixer.playInsert("/BGstart.wav");
+      //手动清除屏幕
+      Text.fillRect(0, 0, tft.width(), 100, TFT_BLACK);
+      Text.pushImage(160-60,50-60,120,120,(uint16_t *)Index_B);
+      Text.pushSprite(0,150-50);
       showGlitchEffectUTF8(message);
       mixer.stopBG();
       mixer.playInsert("/BGend.wav");
+      
+      tft.drawNumber(csvArray[csvCount],20,100);
+      tft.drawNumber(csvCount,20,120);
     }
   }
 }
