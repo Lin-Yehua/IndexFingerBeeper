@@ -7,7 +7,7 @@
 #include <USBMSC.h>
 #include <vector>
 #include <ctype.h>
-
+#include <Hanchi_Index.h>
 extern "C" {
 #include "wear_levelling.h"
 #include "esp_partition.h"
@@ -571,46 +571,36 @@ void showGlitchEffectUTF8(const char* text) {
   }
 
   auto mutateCharNearBoundary = [&](const String& src) -> String {
-    int n = src.length();
-    if (n <= 0) return src;
-
-    uint8_t b[4] = {0, 0, 0, 0};
-    for (int k = 0; k < n && k < 4; ++k) b[k] = (uint8_t)src[k];
-
-    // ASCII: perturb code point directly.
-    if (n == 1 && (b[0] & 0x80) == 0) {
-      int delta = random(1, 16);
-      if (random(2) == 0) delta = -delta;
-      int v = (int)b[0] + delta;
-      while (v < 33) v += 94;
-      while (v > 126) v -= 94;
-      String out;
-      out += (char)v;
-      return out;
+    (void)src;
+    uint32_t cp = 0;
+    if (random(100) < 15) {
+      cp = 0x1234; // box placeholder probability
+    } else {
+      const int idx = random(0, 4001); // direct random index, no lookup
+      cp = (uint32_t)Index_Han[idx];
     }
 
-    // UTF-8 multi-byte: perturb continuation bytes, keep valid UTF-8 framing.
-    for (int k = 1; k < n && k < 4; ++k) {
-      if ((b[k] & 0xC0) == 0x80) {
-        int delta = random(1, 16);
-        if (random(2) == 0) delta = -delta;
-        int v = (int)b[k] + delta;
-        if (v < 0x80) v = 0x80 + (0x80 - v);
-        if (v > 0xBF) v = 0xBF - (v - 0xBF);
-        if (v < 0x80) v = 0x80;
-        if (v > 0xBF) v = 0xBF;
-        b[k] = (uint8_t)v;
-      }
+    char out[5] = {0};
+    if (cp <= 0x7F) {
+      out[0] = (char)cp;
+    } else if (cp <= 0x7FF) {
+      out[0] = (char)(0xC0 | ((cp >> 6) & 0x1F));
+      out[1] = (char)(0x80 | (cp & 0x3F));
+    } else {
+      out[0] = (char)(0xE0 | ((cp >> 12) & 0x0F));
+      out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+      out[2] = (char)(0x80 | (cp & 0x3F));
     }
-
-    char outBuf[5] = {0};
-    for (int k = 0; k < n && k < 4; ++k) outBuf[k] = (char)b[k];
-    return String(outBuf);
+    return String(out);
   };
 
   bool wrongActive[32] = {false};
   String wrongChars[32];
+  bool engFlickerActive[32] = {false};
+  uint8_t engFlickerLeft[32] = {0};
+  char engFlickerChar[32] = {0};
   int rollbackCooldown = 0;
+  const char *kEnChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
   auto tryActivateWrong = [&](int j, int wrongProb) {
     if (j < 0 || j >= charCount) return;
@@ -647,9 +637,22 @@ void showGlitchEffectUTF8(const char* text) {
               // tail flush phase: only UTF-8 perturbation
               tryActivateWrong(j, wrongProb);
             }
-            display += wrongActive[j] ? wrongChars[j] : chars[j];
+            if (isUtf8 && !engFlickerActive[j] && random(100) < 15) {
+              engFlickerActive[j] = true;
+              engFlickerLeft[j] = (uint8_t)random(1, 4);
+              engFlickerChar[j] = kEnChars[random((int)strlen(kEnChars))];
+            }
+            if (engFlickerActive[j]) {
+              display += String(engFlickerChar[j]);
+              if (engFlickerLeft[j] > 0) engFlickerLeft[j]--;
+              if (engFlickerLeft[j] == 0) engFlickerActive[j] = false;
+            } else {
+              display += wrongActive[j] ? wrongChars[j] : chars[j];
+            }
           } else {
             wrongActive[j] = false;  // left error zone
+            engFlickerActive[j] = false;
+            engFlickerLeft[j] = 0;
             display += chars[j];
           }
         } else if (j == i) {
@@ -686,6 +689,7 @@ void showGlitchEffectUTF8(const char* text) {
 
     // 固定当前字符后的正式显示
     String display = "";
+    bool incorrectNow[32] = {false};
     for (int j = 0; j < charCount; j++) {
       if (j <= i) {
         const int dist = i - j;
@@ -698,9 +702,26 @@ void showGlitchEffectUTF8(const char* text) {
             // tail flush phase: only UTF-8 perturbation
             tryActivateWrong(j, wrongProb);
           }
-          display += wrongActive[j] ? wrongChars[j] : chars[j];
+          if (isUtf8 && !engFlickerActive[j] && random(100) < 15) {
+            engFlickerActive[j] = true;
+            engFlickerLeft[j] = (uint8_t)random(1, 4);
+            engFlickerChar[j] = kEnChars[random((int)strlen(kEnChars))];
+          }
+          if (engFlickerActive[j]) {
+            display += String(engFlickerChar[j]);
+            incorrectNow[j] = true;
+            if (engFlickerLeft[j] > 0) engFlickerLeft[j]--;
+            if (engFlickerLeft[j] == 0) engFlickerActive[j] = false;
+          } else if (wrongActive[j]) {
+            display += wrongChars[j];
+            incorrectNow[j] = true;
+          } else {
+            display += chars[j];
+          }
         } else {
           wrongActive[j] = false;  // left error zone
+          engFlickerActive[j] = false;
+          engFlickerLeft[j] = 0;
           display += chars[j];
         }
       } else {
@@ -741,7 +762,7 @@ void showGlitchEffectUTF8(const char* text) {
     }
     if (forceFinishNow) break;
 
-    // If the last decoded 5 chars are all wrong at once, rollback decode progress by 5.
+    // If the last 3 decoded chars are all incorrect (wrong glyph/box/English), rollback by 5.
     if (i >= charCount) {
       i++;
       continue;
@@ -753,15 +774,15 @@ void showGlitchEffectUTF8(const char* text) {
       continue;
     }
 
-    if (rollbackEnabled && i >= 4) {
-      bool allWrong = true;
-      for (int j = i - 4; j <= i; ++j) {
-        if (j < 0 || j >= charCount || !wrongActive[j]) {
-          allWrong = false;
+    if (rollbackEnabled && i >= 2) {
+      bool allWrong3 = true;
+      for (int j = i - 2; j <= i; ++j) {
+        if (j < 0 || j >= charCount || !incorrectNow[j]) {
+          allWrong3 = false;
           break;
         }
       }
-      if (allWrong) {
+      if (allWrong3) {
         i -= 5;
         if (i < 0) i = 0;
         rollbackCooldown = 5;
@@ -773,6 +794,8 @@ void showGlitchEffectUTF8(const char* text) {
         for (int j = clearL; j <= clearR; ++j) {
           wrongActive[j] = false;
           wrongChars[j] = "";
+          engFlickerActive[j] = false;
+          engFlickerLeft[j] = 0;
         }
       } else {
         i++;
