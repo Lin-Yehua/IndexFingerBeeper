@@ -6,6 +6,7 @@
 #include <USB.h>
 #include <USBMSC.h>
 #include <vector>
+#include <ctype.h>
 
 extern "C" {
 #include "wear_levelling.h"
@@ -52,6 +53,9 @@ uint8_t csvCount = 0;
 int csvArray[8192] = {0};
 float gInsertGain = 0.2f;
 float gBgGain = 0.2f;
+int gWrongProb3 = 25;
+int gWrongProb5 = 12;
+bool gEnableReprint = true;
 bool firstFlag = false;
 uint8_t RUNSTATE = 0;
 void showGlitchEffectUTF8(const char *text);
@@ -195,9 +199,15 @@ bool mountFat() {
 void applyAudioGainsFromSettingIni() {
   static constexpr float kDefaultInsertGain = 0.2f;
   static constexpr float kDefaultBgGain = 0.2f;
+  static constexpr int kDefaultWrongProb3 = 25;
+  static constexpr int kDefaultWrongProb5 = 12;
+  static constexpr bool kDefaultEnableReprint = true;
 
   gInsertGain = kDefaultInsertGain;
   gBgGain = kDefaultBgGain;
+  gWrongProb3 = kDefaultWrongProb3;
+  gWrongProb5 = kDefaultWrongProb5;
+  gEnableReprint = kDefaultEnableReprint;
 
   fs::File f = FFat.open("/setting.ini", FILE_READ);
   if (!f) {
@@ -207,6 +217,9 @@ void applyAudioGainsFromSettingIni() {
 
   bool gotInsert = false;
   bool gotBg = false;
+  bool gotWrong3 = false;
+  bool gotWrong5 = false;
+  bool gotReprint = false;
   while (f.available()) {
     String line = f.readStringUntil('\n');
     line.trim();
@@ -222,6 +235,11 @@ void applyAudioGainsFromSettingIni() {
     value.trim();
     value.replace(";", "");
     key.toLowerCase();
+    value.toLowerCase();
+    value.trim();
+    while (value.length() && !isalnum((unsigned char)value[value.length() - 1])) {
+      value.remove(value.length() - 1);
+    }
 
     const float parsed = value.toFloat();
     if (key == "insertgain") {
@@ -230,13 +248,26 @@ void applyAudioGainsFromSettingIni() {
     } else if (key == "backgroundgain") {
       gBgGain = parsed;
       gotBg = true;
+    } else if (key == "testwrongindexpersent_3area") {
+      gWrongProb3 = constrain(value.toInt(), 0, 100);
+      gotWrong3 = true;
+    } else if (key == "testwrongindexpersent_5area") {
+      gWrongProb5 = constrain(value.toInt(), 0, 100);
+      gotWrong5 = true;
+    } else if (key == "enablereprint") {
+      gEnableReprint = (value == "1" || value == "true" || value == "on" || value == "yes");
+      gotReprint = true;
     }
   }
   f.close();
 
   if (!gotInsert) Serial.printf("[APP] InsertGain missing, default=%.3f\n", gInsertGain);
   if (!gotBg) Serial.printf("[APP] BackGroundGain missing, default=%.3f\n", gBgGain);
+  if (!gotWrong3) Serial.printf("[APP] TestWrongIndexPersent_3Area missing, default=%d\n", gWrongProb3);
+  if (!gotWrong5) Serial.printf("[APP] TestWrongIndexPersent_5Area missing, default=%d\n", gWrongProb5);
+  if (!gotReprint) Serial.printf("[APP] EnableReprint missing, default=%d\n", gEnableReprint ? 1 : 0);
   Serial.printf("[APP] gains: insert=%.3f bg=%.3f\n", gInsertGain, gBgGain);
+  Serial.printf("[APP] glitch: p3=%d p5=%d reprint=%d\n", gWrongProb3, gWrongProb5, gEnableReprint ? 1 : 0);
 }
 
 void unmountFat() {
@@ -517,7 +548,7 @@ void showGlitchEffectUTF8(const char* text) {
   String chars[32];
   int charCount = 0;
   int keycode = 255;
-  bool rollbackEnabled = true;
+  bool rollbackEnabled = gEnableReprint;
   bool forceFinishNow = false;
   bool keyLatch = false;
   // UTF-8 分割
@@ -608,7 +639,7 @@ void showGlitchEffectUTF8(const char* text) {
         if (j < i) {
           int dist = i - j;
           if (dist < 5) {
-            int wrongProb = (dist < 3) ? 25 : 12;
+            int wrongProb = (dist < 3) ? gWrongProb3 : gWrongProb5;
             bool isUtf8 = chars[j].length() > 1;
             if (i < charCount) {
               tryActivateWrong(j, wrongProb);
@@ -638,7 +669,9 @@ void showGlitchEffectUTF8(const char* text) {
       keycode = get_Keycode();
       if (keycode == 2 && !keyLatch) {
         keyLatch = true;
-        if (rollbackEnabled) {
+        if (!gEnableReprint) {
+          forceFinishNow = true;     // reprint disabled in config: one press to finish
+        } else if (rollbackEnabled) {
           rollbackEnabled = false;   // first press: disable rollback
         } else {
           forceFinishNow = true;     // second press: show full text and exit
@@ -657,7 +690,7 @@ void showGlitchEffectUTF8(const char* text) {
       if (j <= i) {
         const int dist = i - j;
         if (dist < 5) {
-          int wrongProb = (dist < 3) ? 25 : 12;
+          int wrongProb = (dist < 3) ? gWrongProb3 : gWrongProb5;
           bool isUtf8 = chars[j].length() > 1;
           if (i < charCount) {
             tryActivateWrong(j, wrongProb);
@@ -695,7 +728,9 @@ void showGlitchEffectUTF8(const char* text) {
     keycode = get_Keycode();
     if (keycode == 2 && !keyLatch) {
       keyLatch = true;
-      if (rollbackEnabled) {
+      if (!gEnableReprint) {
+        forceFinishNow = true;
+      } else if (rollbackEnabled) {
         rollbackEnabled = false;
       } else {
         forceFinishNow = true;
