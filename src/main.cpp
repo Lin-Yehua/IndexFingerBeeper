@@ -690,7 +690,7 @@ void showGlitchEffectUTF8(const char* text) {
   };
 
   int i = 0;
-  while (i < charCount + 5) {
+  while (i < charCount) {
     int steps = 2 + random(3);  // 每个字符跳 2~4 次
 
     for (int s = 0; s < steps; s++) {
@@ -703,9 +703,6 @@ void showGlitchEffectUTF8(const char* text) {
             int wrongProb = (dist < 3) ? gWrongProb3 : gWrongProb5;
             bool isUtf8 = chars[j].length() > 1;
             if (i < charCount) {
-              tryActivateWrong(j, wrongProb);
-            } else if (isUtf8) {
-              // tail flush phase: only UTF-8 perturbation
               tryActivateWrong(j, wrongProb);
             }
             if (isUtf8 && !engFlickerActive[j] && random(100) < 15) {
@@ -764,9 +761,6 @@ void showGlitchEffectUTF8(const char* text) {
           int wrongProb = (dist < 3) ? gWrongProb3 : gWrongProb5;
           bool isUtf8 = chars[j].length() > 1;
           if (i < charCount) {
-            tryActivateWrong(j, wrongProb);
-          } else if (isUtf8) {
-            // tail flush phase: only UTF-8 perturbation
             tryActivateWrong(j, wrongProb);
           }
           if (isUtf8 && !engFlickerActive[j] && random(100) < 15) {
@@ -827,11 +821,6 @@ void showGlitchEffectUTF8(const char* text) {
     if (forceFinishNow) break;
 
     // If the last 3 decoded chars are all incorrect (wrong glyph/box/English), rollback by 5.
-    if (i >= charCount) {
-      i++;
-      continue;
-    }
-
     if (rollbackCooldown > 0) {
       rollbackCooldown--;
       i++;
