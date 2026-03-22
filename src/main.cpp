@@ -517,7 +517,9 @@ void showGlitchEffectUTF8(const char* text) {
   String chars[32];
   int charCount = 0;
   int keycode = 255;
-  bool EXIT = false;
+  bool rollbackEnabled = true;
+  bool forceFinishNow = false;
+  bool keyLatch = false;
   // UTF-8 分割
   for (int i = 0; text[i] != '\0' && charCount < 32;) {
     uint8_t c = (uint8_t)text[i];
@@ -634,20 +636,20 @@ void showGlitchEffectUTF8(const char* text) {
       delay(10);
       Key_loop(); // 处理按键，保持系统响应
       keycode = get_Keycode();
-      if (keycode == 2)
-      {
-        EXIT = true;
+      if (keycode == 2 && !keyLatch) {
+        keyLatch = true;
+        if (rollbackEnabled) {
+          rollbackEnabled = false;   // first press: disable rollback
+        } else {
+          forceFinishNow = true;     // second press: show full text and exit
+        }
       }
-      if (EXIT)
-      {
-        Text.fillRect(0, 60, tft.width(), 20, TFT_BLACK);
-        Text.pushImage(160 - 60, 0, 120, 120, (uint16_t*)Index_B);
-        Text.drawString(display, 160, 70);
-        Text.pushSprite(0, 150, 0, 60, 320, 20);
-        return;
+      if (keycode != 2) {
+        keyLatch = false;
       }
-      
+      if (forceFinishNow) break;
     }
+    if (forceFinishNow) break;
 
     // 固定当前字符后的正式显示
     String display = "";
@@ -689,6 +691,20 @@ void showGlitchEffectUTF8(const char* text) {
     Text.drawString(display, 160, 70);
     Text.pushSprite(0, 150, 0, 60, 320, 20);
     delay(20);
+    Key_loop();
+    keycode = get_Keycode();
+    if (keycode == 2 && !keyLatch) {
+      keyLatch = true;
+      if (rollbackEnabled) {
+        rollbackEnabled = false;
+      } else {
+        forceFinishNow = true;
+      }
+    }
+    if (keycode != 2) {
+      keyLatch = false;
+    }
+    if (forceFinishNow) break;
 
     // If the last decoded 5 chars are all wrong at once, rollback decode progress by 5.
     if (i >= charCount) {
@@ -702,7 +718,7 @@ void showGlitchEffectUTF8(const char* text) {
       continue;
     }
 
-    if (i >= 4) {
+    if (rollbackEnabled && i >= 4) {
       bool allWrong = true;
       for (int j = i - 4; j <= i; ++j) {
         if (j < 0 || j >= charCount || !wrongActive[j]) {
