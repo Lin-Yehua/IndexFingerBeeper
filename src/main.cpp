@@ -1,179 +1,493 @@
-#include <Arduino.h>
+﻿#include <Arduino.h>
 #include <TFT_eSPI.h>
 #include <FS.h>
 #include <LittleFS.h>
-#include <Logo_MOON_B.h>
+#include <FFat.h>
+#include <USB.h>
+#include <USBMSC.h>
+#include <vector>
+
+extern "C" {
+#include "wear_levelling.h"
+#include "esp_partition.h"
+}
+
+#include <Logo_Moon_B.h>
 #include <Index_B.h>
 #include "esp_system.h"
 #include "WavMixerI2S.h"
 #include "CsvTextReader.h"
 #include <Key_Drv.h>
-TFT_eSPI tft = TFT_eSPI(); // Invoke library, pins defined in User_Setup.h
+
+static constexpr const char *kFatPartitionLabel = "fatfs";
+static constexpr const char *kFatMountPoint = "/fat";
+static constexpr const char *kLittleFsPartitionLabel = "littlefs";
+
+TFT_eSPI tft = TFT_eSPI();
 TFT_eSprite Text = TFT_eSprite(&tft);
-const char* message = NULL;
+TFT_eSprite spriteBoot = TFT_eSprite(&tft);
 CsvTextReader csv;
 WavMixerI2S mixer;
-uint8_t Sound_count = 0;
-void generateUniqueRandomNumbers(uint8_t low, uint8_t high, uint8_t count, uint8_t* result, bool enable);
-void showGlitchEffectUTF8(const char* text);
-// 乱码池（基础拉丁 + 方块，选几个常用的符号即可）
-const char* junkChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01289!@#$%^&*()[]{}<>?/|\\~`+-=_";
-const int interval = 50; // ms
-void task_LogoFadeInAndMove(void *pvParameters);
 
-void setup() {
-  Serial.begin(115200);
+const char *message = nullptr;
+const char *junkChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01289!@#$%^&*()[]{}<>?/|\\~`+-=_";
+
+USBMSC msc;
+wl_handle_t wlHandle = WL_INVALID_HANDLE;
+const esp_partition_t *fatPart = nullptr;
+size_t flashBytes = 0;
+uint32_t sectorCount = 0;
+uint32_t mscBlockSize = 512;
+
+bool fatMounted = false;
+bool usbModeActive = false;
+volatile bool usbHostActive = false;
+bool usbHostActivePrev = false;
+bool usbDisconnectedLogged = false;
+
+bool appInitialized = false;
+bool displayBootstrapped = false;
+uint8_t Sound_count = 0;
+uint8_t csvCount = 0;
+float gInsertGain = 0.2f;
+float gBgGain = 0.2f;
+
+void showGlitchEffectUTF8(const char *text);
+void task_LogoFadeInAndMove(void *pvParameters);
+void ensureDisplayReady();
+void showUsbModeScreen();
+void applyAudioGainsFromSettingIni();
+
+void ensureDisplayReady() {
+  if (displayBootstrapped) return;
   tft.init();
   tft.setRotation(1);
   tft.fillScreen(TFT_BLACK);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);  
-  delay(500);
+  displayBootstrapped = true;
+}
+
+void showUsbModeScreen() {
+  ensureDisplayReady();
   
-  ledcSetup(0,40000,8);
-  ledcAttachPin(14,0);
-  ledcWrite(0,0);
-  pinMode(42,OUTPUT);
+  spriteBoot.createSprite(320,120);
+  tft.fillScreen(TFT_BLACK);
+  spriteBoot.setTextWrap(false, false);
+  spriteBoot.setTextColor(0xff36, TFT_BLACK);
+  spriteBoot.setTextSize(2);
+  delay(300);
+  ledcWrite(0,255);
+  //spriteBoot.pushImage(160-60, 0-60, 120, 120, (uint16_t*)Index_B);
+  const char *line1 = "USB MODE";
+  const char *line2 = "Mass Storage Connected";
+  const char *line3 = "Edit files on your PC...";
+
+  auto typeLine = [&](int x, int y, const char *line, int stepDelayMs) {
+    String buf;
+    for (int i = 0; line[i] != '\0'; ++i) {
+      buf += line[i];
+      //spriteBoot.pushImage(160-60, 0, 120, 120, (uint16_t*)Index_B);
+      //spriteBoot.fillRect(x, y, 320 - x, 20, TFT_WHITE);
+      spriteBoot.setCursor(x, y);
+      spriteBoot.print(buf);
+      spriteBoot.pushSprite(0, 100);
+      delay(stepDelayMs);
+    }
+
+  };
+
+  typeLine(18, 20, line1, 35);
+  typeLine(18, 60, line2, 22);
+  typeLine(18, 100, line3, 18);
+}
+
+bool wlWriteRmw(size_t addr, const uint8_t *src, size_t len) {
+  if (wlHandle == WL_INVALID_HANDLE) return false;
+
+  const size_t wlSector = wl_sector_size(wlHandle);
+  if (wlSector == 0) return false;
+
+  std::vector<uint8_t> cache(wlSector);
+  if (cache.empty()) return false;
+
+  while (len > 0) {
+    const size_t base = (addr / wlSector) * wlSector;
+    const size_t inSector = addr - base;
+    size_t chunk = wlSector - inSector;
+    if (chunk > len) chunk = len;
+
+    if (wl_read(wlHandle, base, cache.data(), wlSector) != ESP_OK) return false;
+    memcpy(cache.data() + inSector, src, chunk);
+    if (wl_erase_range(wlHandle, base, wlSector) != ESP_OK) return false;
+    if (wl_write(wlHandle, base, cache.data(), wlSector) != ESP_OK) return false;
+
+    addr += chunk;
+    src += chunk;
+    len -= chunk;
+  }
+
+  return true;
+}
+
+int32_t onRead(uint32_t lba, uint32_t offset, void *buffer, uint32_t bufsize) {
+  if (wlHandle == WL_INVALID_HANDLE) return -1;
+  const size_t addr = static_cast<size_t>(lba) * mscBlockSize + offset;
+  if (wl_read(wlHandle, addr, buffer, bufsize) != ESP_OK) return -1;
+  return static_cast<int32_t>(bufsize);
+}
+
+int32_t onWrite(uint32_t lba, uint32_t offset, uint8_t *buffer, uint32_t bufsize) {
+  if (wlHandle == WL_INVALID_HANDLE) return -1;
+  const size_t addr = static_cast<size_t>(lba) * mscBlockSize + offset;
+  if (!wlWriteRmw(addr, buffer, bufsize)) return -1;
+  return static_cast<int32_t>(bufsize);
+}
+
+bool onStartStop(uint8_t power_condition, bool start, bool load_eject) {
+  (void)power_condition;
+  Serial.printf("[MSC] start=%d eject=%d\n", start, load_eject);
+  return true;
+}
+
+void onUsbEvent(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data) {
+  (void)arg;
+  (void)event_data;
+  if (event_base != ARDUINO_USB_EVENTS) return;
+
+  switch (event_id) {
+    case ARDUINO_USB_RESUME_EVENT:
+      usbHostActive = true;
+      Serial.println("[USB] host active");
+      break;
+    case ARDUINO_USB_SUSPEND_EVENT:
+      Serial.println("[USB] host suspended");
+      break;
+    case ARDUINO_USB_STOPPED_EVENT:
+      usbHostActive = false;
+      if (!usbDisconnectedLogged) {
+        Serial.println("[USB] host disconnected (cable removed or host detached)");
+        usbDisconnectedLogged = true;
+      }
+      break;
+    case ARDUINO_USB_STARTED_EVENT:
+      usbHostActive = true;
+      usbDisconnectedLogged = false;
+      Serial.println("[USB] device started");
+      break;
+    default:
+      break;
+  }
+}
+
+bool mountFat() {
+  if (fatMounted) return true;
+  if (!FFat.begin(false, kFatMountPoint, 10, kFatPartitionLabel)) {
+    Serial.println("[APP] FFat.begin failed");
+    return false;
+  }
+  fatMounted = true;
+  Serial.println("[APP] FAT mounted");
+  return true;
+}
+
+void applyAudioGainsFromSettingIni() {
+  static constexpr float kDefaultInsertGain = 0.2f;
+  static constexpr float kDefaultBgGain = 0.2f;
+
+  gInsertGain = kDefaultInsertGain;
+  gBgGain = kDefaultBgGain;
+
+  fs::File f = FFat.open("/setting.ini", FILE_READ);
+  if (!f) {
+    Serial.println("[APP] /setting.ini not found, using default gains");
+    return;
+  }
+
+  bool gotInsert = false;
+  bool gotBg = false;
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (!line.length()) continue;
+    if (line.startsWith("#") || line.startsWith(";")) continue;
+
+    const int eq = line.indexOf('=');
+    if (eq <= 0) continue;
+
+    String key = line.substring(0, eq);
+    String value = line.substring(eq + 1);
+    key.trim();
+    value.trim();
+    value.replace(";", "");
+    key.toLowerCase();
+
+    const float parsed = value.toFloat();
+    if (key == "insertgain") {
+      gInsertGain = parsed;
+      gotInsert = true;
+    } else if (key == "backgroundgain") {
+      gBgGain = parsed;
+      gotBg = true;
+    }
+  }
+  f.close();
+
+  if (!gotInsert) Serial.printf("[APP] InsertGain missing, default=%.3f\n", gInsertGain);
+  if (!gotBg) Serial.printf("[APP] BackGroundGain missing, default=%.3f\n", gBgGain);
+  Serial.printf("[APP] gains: insert=%.3f bg=%.3f\n", gInsertGain, gBgGain);
+}
+
+void unmountFat() {
+  if (!fatMounted) return;
+  FFat.end();
+  fatMounted = false;
+  Serial.println("[APP] FAT unmounted");
+}
+
+bool openRawBackend() {
+  if (wlHandle != WL_INVALID_HANDLE) return true;
+
+  if (!fatPart) {
+    fatPart = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_FAT, kFatPartitionLabel);
+  }
+  if (!fatPart) {
+    Serial.printf("[MSC] FAT partition '%s' not found\n", kFatPartitionLabel);
+    return false;
+  }
+
+  if (wl_mount(fatPart, &wlHandle) != ESP_OK) {
+    Serial.println("[MSC] wl_mount failed");
+    wlHandle = WL_INVALID_HANDLE;
+    return false;
+  }
+
+  flashBytes = wl_size(wlHandle);
+  mscBlockSize = static_cast<uint32_t>(wl_sector_size(wlHandle));
+  if (mscBlockSize == 0 || mscBlockSize > 65535) {
+    Serial.printf("[MSC] invalid block size: %lu\n", static_cast<unsigned long>(mscBlockSize));
+    wl_unmount(wlHandle);
+    wlHandle = WL_INVALID_HANDLE;
+    return false;
+  }
+
+  sectorCount = static_cast<uint32_t>(flashBytes / mscBlockSize);
+  if (sectorCount == 0) {
+    Serial.println("[MSC] invalid sector count");
+    wl_unmount(wlHandle);
+    wlHandle = WL_INVALID_HANDLE;
+    return false;
+  }
+
+  Serial.printf("[MSC] backend ready: %lu sectors x %lu bytes\n",
+                static_cast<unsigned long>(sectorCount),
+                static_cast<unsigned long>(mscBlockSize));
+  return true;
+}
+
+void closeRawBackend() {
+  if (wlHandle == WL_INVALID_HANDLE) return;
+  wl_unmount(wlHandle);
+  wlHandle = WL_INVALID_HANDLE;
+  Serial.println("[MSC] backend closed");
+}
+
+bool enterUsbMode() {
+  if (usbModeActive) return true;
+  showUsbModeScreen();
+  unmountFat();
+  if (!openRawBackend()) return false;
+  msc.mediaPresent(true);
+  usbModeActive = true;
+  Serial.println("[MSC] USB mode active");
+  return true;
+}
+
+bool enterAppMode() {
+  if (!usbModeActive && fatMounted) return true;
+  if (usbModeActive) {
+    msc.mediaPresent(false);
+    usbModeActive = false;
+    delay(200);
+  }
+  closeRawBackend();
+  return mountFat();
+}
+
+bool initProjectResources() {
+  if (appInitialized) return true;
+
+  ensureDisplayReady();
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  delay(500);
+
+  pinMode(42, OUTPUT);
   digitalWrite(42, HIGH);
 
   Key_init();
 
-  tft.setCursor(0, 0);
-  if (!LittleFS.begin()) {
-    Serial.println("Flash FS initialisation failed!");
-    while (1) yield(); // Stay here twiddling thumbs waiting
+  if (!LittleFS.begin(false, "/littlefs", 10, kLittleFsPartitionLabel)) {
+    Serial.println("[APP] LittleFS mount failed, trying format...");
+    if (!LittleFS.format()) {
+      Serial.println("[APP] LittleFS format failed");
+      return false;
+    }
+    if (!LittleFS.begin(false, "/littlefs", 10, kLittleFsPartitionLabel)) {
+      Serial.println("[APP] LittleFS init failed after format");
+      return false;
+    }
+    Serial.println("[APP] LittleFS formatted and mounted");
+    Serial.println("[APP] note: LittleFS was rebuilt, run uploadfs to restore font/audio files");
   }
-  bool font_missing = false;
-  if (LittleFS.exists("/simhei15.vlw")    == false) font_missing = true;
-  if (LittleFS.exists("/Oxta14.vlw")    == false) font_missing = true;
-   if (LittleFS.exists("/data.csv")    == false) font_missing = true;
-  if (font_missing)
-  {
-    Serial.println("\nFont missing in Flash FS, did you upload it?");
-    while(1) yield();
+
+  bool missing = false;
+  if (!LittleFS.exists("/simhei15.vlw")) missing = true;
+  if (!LittleFS.exists("/Oxta14.vlw")) missing = true;
+  if (missing) {
+    Serial.println("[APP] LittleFS font files missing");
+    Serial.println("[APP] run: pio run -t uploadfs -e 4d_systems_esp32s3_gen4_r8n16");
+    return false;
   }
-  delay(1000);
-  WavMixerI2S::I2SPinConfig pins =
-	{
-		.bck = 40,
-		.ws = 39,
-		.dout = 41
-	};
 
-	if(!mixer.begin(pins))
-	{
-		Serial.println("Mixer init failed");
-		while(true);
-	}
-
+  WavMixerI2S::I2SPinConfig pins = {.bck = 40, .ws = 39, .dout = 41};
+  if (!mixer.begin(pins)) {
+    Serial.println("[APP] Mixer init failed");
+    return false;
+  }
   mixer.startOnCore(0);
-  Text.createSprite(320,100);
-  
+
+  if (!mountFat()) {
+    Serial.println("[APP] mount FAT failed");
+    return false;
+  }
+  applyAudioGainsFromSettingIni();
+
+  if (!csv.load(FFat, "/data.csv")) {
+    Serial.println("[APP] /data.csv load failed from FAT");
+    return false;
+  }
+
+  Text.createSprite(320, 100);
   Text.loadFont("Oxta14",LittleFS);
   Text.setTextDatum(MC_DATUM);
   Text.setTextColor(0xff36,0x0000);
-  Text.drawString("PROJECT MOON",160,60);
+  Text.drawString("PROJECT MOON",185,60);
   Text.setTextWrap(true,true);
-  xTaskCreate(
-        task_LogoFadeInAndMove,      
-        "LogoFadeMove",              
-        20480,                        
-        NULL,                        
-        1,                           
-        NULL                         
-    );
-  csv.load(LittleFS, "/data.csv");
+
+  xTaskCreate(task_LogoFadeInAndMove, "LogoFadeMove", 20480, NULL, 1, NULL);
+
   message = csv.getTextById(1);
   Text.unloadFont();
-  Text.loadFont("simhei15",LittleFS);
+  Text.loadFont("simhei15", LittleFS);
   Text.setTextColor(0x07ff, TFT_BLACK);
+
   delay(8000);
-  mixer.setInsertGain(1.0f);
-  mixer.setBgGain(1.0f);
+  mixer.setInsertGain(gInsertGain);
+  mixer.setBgGain(gBgGain);
   mixer.playBG("/BG.wav");
   mixer.playInsert("/BGstart.wav");
-  showGlitchEffectUTF8(message);
+  delay(500);
+  showGlitchEffectUTF8(message ? message : "CSV message missing");
   mixer.stopBG();
   mixer.playInsert("/BGend.wav");
-  
-}  
+
+  appInitialized = true;
+  Serial.println("[APP] project initialized");
+  return true;
+}
+
+void processAppLoop() {
+  Key_loop();
+  uint8_t key = get_Keycode();
+
+  if (key == 2) {
+    csvCount++;
+    if (csvCount >= 20) csvCount = 0;
+
+    message = csv.getTextById(csvCount);
+    if (!message) message = "CSV id not found";
+
+    mixer.playBG("/BG.wav");
+    mixer.playInsert("/BGstart.wav");
+    delay(500);
+    showGlitchEffectUTF8(message);
+    mixer.stopBG();
+    mixer.playInsert("/BGend.wav");
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(300);
+  Serial.println("\n[BOOT] project + USB MSC + FAT CSV");
+  ledcSetup(0, 40000, 8);
+  ledcAttachPin(14, 0);
+  ledcWrite(0, 0);
+  msc.vendorID("ESP32");
+  msc.productID("S3_FAT_MSC");
+  msc.productRevision("1.0");
+  msc.onRead(onRead);
+  msc.onWrite(onWrite);
+  msc.onStartStop(onStartStop);
+  msc.mediaPresent(false);
+
+  if (!openRawBackend()) {
+    Serial.println("[BOOT] raw FAT backend failed");
+    while (true) delay(1000);
+  }
+  if (!msc.begin(sectorCount, static_cast<uint16_t>(mscBlockSize))) {
+    Serial.println("[BOOT] MSC begin failed");
+    while (true) delay(1000);
+  }
+  closeRawBackend();
+
+  USB.onEvent(onUsbEvent);
+  USB.begin();
+  Serial.println("[BOOT] USB initialized");
+
+  const uint32_t t0 = millis();
+  while (millis() - t0 < 1500) {
+    if (usbHostActive) break;
+    delay(10);
+  }
+
+  if (usbHostActive) {
+    Serial.println("[BOOT] USB detected -> USB mode");
+    enterUsbMode();
+  } else {
+    Serial.println("[BOOT] USB not detected -> APP mode");
+    if (enterAppMode()) {
+      initProjectResources();
+    }
+  }
+  usbHostActivePrev = usbHostActive;
+}
 
 void loop() {
-  uint8_t key = 255;
-	uint8_t *word;
-	uint8_t count = 0;
-	while (1)
-	{
-		Key_loop();
-		key = get_Keycode();
-		if(key == 2)
-		{
-			count++;
-			if(count >= 20)
-			{
-				count = 0;
-				
-			}
-			
-			message = csv.getTextById(count);
-			mixer.playBG("/BG.wav");
-			mixer.playInsert("/BGstart.wav");
-			showGlitchEffectUTF8(message);
-			mixer.stopBG();
-			mixer.playInsert("/BGend.wav");
-		}
-		delay(20);
-	}
+  if (usbHostActive != usbHostActivePrev) {
+    if (usbHostActive) {
+      Serial.println("[AUTO] USB plugged -> USB mode");
+      enterUsbMode();
+    } else {
+      Serial.println("[AUTO] USB unplugged -> restart app");
+      Serial.println("[LOG] USB disconnected, restarting for clean APP state");
+      delay(120);
+      esp_restart();
+    }
+    usbHostActivePrev = usbHostActive;
+  }
+
+  if (!usbModeActive && appInitialized) {
+    processAppLoop();
+  }
+
+  delay(20);
 }
-
-void generateUniqueRandomNumbers(uint8_t low, uint8_t high, uint8_t count, uint8_t* result, bool enable) 
-{
-    if (!result) return;
-    if (low > high) return;
-    if (count <= 0) return;
-
-    const uint8_t range = high - low + 1;
-
-    // 允许重复：直接生成
-    if (enable) {
-        for (int i = 0; i < count; i++) {
-            result[i] = random(low, high + 1);  // [low, high]
-        }
-        return;
-    }
-
-    // 不允许重复：count 超过范围就裁剪，防止死循环/WDT
-    uint8_t need = count;
-    if (need > range) need = range;
-
-    // 你当前项目 low=10 high=21 => range=12
-    // 为了稳，给一个上限；如果未来要更大范围，这里要加大或改成洗牌算法
-    if (range > 64) {
-        // 范围太大，这个“固定 used 数组”策略不适合，直接返回（不崩、不死循环）
-        return;
-    }
-
-    bool used[64] = { false };
-
-    uint8_t generated = 0;
-    while (generated < need) {
-        uint8_t r = random(low, high + 1);
-        uint8_t idx = r - low;           // 0..range-1
-        if (!used[idx]) {
-            used[idx] = true;
-            result[generated++] = r;
-        }
-        // 这里不会死循环，因为 need <= range
-    }
-
-    // 如果你希望 result[count] 全部填满（但又不允许重复），可以在这里补默认值
-    // 目前按“生成 need 个”写入前 need 个元素。
-}
-
 
 void showGlitchEffectUTF8(const char* text) {
   String chars[32];
   int charCount = 0;
-
+  int keycode = 255;
+  bool EXIT = false;
   // UTF-8 分割
   for (int i = 0; text[i] != '\0' && charCount < 32;) {
     uint8_t c = (uint8_t)text[i];
@@ -213,8 +527,23 @@ void showGlitchEffectUTF8(const char* text) {
       Text.fillRect(0, 60, tft.width(), 20, TFT_BLACK);
       Text.pushImage(160 - 60, 0, 120, 120, (uint16_t*)Index_B);
       Text.drawString(display, 160, 70);
-      Text.pushSprite(0, 120, 0, 60, 320, 20);
+      Text.pushSprite(0, 150, 0, 60, 320, 20);
       delay(10);
+      Key_loop(); // 处理按键，保持系统响应
+      keycode = get_Keycode();
+      if (keycode == 2)
+      {
+        EXIT = true;
+      }
+      if (EXIT)
+      {
+        Text.fillRect(0, 60, tft.width(), 20, TFT_BLACK);
+        Text.pushImage(160 - 60, 0, 120, 120, (uint16_t*)Index_B);
+        Text.drawString(display, 160, 70);
+        Text.pushSprite(0, 150, 0, 60, 320, 20);
+        return;
+      }
+      
     }
 
     // 固定当前字符后的正式显示
@@ -244,47 +573,11 @@ void showGlitchEffectUTF8(const char* text) {
     Text.fillRect(0, 60, tft.width(), 20, TFT_BLACK);
     Text.pushImage(160 - 60, 0, 120, 120, (uint16_t*)Index_B);
     Text.drawString(display, 160, 70);
-    Text.pushSprite(0, 120, 0, 60, 320, 20);
+    Text.pushSprite(0, 150, 0, 60, 320, 20);
     delay(20);
   }
 }
-uint16_t fadeInFromBlack(uint16_t color_le, uint8_t nowStep, uint8_t Step)
-{
-    if (nowStep == 0) {
-        return 0x0000;                    // 全黑（字节序无关）
-    }
-    
-    if (nowStep >= Step) {
-        return color_le;                  // 直接返回原色（已是小端序）
-    }
 
-    // 先把小端序输入转换为大端序，方便提取通道
-    uint16_t color_be = (color_le << 8) | (color_le >> 8);
-
-    // 提取 RGB 通道（现在是大端序格式）
-    uint8_t r = (color_be >> 11) & 0x1F;
-    uint8_t g = (color_be >>  5) & 0x3F;
-    uint8_t b = (color_be      ) & 0x1F;
-
-    // 计算当前亮度比例
-    uint32_t progress = nowStep;          // 用 uint32_t 避免溢出
-
-    uint8_t r_new = (uint32_t)r * progress / Step;
-    uint8_t g_new = (uint32_t)g * progress / Step;
-    uint8_t b_new = (uint32_t)b * progress / Step;
-
-    // 组合成大端序
-    uint16_t faded_be = ((uint16_t)r_new << 11) |
-                        ((uint16_t)g_new <<  5) |
-                        (uint16_t)b_new;
-
-    // 转回小端序输出
-    uint16_t faded_le = (faded_be << 8) | (faded_be >> 8);
-
-    return faded_le;
-}
-
-//开机动画
 void task_LogoFadeInAndMove(void *pvParameters)
 {
     uint16_t LogoTemp[8100] = {0x0000};
@@ -292,7 +585,7 @@ void task_LogoFadeInAndMove(void *pvParameters)
     const uint16_t* pLogo =nullptr;
     pLogo = (uint16_t*)Logo_Moon_B;
     // 淡入階段
-    tft.pushImage(160-45, 120-45, 90, 90, (uint16_t*)Logo_Moon_B);
+    tft.pushImage(160-45, 150-45, 90, 90, (uint16_t*)Logo_Moon_B);
     for(uint8_t N = 0; N < 48; N++)
     {
         ledcWrite(0,N*5 );
@@ -318,8 +611,8 @@ void task_LogoFadeInAndMove(void *pvParameters)
         dx = (int)(eased * 85); // 最终目标 0 ~ 80
         d1 = (int)(eased * 160); 
         // 绘制图片
-        Text.pushSprite(160+40-dx,110,80,50,d1,20);
-        tft.pushImage(160-45-dx, 120-45, 90, 90, (uint16_t*)Logo_Moon_B);
+        Text.pushSprite(160+40-dx,145,100,50,d1,20);
+        tft.pushImage(160-45-dx, 150-45, 90, 90, (uint16_t*)Logo_Moon_B);
         delay(30);
     }
     delay(2000);
@@ -331,7 +624,7 @@ void task_LogoFadeInAndMove(void *pvParameters)
     tft.fillRect(0,50,320,140,0x0000);
     delay(50);
     ledcWrite(0,255);
-    tft.pushImage(160-60, 120-60, 120, 120, (uint16_t*)Index_B);
+    tft.pushImage(160-60, 150-60, 120, 120, (uint16_t*)Index_B);
 	//tft.fillScreen(TFT_WHITE);
     vTaskDelete(NULL);
 }

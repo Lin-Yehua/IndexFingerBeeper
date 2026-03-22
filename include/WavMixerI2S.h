@@ -2,7 +2,6 @@
 
 #include <Arduino.h>
 #include <FS.h>
-#include <LittleFS.h>
 #include "driver/i2s.h"
 
 class WavMixerI2S {
@@ -103,6 +102,8 @@ private:
     size_t _insertDataOffset;
     bool _insertActive;
     String _insertPath;
+    int16_t _insertLastSample;
+    bool _insertHasLastSample;
 
     TaskHandle_t _taskHandle;
     volatile bool _running;

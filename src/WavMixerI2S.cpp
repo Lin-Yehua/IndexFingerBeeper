@@ -1,4 +1,5 @@
 #include "WavMixerI2S.h"
+#include <FFat.h>
 #include <string.h>
 #include <stdlib.h>
 
@@ -10,6 +11,8 @@ WavMixerI2S::WavMixerI2S()
       _bgActive(false),
       _insertDataOffset(44),
       _insertActive(false),
+      _insertLastSample(0),
+      _insertHasLastSample(false),
       _taskHandle(nullptr),
       _running(false),
       _begun(false),
@@ -152,7 +155,7 @@ bool WavMixerI2S::playBG(const char* path) {
         _bgFile.close();
     }
 
-    File newFile;
+    fs::File newFile;
     size_t newOffset = 44;
     bool ok = openAndValidateWav(newFile, path, newOffset);
 
@@ -199,7 +202,7 @@ bool WavMixerI2S::playInsert(const char* path) {
         _insertFile.close();
     }
 
-    File newFile;
+    fs::File newFile;
     size_t newOffset = 44;
     bool ok = openAndValidateWav(newFile, path, newOffset);
 
@@ -208,6 +211,8 @@ bool WavMixerI2S::playInsert(const char* path) {
         _insertDataOffset = newOffset;
         _insertPath = path;
         _insertActive = true;
+        _insertLastSample = 0;
+        _insertHasLastSample = false;
         Serial.printf("[WavMixerI2S] Insert started: %s\n", path);
     } else {
         _insertActive = false;
@@ -228,6 +233,8 @@ void WavMixerI2S::stopInsert() {
     }
     _insertActive = false;
     _insertPath = "";
+    _insertLastSample = 0;
+    _insertHasLastSample = false;
 
     xSemaphoreGive(_fileMutex);
 }
@@ -313,14 +320,19 @@ void WavMixerI2S::audioTask() {
 }
 
 bool WavMixerI2S::initFS() {
-    if (!LittleFS.begin(true)) {
-        Serial.println("[WavMixerI2S] LittleFS mount failed");
+    // Audio files are loaded from FFat (/sound). Mounting is managed by app code.
+    if (!FFat.begin()) {
+        Serial.println("[WavMixerI2S] FFat not mounted yet");
         return false;
     }
     return true;
 }
 
 bool WavMixerI2S::initI2S() {
+    // In mode-switch scenarios the same I2S port may still be registered.
+    // Best-effort cleanup before re-install avoids ESP_ERR_INVALID_STATE (259).
+    i2s_driver_uninstall(I2S_NUM_0);
+
     i2s_config_t i2s_config = {};
     i2s_config.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
     i2s_config.sample_rate = _cfg.sampleRate;
@@ -342,6 +354,11 @@ bool WavMixerI2S::initI2S() {
 
     esp_err_t err = i2s_driver_install(I2S_NUM_0, &i2s_config, 0, nullptr);
     if (err != ESP_OK) {
+        // Retry once after forced cleanup in case another component left stale state.
+        i2s_driver_uninstall(I2S_NUM_0);
+        err = i2s_driver_install(I2S_NUM_0, &i2s_config, 0, nullptr);
+    }
+    if (err != ESP_OK) {
         Serial.printf("[WavMixerI2S] i2s_driver_install failed: %d\n", (int)err);
         return false;
     }
@@ -349,6 +366,7 @@ bool WavMixerI2S::initI2S() {
     err = i2s_set_pin(I2S_NUM_0, &pin_config);
     if (err != ESP_OK) {
         Serial.printf("[WavMixerI2S] i2s_set_pin failed: %d\n", (int)err);
+        i2s_driver_uninstall(I2S_NUM_0);
         return false;
     }
 
@@ -356,9 +374,16 @@ bool WavMixerI2S::initI2S() {
     return true;
 }
 
-bool WavMixerI2S::openAndValidateWav(File& file, const char* path, size_t& dataOffset) {
-    file = LittleFS.open(path, "r");
+bool WavMixerI2S::openAndValidateWav(fs::File& file, const char* path, size_t& dataOffset) {
+    String fullPath = "/sound";
+    if (path[0] != '/') {
+        fullPath += "/";
+    }
+    fullPath += path;
+
+    file = FFat.open(fullPath.c_str(), FILE_READ);
     if (!file) {
+        Serial.printf("[WavMixerI2S] open failed: %s\n", fullPath.c_str());
         return false;
     }
 
@@ -393,7 +418,7 @@ bool WavMixerI2S::openAndValidateWav(File& file, const char* path, size_t& dataO
     return true;
 }
 
-bool WavMixerI2S::readWavHeader(File& file, WavHeader& hdr) {
+bool WavMixerI2S::readWavHeader(fs::File& file, WavHeader& hdr) {
     if (!file || file.size() < sizeof(WavHeader)) {
         return false;
     }
@@ -414,7 +439,7 @@ bool WavMixerI2S::readWavHeader(File& file, WavHeader& hdr) {
     return true;
 }
 
-size_t WavMixerI2S::readSamplesLoop(File& file,
+size_t WavMixerI2S::readSamplesLoop(fs::File& file,
                                     int16_t* buffer,
                                     size_t samplesNeeded,
                                     size_t dataOffset) {
@@ -437,7 +462,7 @@ size_t WavMixerI2S::readSamplesLoop(File& file,
     return bytesRead / sizeof(int16_t);
 }
 
-size_t WavMixerI2S::readSamplesOneShot(File& file,
+size_t WavMixerI2S::readSamplesOneShot(fs::File& file,
                                        int16_t* buffer,
                                        size_t samplesNeeded,
                                        size_t dataOffset,
@@ -452,17 +477,48 @@ size_t WavMixerI2S::readSamplesOneShot(File& file,
         if (!file.available()) {
             memset(((uint8_t*)buffer) + bytesRead, 0, bytesNeeded - bytesRead);
             finished = true;
-            return samplesNeeded;
+            break;
         }
 
         size_t n = file.read(((uint8_t*)buffer) + bytesRead, bytesNeeded - bytesRead);
         if (n == 0) {
             memset(((uint8_t*)buffer) + bytesRead, 0, bytesNeeded - bytesRead);
             finished = true;
-            return samplesNeeded;
+            break;
         }
 
         bytesRead += n;
+    }
+
+    // Track last valid insert sample so EOF-on-boundary can still release smoothly.
+    if (bytesRead >= sizeof(int16_t)) {
+        size_t validSamples = bytesRead / sizeof(int16_t);
+        _insertLastSample = buffer[validSamples - 1];
+        _insertHasLastSample = true;
+    }
+
+    // Prevent click/pop at insert tail by smoothing the final non-zero samples.
+    if (finished && bytesRead > 0) {
+        size_t validSamples = bytesRead / sizeof(int16_t);
+        size_t fadeSamples = validSamples < 64 ? validSamples : 64;
+        size_t fadeStart = validSamples > fadeSamples ? (validSamples - fadeSamples) : 0;
+        for (size_t i = fadeStart; i < validSamples; ++i) {
+            int32_t s = buffer[i];
+            size_t pos = i - fadeStart;
+            int32_t gainQ15 = (int32_t)((fadeSamples - pos) * 32767 / fadeSamples);
+            buffer[i] = (int16_t)((s * gainQ15) / 32767);
+        }
+    }
+
+    // EOF exactly at chunk boundary: synthesize a tiny release ramp instead of hard zero.
+    if (finished && bytesRead == 0 && _insertHasLastSample) {
+        size_t fadeSamples = samplesNeeded < 64 ? samplesNeeded : 64;
+        for (size_t i = 0; i < fadeSamples; ++i) {
+            int32_t gainQ15 = (int32_t)((fadeSamples - i) * 32767 / fadeSamples);
+            buffer[i] = (int16_t)(((int32_t)_insertLastSample * gainQ15) / 32767);
+        }
+        _insertHasLastSample = false;
+        return samplesNeeded;
     }
 
     return bytesRead / sizeof(int16_t);
