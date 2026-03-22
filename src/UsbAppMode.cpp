@@ -369,8 +369,17 @@ bool initProjectResources() {
 }
 
 void processAppLoop() {
+  int csvTotal = csv.size();
+  if (csvTotal > kCsvArrayCapacity) {
+    csvTotal = kCsvArrayCapacity;
+  }
+  if (csvTotal <= 0) {
+    return;
+  }
+
   if (RUNSTATE == 0) {
-    generateUniqueRandomNumbers(1, csv.size(), csv.size(), csvArray);
+    generateUniqueRandomNumbers(1, csv.size(), csvTotal, csvArray);
+    csvCount = 0;
     RUNSTATE = 1;
   }
   if (RUNSTATE == 1) {
@@ -378,20 +387,23 @@ void processAppLoop() {
     uint8_t key = get_Keycode();
 
     if (key == 2 || firstFlag) {
-      csvCount++;
       if (firstFlag) {
         firstFlag = false;
       }
-      if (csvCount > csv.size()) {
+      if (csvCount >= csvTotal) {
         csvCount = 0;
         RUNSTATE = 0;
         return;
       }
 
-      message = csv.getTextById(csvArray[csvCount]);
+      const int currentCsvId = csvArray[csvCount];
+      csvCount++;
+
+      message = csv.getTextById(currentCsvId);
       if (!message) {
-        String messageFallback = "CSV id not found: ";
-        messageFallback += String(csvArray[csvCount]);
+        static String messageFallback;
+        messageFallback = "CSV id not found: ";
+        messageFallback += String(currentCsvId);
         message = messageFallback.c_str();
       }
       mixer.playBG("/BG.wav");
@@ -404,7 +416,7 @@ void processAppLoop() {
       mixer.stopBG();
       mixer.playInsert("/BGend.wav");
       
-      tft.drawNumber(csvArray[csvCount],20,100);
+      tft.drawNumber(currentCsvId,20,100);
       tft.drawNumber(csvCount,20,120);
     }
   }

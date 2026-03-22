@@ -403,7 +403,7 @@ void showGlitchEffectUTF8(const char *text) {
         }
       }
       drawWrapped(shown, i);
-      delay(10);
+      delay(1);
       Key_loop();
       keycode = get_Keycode();
       if (keycode == 2 && !keyLatch) {
@@ -470,7 +470,7 @@ void showGlitchEffectUTF8(const char *text) {
     }
 
     drawWrapped(shown, i);
-    delay(20);
+    delay(2);
     Key_loop();
     keycode = get_Keycode();
     if (keycode == 2 && !keyLatch) {
@@ -573,20 +573,27 @@ void generateUniqueRandomNumbers(int low, int high, int count, int *result) {
   const int range = high - low + 1;
   int need = count;
   if (need > range) need = range;
+  if (need <= 0) return;
 
-  if (range > 64) {
-    return;
+  // Reservoir sampling:
+  // Keep `need` unique ids selected uniformly from [low, high]
+  // without allocating O(range) temporary memory.
+  for (int i = 0; i < need; ++i) {
+    result[i] = low + i;
   }
 
-  bool used[64] = {false};
-
-  int generated = 0;
-  while (generated < need) {
-    int r = random(low, high + 1);
-    int idx = r - low;
-    if (!used[idx]) {
-      used[idx] = true;
-      result[generated++] = r;
+  for (int seen = need; seen < range; ++seen) {
+    int j = random(0, seen + 1);  // [0, seen]
+    if (j < need) {
+      result[j] = low + seen;
     }
+  }
+
+  // Shuffle selected ids to random playback order.
+  for (int i = need - 1; i > 0; --i) {
+    int j = random(0, i + 1);  // [0, i]
+    int tmp = result[i];
+    result[i] = result[j];
+    result[j] = tmp;
   }
 }
