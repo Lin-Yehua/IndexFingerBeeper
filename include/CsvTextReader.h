@@ -20,6 +20,7 @@ public:
     bool load(fs::FS &fs, const char *path);
 
     int size();
+    int getMaxRows();
 
     const char* getTextByIndex(int index);
 

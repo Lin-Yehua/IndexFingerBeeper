@@ -49,14 +49,17 @@ bool appInitialized = false;
 bool displayBootstrapped = false;
 uint8_t Sound_count = 0;
 uint8_t csvCount = 0;
+int csvArray[8192] = {0};
 float gInsertGain = 0.2f;
 float gBgGain = 0.2f;
-
+bool firstFlag = false;
+uint8_t RUNSTATE = 0;
 void showGlitchEffectUTF8(const char *text);
 void task_LogoFadeInAndMove(void *pvParameters);
 void ensureDisplayReady();
 void showUsbModeScreen();
 void applyAudioGainsFromSettingIni();
+void generateUniqueRandomNumbers(int low, int high, int count, int* result);
 
 void ensureDisplayReady() {
   if (displayBootstrapped) return;
@@ -381,38 +384,65 @@ bool initProjectResources() {
   Text.setTextColor(0x07ff, TFT_BLACK);
 
   delay(8000);
+  
   mixer.setInsertGain(gInsertGain);
   mixer.setBgGain(gBgGain);
+  /*
   mixer.playBG("/BG.wav");
   mixer.playInsert("/BGstart.wav");
-  delay(500);
   showGlitchEffectUTF8(message ? message : "CSV message missing");
   mixer.stopBG();
   mixer.playInsert("/BGend.wav");
-
+  */
+  firstFlag = true;
   appInitialized = true;
   Serial.println("[APP] project initialized");
   return true;
 }
 
 void processAppLoop() {
-  Key_loop();
-  uint8_t key = get_Keycode();
-
-  if (key == 2) {
-    csvCount++;
-    if (csvCount >= 20) csvCount = 0;
-
-    message = csv.getTextById(csvCount);
-    if (!message) message = "CSV id not found";
-
-    mixer.playBG("/BG.wav");
-    mixer.playInsert("/BGstart.wav");
-    delay(500);
-    showGlitchEffectUTF8(message);
-    mixer.stopBG();
-    mixer.playInsert("/BGend.wav");
+  if(RUNSTATE == 0)
+  {
+    generateUniqueRandomNumbers(1,csv.size(),csv.size(),csvArray);
+    RUNSTATE = 1;
   }
+  if(RUNSTATE == 1)  
+  {
+    Key_loop();
+    uint8_t key = get_Keycode();
+
+    if (key == 2 || firstFlag) {
+      csvCount++;
+      if(firstFlag)
+      {
+        firstFlag = false;
+      }
+      if (csvCount > csv.size())
+      {
+        csvCount = 0;
+        RUNSTATE = 0;
+        return;
+      }
+      
+      message = csv.getTextById(csvArray[csvCount]);
+      if (!message) 
+      {
+        String messageFallback = "CSV id not found: ";
+        messageFallback += String(csvArray[csvCount]);
+        message = messageFallback.c_str();
+      }
+      mixer.playBG("/BG.wav");
+      mixer.playInsert("/BGstart.wav");
+      showGlitchEffectUTF8(message);
+      mixer.stopBG();
+      mixer.playInsert("/BGend.wav");
+      //tft.fillRect(30,150,30,30,0x0000);
+      //tft.drawNumber(csvCount,30,160);
+      //tft.drawNumber(csvArray[csvCount],30,180);
+    
+    }
+  }
+  
 }
 
 void setup() {
@@ -627,4 +657,35 @@ void task_LogoFadeInAndMove(void *pvParameters)
     tft.pushImage(160-60, 150-60, 120, 120, (uint16_t*)Index_B);
 	//tft.fillScreen(TFT_WHITE);
     vTaskDelete(NULL);
+}
+
+void generateUniqueRandomNumbers(int low, int high, int count, int* result) 
+{
+    if (!result) return;
+    if (low > high) return;
+    if (count <= 0) return;
+
+    const int range = high - low + 1;
+    int need = count;
+    if (need > range) need = range;
+
+
+    if (range > 64) {
+  
+        return;
+    }
+
+    bool used[64] = { false };
+
+    int generated = 0;
+    while (generated < need) {
+        int r = random(low, high + 1);
+        int idx = r - low;          
+        if (!used[idx]) {
+            used[idx] = true;
+            result[generated++] = r;
+        }
+
+    }
+
 }

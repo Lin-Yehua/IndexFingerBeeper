@@ -74,6 +74,10 @@ int CsvTextReader::size() {
     return rowCount;
 }
 
+int CsvTextReader::getMaxRows() {
+    return rowCount;
+}
+
 const char* CsvTextReader::getTextByIndex(int index) {
 
     if (index < 0 || index >= rowCount) {
