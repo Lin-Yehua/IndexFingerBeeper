@@ -537,7 +537,66 @@ void showGlitchEffectUTF8(const char* text) {
     charCount++;
   }
 
-  for (int i = 0; i < charCount; i++) {
+  auto mutateCharNearBoundary = [&](const String& src) -> String {
+    int n = src.length();
+    if (n <= 0) return src;
+
+    uint8_t b[4] = {0, 0, 0, 0};
+    for (int k = 0; k < n && k < 4; ++k) b[k] = (uint8_t)src[k];
+
+    // ASCII: perturb code point directly.
+    if (n == 1 && (b[0] & 0x80) == 0) {
+      int delta = random(1, 16);
+      if (random(2) == 0) delta = -delta;
+      int v = (int)b[0] + delta;
+      while (v < 33) v += 94;
+      while (v > 126) v -= 94;
+      String out;
+      out += (char)v;
+      return out;
+    }
+
+    // UTF-8 multi-byte: perturb continuation bytes, keep valid UTF-8 framing.
+    for (int k = 1; k < n && k < 4; ++k) {
+      if ((b[k] & 0xC0) == 0x80) {
+        int delta = random(1, 16);
+        if (random(2) == 0) delta = -delta;
+        int v = (int)b[k] + delta;
+        if (v < 0x80) v = 0x80 + (0x80 - v);
+        if (v > 0xBF) v = 0xBF - (v - 0xBF);
+        if (v < 0x80) v = 0x80;
+        if (v > 0xBF) v = 0xBF;
+        b[k] = (uint8_t)v;
+      }
+    }
+
+    char outBuf[5] = {0};
+    for (int k = 0; k < n && k < 4; ++k) outBuf[k] = (char)b[k];
+    return String(outBuf);
+  };
+
+  bool wrongActive[32] = {false};
+  String wrongChars[32];
+  int rollbackCooldown = 0;
+
+  auto tryActivateWrong = [&](int j, int wrongProb) {
+    if (j < 0 || j >= charCount) return;
+    if (wrongActive[j]) return;
+    if (random(100) >= wrongProb) return;
+
+    String candidate = chars[j];
+    for (int t = 0; t < 6; ++t) {
+      candidate = mutateCharNearBoundary(chars[j]);
+      if (candidate != chars[j] && candidate != wrongChars[j]) break;
+    }
+    if (candidate != chars[j]) {
+      wrongChars[j] = candidate;
+      wrongActive[j] = true;
+    }
+  };
+
+  int i = 0;
+  while (i < charCount + 5) {
     int steps = 2 + random(3);  // 每个字符跳 2~4 次
 
     for (int s = 0; s < steps; s++) {
@@ -545,7 +604,21 @@ void showGlitchEffectUTF8(const char* text) {
 
       for (int j = 0; j < charCount; j++) {
         if (j < i) {
-          display += chars[j];   // 已固定的字符
+          int dist = i - j;
+          if (dist < 5) {
+            int wrongProb = (dist < 3) ? 25 : 12;
+            bool isUtf8 = chars[j].length() > 1;
+            if (i < charCount) {
+              tryActivateWrong(j, wrongProb);
+            } else if (isUtf8) {
+              // tail flush phase: only UTF-8 perturbation
+              tryActivateWrong(j, wrongProb);
+            }
+            display += wrongActive[j] ? wrongChars[j] : chars[j];
+          } else {
+            wrongActive[j] = false;  // left error zone
+            display += chars[j];
+          }
         } else if (j == i) {
           display += chars[j];   // 当前字符直接显示
         } else {
@@ -579,15 +652,26 @@ void showGlitchEffectUTF8(const char* text) {
     // 固定当前字符后的正式显示
     String display = "";
     for (int j = 0; j < charCount; j++) {
-      if (j <= i) 
-	  {
-		display += chars[j];
-	  }
-	  else
-	  {
-		char junk = junkChars[random(strlen(junkChars))];
+      if (j <= i) {
+        const int dist = i - j;
+        if (dist < 5) {
+          int wrongProb = (dist < 3) ? 25 : 12;
+          bool isUtf8 = chars[j].length() > 1;
+          if (i < charCount) {
+            tryActivateWrong(j, wrongProb);
+          } else if (isUtf8) {
+            // tail flush phase: only UTF-8 perturbation
+            tryActivateWrong(j, wrongProb);
+          }
+          display += wrongActive[j] ? wrongChars[j] : chars[j];
+        } else {
+          wrongActive[j] = false;  // left error zone
+          display += chars[j];
+        }
+      } else {
+        char junk = junkChars[random(strlen(junkChars))];
         display += junk; 
-	  }
+      }
     }
 
 	if(random(1,100) <= 30 + Sound_count)
@@ -605,7 +689,57 @@ void showGlitchEffectUTF8(const char* text) {
     Text.drawString(display, 160, 70);
     Text.pushSprite(0, 150, 0, 60, 320, 20);
     delay(20);
+
+    // If the last decoded 5 chars are all wrong at once, rollback decode progress by 5.
+    if (i >= charCount) {
+      i++;
+      continue;
+    }
+
+    if (rollbackCooldown > 0) {
+      rollbackCooldown--;
+      i++;
+      continue;
+    }
+
+    if (i >= 4) {
+      bool allWrong = true;
+      for (int j = i - 4; j <= i; ++j) {
+        if (j < 0 || j >= charCount || !wrongActive[j]) {
+          allWrong = false;
+          break;
+        }
+      }
+      if (allWrong) {
+        i -= 5;
+        if (i < 0) i = 0;
+        rollbackCooldown = 5;
+        // clear nearby latched wrong states to avoid immediate re-trigger loops
+        int clearL = i - 2;
+        if (clearL < 0) clearL = 0;
+        int clearR = i + 6;
+        if (clearR >= charCount) clearR = charCount - 1;
+        for (int j = clearL; j <= clearR; ++j) {
+          wrongActive[j] = false;
+          wrongChars[j] = "";
+        }
+      } else {
+        i++;
+      }
+    } else {
+      i++;
+    }
   }
+
+  // Ensure the very last frame is fully corrected.
+  String finalDisplay = "";
+  for (int j = 0; j < charCount; ++j) {
+    finalDisplay += chars[j];
+  }
+  Text.fillRect(0, 60, tft.width(), 20, TFT_BLACK);
+  Text.pushImage(160 - 60, 0, 120, 120, (uint16_t*)Index_B);
+  Text.drawString(finalDisplay, 160, 70);
+  Text.pushSprite(0, 150, 0, 60, 320, 20);
 }
 
 void task_LogoFadeInAndMove(void *pvParameters)
