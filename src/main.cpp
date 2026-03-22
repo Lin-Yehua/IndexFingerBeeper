@@ -102,9 +102,9 @@ void showUsbModeScreen() {
 
   };
 
-  typeLine(18, 20, line1, 35);
-  typeLine(18, 60, line2, 22);
-  typeLine(18, 100, line3, 18);
+  typeLine(18, 20, line1, 10);
+  typeLine(18, 60, line2, 10);
+  typeLine(18, 100, line3, 10);
 }
 
 bool wlWriteRmw(size_t addr, const uint8_t *src, size_t len) {
@@ -570,6 +570,38 @@ void showGlitchEffectUTF8(const char* text) {
     charCount++;
   }
 
+  // Wrap rule: line width unit = Han(1.0) + ASCII(0.5). Threshold = 15 units.
+  int lineStart[8] = {0};
+  int lineEnd[8] = {0};
+  bool lineFrozen[8] = {false};
+  String frozenLineText[8];
+  int lineCount = 0;
+  {
+    int start = 0;
+    float units = 0.0f;
+    for (int j = 0; j < charCount && lineCount < 8; ++j) {
+      float u = (chars[j].length() > 1) ? 1.0f : 0.5f;
+      if (j > start && units + u > 15.0f) {
+        lineStart[lineCount] = start;
+        lineEnd[lineCount] = j;
+        lineCount++;
+        start = j;
+        units = 0.0f;
+      }
+      units += u;
+    }
+    if (start < charCount && lineCount < 8) {
+      lineStart[lineCount] = start;
+      lineEnd[lineCount] = charCount;
+      lineCount++;
+    }
+    if (lineCount <= 0) {
+      lineStart[0] = 0;
+      lineEnd[0] = charCount;
+      lineCount = 1;
+    }
+  }
+
   auto mutateCharNearBoundary = [&](const String& src) -> String {
     (void)src;
     uint32_t cp = 0;
@@ -602,6 +634,45 @@ void showGlitchEffectUTF8(const char* text) {
   int rollbackCooldown = 0;
   const char *kEnChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
+  auto drawWrapped = [&](String shown[], int progressI) {
+    const int lineH = 18;
+    const int y0 = 58;
+    const int areaH = 80;
+    Text.fillRect(0, y0, tft.width(), areaH, TFT_BLACK);
+    Text.pushImage(160 - 60, 0, 120, 120, (uint16_t*)Index_B);
+
+    int leftAlignedX = 20;
+
+    for (int ln = 0; ln < lineCount; ++ln) {
+      if (!lineFrozen[ln] && progressI >= lineEnd[ln] - 1) {
+        String fix = "";
+        for (int j = lineStart[ln]; j < lineEnd[ln]; ++j) fix += chars[j];
+        frozenLineText[ln] = fix;
+        lineFrozen[ln] = true;
+      }
+
+      String lineText = "";
+      if (lineFrozen[ln]) {
+        lineText = frozenLineText[ln];
+      } else {
+        for (int j = lineStart[ln]; j < lineEnd[ln]; ++j) lineText += shown[j];
+      }
+
+      int y = 70 + ln * lineH;
+      if (ln == 0) {
+        int firstLineWidth = Text.textWidth(lineText);
+        leftAlignedX = 160 - firstLineWidth / 2;
+        if (leftAlignedX < 0) leftAlignedX = 0;
+        Text.setTextDatum(MC_DATUM);
+        Text.drawString(lineText, 160, y);
+      } else {
+        Text.setTextDatum(TL_DATUM);
+        Text.drawString(lineText, leftAlignedX, y - 8);
+      }
+    }
+    Text.pushSprite(0, 150, 0, y0, 320, areaH);
+  };
+
   auto tryActivateWrong = [&](int j, int wrongProb) {
     if (j < 0 || j >= charCount) return;
     if (wrongActive[j]) return;
@@ -623,7 +694,7 @@ void showGlitchEffectUTF8(const char* text) {
     int steps = 2 + random(3);  // 每个字符跳 2~4 次
 
     for (int s = 0; s < steps; s++) {
-      String display = "";
+      String shown[32];
 
       for (int j = 0; j < charCount; j++) {
         if (j < i) {
@@ -643,30 +714,26 @@ void showGlitchEffectUTF8(const char* text) {
               engFlickerChar[j] = kEnChars[random((int)strlen(kEnChars))];
             }
             if (engFlickerActive[j]) {
-              display += String(engFlickerChar[j]);
+              shown[j] = String(engFlickerChar[j]);
               if (engFlickerLeft[j] > 0) engFlickerLeft[j]--;
               if (engFlickerLeft[j] == 0) engFlickerActive[j] = false;
             } else {
-              display += wrongActive[j] ? wrongChars[j] : chars[j];
+              shown[j] = wrongActive[j] ? wrongChars[j] : chars[j];
             }
           } else {
             wrongActive[j] = false;  // left error zone
             engFlickerActive[j] = false;
             engFlickerLeft[j] = 0;
-            display += chars[j];
+            shown[j] = chars[j];
           }
         } else if (j == i) {
-          display += chars[j];   // 当前字符直接显示
+          shown[j] = chars[j];   // 当前字符直接显示
         } else {
           char junk = junkChars[random(strlen(junkChars))];
-          display += junk;       // 后面用 ASCII 乱码代替
+          shown[j] = String(junk);       // 后面用 ASCII 乱码代替
         }
       }
-
-      Text.fillRect(0, 60, tft.width(), 20, TFT_BLACK);
-      Text.pushImage(160 - 60, 0, 120, 120, (uint16_t*)Index_B);
-      Text.drawString(display, 160, 70);
-      Text.pushSprite(0, 150, 0, 60, 320, 20);
+      drawWrapped(shown, i);
       delay(10);
       Key_loop(); // 处理按键，保持系统响应
       keycode = get_Keycode();
@@ -688,7 +755,7 @@ void showGlitchEffectUTF8(const char* text) {
     if (forceFinishNow) break;
 
     // 固定当前字符后的正式显示
-    String display = "";
+    String shown[32];
     bool incorrectNow[32] = {false};
     for (int j = 0; j < charCount; j++) {
       if (j <= i) {
@@ -708,25 +775,25 @@ void showGlitchEffectUTF8(const char* text) {
             engFlickerChar[j] = kEnChars[random((int)strlen(kEnChars))];
           }
           if (engFlickerActive[j]) {
-            display += String(engFlickerChar[j]);
+            shown[j] = String(engFlickerChar[j]);
             incorrectNow[j] = true;
             if (engFlickerLeft[j] > 0) engFlickerLeft[j]--;
             if (engFlickerLeft[j] == 0) engFlickerActive[j] = false;
           } else if (wrongActive[j]) {
-            display += wrongChars[j];
+            shown[j] = wrongChars[j];
             incorrectNow[j] = true;
           } else {
-            display += chars[j];
+            shown[j] = chars[j];
           }
         } else {
           wrongActive[j] = false;  // left error zone
           engFlickerActive[j] = false;
           engFlickerLeft[j] = 0;
-          display += chars[j];
+          shown[j] = chars[j];
         }
       } else {
         char junk = junkChars[random(strlen(junkChars))];
-        display += junk; 
+        shown[j] = String(junk); 
       }
     }
 
@@ -740,10 +807,7 @@ void showGlitchEffectUTF8(const char* text) {
 		Sound_count += 5;
 	}
 	
-    Text.fillRect(0, 60, tft.width(), 20, TFT_BLACK);
-    Text.pushImage(160 - 60, 0, 120, 120, (uint16_t*)Index_B);
-    Text.drawString(display, 160, 70);
-    Text.pushSprite(0, 150, 0, 60, 320, 20);
+    drawWrapped(shown, i);
     delay(20);
     Key_loop();
     keycode = get_Keycode();
@@ -807,13 +871,9 @@ void showGlitchEffectUTF8(const char* text) {
 
   // Ensure the very last frame is fully corrected.
   String finalDisplay = "";
-  for (int j = 0; j < charCount; ++j) {
-    finalDisplay += chars[j];
-  }
-  Text.fillRect(0, 60, tft.width(), 20, TFT_BLACK);
-  Text.pushImage(160 - 60, 0, 120, 120, (uint16_t*)Index_B);
-  Text.drawString(finalDisplay, 160, 70);
-  Text.pushSprite(0, 150, 0, 60, 320, 20);
+  String shown[32];
+  for (int j = 0; j < charCount; ++j) shown[j] = chars[j];
+  drawWrapped(shown, charCount + 8);
 }
 
 void task_LogoFadeInAndMove(void *pvParameters)
