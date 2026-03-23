@@ -1,4 +1,4 @@
-#include <Arduino.h>
+﻿#include <Arduino.h>
 #include <TFT_eSPI.h>
 #include <math.h>
 #include <string.h>
@@ -23,7 +23,11 @@ void showGlitchEffectUTF8(const char *text) {
   static char engFlickerChar[kMaxChars];
   static String displayToken[kMaxChars];
   static String shown[kMaxChars];
+  //弃用
   static bool incorrectNow[kMaxChars];
+
+  uint8_t incorrectRange = 0b00000000;
+
   static int prevCurrentLineCount = -1;
   static int prevFrozenVisiblePrefix = -1;
   static int prevBaseY = -1;
@@ -70,6 +74,7 @@ void showGlitchEffectUTF8(const char *text) {
   int currentLineCount = 1;
   int currentLineStart[8] = {0};
   int currentLineEnd[8] = {0};
+
   auto charUnit = [&](int idx) -> float {
     return (chars[idx].length() > 1) ? 1.0f : 0.5f;
   };
@@ -132,7 +137,8 @@ void showGlitchEffectUTF8(const char *text) {
     engFlickerLeft[j] = 0;
     engFlickerChar[j] = 0;
   }
-  int rollbackCooldown = 0;
+
+  //随机英文闪烁的字符
   const char *kEnChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
   auto drawWrapped = [&](String shown[], int progressI) {
@@ -359,118 +365,149 @@ void showGlitchEffectUTF8(const char *text) {
     }
   };
 
-  int i = 0;
-  while (i < charCount) {
-    // i 是“破译前沿”索引。每次循环推进一个逻辑字符，
-    // 中间穿插若干帧小步动画（steps）来制造故障/抖动感。
-    int steps = 2 + random(3);
+  
+  /*
+  填充字符函数
+  构建当前帧字符序列：
+   - 光标右侧填充乱码
+   - 光标左侧做扰动，并可选统计 incorrectNow（用于下一帧回滚判定）
+   - 光标位置显示原字符
 
-    for (int s = 0; s < steps; s++) {
-      for (int j = 0; j < charCount; j++) {
-        if (j < i) {
-          int dist = i - j;
-          if (dist < 5) {
-            int wrongProb = (dist < 3) ? gWrongProb3 : gWrongProb5;
-            bool isUtf8 = chars[j].length() > 1;
-            if (i < charCount) {
-              tryActivateWrong(j, wrongProb);
-            }
-            if (isUtf8 && !engFlickerActive[j] && random(100) < 15) {
-              engFlickerActive[j] = true;
-              engFlickerLeft[j] = (uint8_t)random(1, 4);
-              engFlickerChar[j] = kEnChars[random((int)strlen(kEnChars))];
-            }
-            if (engFlickerActive[j]) {
-              shown[j] = String(engFlickerChar[j]);
-              if (engFlickerLeft[j] > 0) engFlickerLeft[j]--;
-              if (engFlickerLeft[j] == 0) engFlickerActive[j] = false;
-            } else {
-              shown[j] = wrongActive[j] ? wrongChars[j] : chars[j];
-            }
-          } else {
-            wrongActive[j] = false;
-            engFlickerActive[j] = false;
-            engFlickerLeft[j] = 0;
-            shown[j] = chars[j];
-          }
-        } else if (j == i) {
-          // 前沿字符：立即显示原文（增强“正在破译”的感受）
-          shown[j] = chars[j];
-        } else {
-          // 未来区域：乱码区
-          char junk = junkChars[random(strlen(junkChars))];
-          shown[j] = String(junk);
-        }
-      }
-      drawWrapped(shown, i);
-      delay(1);
-      Key_loop();
-      keycode = get_Keycode();
-      if (keycode == 2 && !keyLatch) {
-        keyLatch = true;
-        if (!gEnableReprint) {
-          forceFinishNow = true;
-        } else if (rollbackEnabled) {
-          rollbackEnabled = false;
-        } else {
-          forceFinishNow = true;
-        }
-      }
-      if (keycode != 2) {
-        keyLatch = false;
-      }
-      if (forceFinishNow) break;
+   参数:光标位置
+  */
+  auto buildFrame = [&](int cursorI, bool collectIncorrect) 
+  {
+    if (collectIncorrect) {
+      memset(incorrectNow, 0, sizeof(incorrectNow));
+      incorrectRange = 0;
     }
-    if (forceFinishNow) break;
+    //仅仅对5格内的扰动区做扫描
+    int posStart = cursorI - 6 > 0 ? cursorI - 6 : 0;
+    for (int j = posStart; j < charCount; ++j) 
+    {
+      bool isIncorrect = false;
 
-    // incorrectNow 记录本帧各字符是否“错误显示”，用于触发回退逻辑。
-    memset(incorrectNow, 0, sizeof(incorrectNow));
-    for (int j = 0; j < charCount; j++) {
-      if (j <= i) {
-        const int dist = i - j;
-        if (dist < 5) {
+      if (j < cursorI) {
+        const int dist = cursorI - j;       //计算距离
+        
+        if (dist <= 5)                       //距离小于5:扰动区
+        {
+          //设置错误概率
           int wrongProb = (dist < 3) ? gWrongProb3 : gWrongProb5;
+          //添加扰动
           bool isUtf8 = chars[j].length() > 1;
-          if (i < charCount) {
+          if (cursorI < charCount) 
+          {
             tryActivateWrong(j, wrongProb);
           }
-          if (isUtf8 && !engFlickerActive[j] && random(100) < 15) {
+          //判断是否需要替换英文
+          if (isUtf8 && !engFlickerActive[j] && random(100) < 15) 
+          {
             engFlickerActive[j] = true;
             engFlickerLeft[j] = (uint8_t)random(1, 4);
             engFlickerChar[j] = kEnChars[random((int)strlen(kEnChars))];
           }
-          if (engFlickerActive[j]) {
+          //如果当前需要替换英文,那就换英文,否则换回中文
+          if (engFlickerActive[j]) 
+          {
             shown[j] = String(engFlickerChar[j]);
-            incorrectNow[j] = true;
+            isIncorrect = true;
             if (engFlickerLeft[j] > 0) engFlickerLeft[j]--;
             if (engFlickerLeft[j] == 0) engFlickerActive[j] = false;
-          } else if (wrongActive[j]) {
+          } 
+          else if (wrongActive[j]) 
+          {
             shown[j] = wrongChars[j];
-            incorrectNow[j] = true;
-          } else {
+            isIncorrect = true;
+          } 
+          else 
+          {
             shown[j] = chars[j];
           }
-        } else {
+
+          if (collectIncorrect && dist <= 3) 
+          {
+            incorrectNow[j] = isIncorrect;
+            
+            //incorrectRange |= 0b00000001<<dist;
+          }
+
+        } 
+        else 
+        {
           wrongActive[j] = false;
           engFlickerActive[j] = false;
           engFlickerLeft[j] = 0;
           shown[j] = chars[j];
         }
-      } else {
+
+      } 
+      //当前光标处总是正确的
+      else if (j == cursorI) 
+      {
+        shown[j] = chars[j];
+      } 
+      //前面的部分填充乱码
+      else 
+      {
         char junk = junkChars[random(strlen(junkChars))];
         shown[j] = String(junk);
       }
-    }
 
-    if (random(1, 100) <= 30 + Sound_count) {
-      Sound_count = 0;
-      mixer.playInsert("/BB2.wav");
-    } else {
-      Sound_count += 5;
+      
     }
+  };
 
+  int i = 0;
+  bool rollbackPending = false;
+  while (i < charCount) {
+    bool didRollbackThisFrame = false;
+
+    // [生成字符序列]：一个跳动就是一帧
+    buildFrame(i, false);
+    // [带有回滚处理的绘制]
+    // 如果上一帧已标记回滚，本帧先执行回退，再重建并绘制。
+    if (rollbackEnabled && rollbackPending) {
+      rollbackPending = false;
+      didRollbackThisFrame = true;
+
+      i -= 5;
+      if (i < 0) i = 0;
+
+      int clearL = i - 2;
+      if (clearL < 0) clearL = 0;
+      int clearR = i + 6;
+      if (clearR >= charCount) clearR = charCount - 1;
+      for (int j = clearL; j <= clearR; ++j) {
+        wrongActive[j] = false;
+        wrongChars[j] = "";
+        engFlickerActive[j] = false;
+        engFlickerLeft[j] = 0;
+      }
+
+      // 回退后重算当前帧：右侧重新填充乱码，并清空本帧错误标志统计。
+      memset(incorrectNow, 0, sizeof(incorrectNow));
+      buildFrame(i, false);
+    }
     drawWrapped(shown, i);
-    delay(2);
+    delay(10);
+
+    // [检测回滚条件]
+    // 本帧执行过回滚则跳过检测，避免刚回退就再次触发。
+    if (!didRollbackThisFrame && rollbackEnabled && i >= 2) {
+      bool allWrong3 = true;
+      for (int j = i - 2; j <= i; ++j) {
+        if (j < 0 || j >= charCount || !incorrectNow[j]) {
+          allWrong3 = false;
+          break;
+        }
+      }
+      if (allWrong3) {
+        // 非阻塞：只打标志，在下一帧执行回滚
+        rollbackPending = true;
+      }
+    }
+    // [按键处理]
     Key_loop();
     keycode = get_Keycode();
     if (keycode == 2 && !keyLatch) {
@@ -488,44 +525,19 @@ void showGlitchEffectUTF8(const char *text) {
     }
     if (forceFinishNow) break;
 
-    // 回退冷却：避免连续触发回退造成抖动死循环。
-    if (rollbackCooldown > 0) {
-      rollbackCooldown--;
-      i++;
-      continue;
+    // [音效处理]
+    if (random(1, 100) <= 30 + Sound_count) {
+      Sound_count = 0;
+      mixer.playInsert("/BB2.wav");
+    } else {
+      Sound_count += 5;
     }
 
-    if (rollbackEnabled && i >= 2) {
-      bool allWrong3 = true;
-      for (int j = i - 2; j <= i; ++j) {
-        if (j < 0 || j >= charCount || !incorrectNow[j]) {
-          allWrong3 = false;
-          break;
-        }
-      }
-      // 最近 3 个字符都处于错误态 -> 回退 5 个字符，制造“解码失败重试”效果。
-      if (allWrong3) {
-        i -= 5;
-        if (i < 0) i = 0;
-        rollbackCooldown = 5;
-        int clearL = i - 2;
-        if (clearL < 0) clearL = 0;
-        int clearR = i + 6;
-        if (clearR >= charCount) clearR = charCount - 1;
-        for (int j = clearL; j <= clearR; ++j) {
-          wrongActive[j] = false;
-          wrongChars[j] = "";
-          engFlickerActive[j] = false;
-          engFlickerLeft[j] = 0;
-        }
-      } else {
-        i++;
-      }
-    } else {
+    // 正常推进；若已打回滚标志，则停在当前位置，下一帧执行回滚。
+    if (!didRollbackThisFrame && !rollbackPending) {
       i++;
     }
   }
-
   for (int j = 0; j < charCount; ++j) shown[j] = chars[j];
   drawWrapped(shown, charCount + 8);
 }
@@ -597,3 +609,4 @@ void generateUniqueRandomNumbers(int low, int high, int count, int *result) {
     result[j] = tmp;
   }
 }
+
