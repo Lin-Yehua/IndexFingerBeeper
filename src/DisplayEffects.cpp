@@ -140,6 +140,8 @@ void showGlitchEffectUTF8(const char *text) {
 
   //随机英文闪烁的字符
   const char *kEnChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+  
+  
   //冻结行数量
   int FreezentLineNum = 0;
   auto drawWrapped = [&](String shown[], int progressI) {
@@ -150,7 +152,9 @@ void showGlitchEffectUTF8(const char *text) {
     const int lineH = 18;
     const int lineShift = lineH/2;
     const int unitPerLine = 32;
-    
+    int FreezentLineNum_last = 0;
+    int gobleXmiddle = 160;
+    int gobleYmiddle = 160;
     //判断一个字符是不是英文并且返回宽度
     auto tokenUnit = [&](const String &s) -> uint16_t 
     {
@@ -165,8 +169,9 @@ void showGlitchEffectUTF8(const char *text) {
       if (allAscii) return 1 * s.length();
       return 2;
     };
+
     //计算将要显示的字符串的视觉长度
-    auto tokenLength = [&](const String show[]) -> uint16_t 
+    auto getShowLength = [&](const String show[]) -> uint16_t 
     {
       uint16_t Temp;
       for(uint16_t i = 0; i < charCount; i++)
@@ -175,16 +180,51 @@ void showGlitchEffectUTF8(const char *text) {
       }
       return Temp;
     };
-
     
+    //计算当前进度的冻结行数
+    auto getFreezentLineNum = [&](const String show[], int I) -> uint16_t 
+    {
+      uint16_t Temp;
+      for(uint16_t i = 0; i < I - 5; i++)
+      {
+        Temp += tokenUnit(show[i]);
+      }
+      return Temp / unitPerLine;
+    };
+
+    //计算列绘制起始坐标
+    auto getBaseXShift = [&](const String show[]) -> uint16_t 
+    {
+      uint16_t temp;
+      temp = getShowLength(show);
+      if (temp <unitPerLine)
+      {
+        return ((float)getShowLength(show) * 7.5f)/2;
+      }
+      
+      return ((float)unitPerLine * 7.5f)/2;
+      
+    };
+        
+    
+
     //计算行数量 = 字符串长度/每行字符串数量+1
-    uint16_t lineNow = tokenLength(shown) / unitPerLine + 1;
+    uint16_t lineNow = getShowLength(shown) / unitPerLine + 1;
     //计算行绘制起始坐标（用于整体更新）
-    uint16_t baseY = tft.height()/2 - (lineNow * kDisturbWidth);
+    uint16_t baseY = gobleYmiddle - (lineNow * kDisturbWidth);
+    //计算列绘制起始坐标（用于整体更新）
+    uint16_t baseX = gobleXmiddle- getBaseXShift(shown);
+    //计算精灵内的X起始截取坐标
+    uint16_t baseX_sprite = baseX;
+    //计算精灵内的Y起始截取坐标
+    uint16_t baseY_sprite = 
+    //获取当前冻结行
+    FreezentLineNum_last = FreezentLineNum;
+    FreezentLineNum = getFreezentLineNum(shown,progressI);
     //计算行绘制局部坐标（用于局部刷新）
     uint16_t shiftY = baseY + (FreezentLineNum + lineH);
 
-
+    Text.pushSprite(baseX,baseY,baseX)
 
 
 
