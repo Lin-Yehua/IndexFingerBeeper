@@ -140,22 +140,20 @@ void showGlitchEffectUTF8(const char *text) {
 
   //随机英文闪烁的字符
   const char *kEnChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-
+  //冻结行数量
+  int FreezentLineNum = 0;
   auto drawWrapped = [&](String shown[], int progressI) {
-    // 统一绘制参数：
-    // lineH 是文本逻辑行高；areaH 是本次从 Text 精灵中参与推送的区域高度。
-    const int lineH = 18;
-    const int y0 = 0;
-    const int areaH = 100;
-    const int areaW = 320;
     // 三段区模型（按 i 的推进方向）：
     // decoded(已破译区) | disturbed(扰动区) | junk(乱码区)
     // kDisturbWidth 决定扰动区宽度（字符数）。
     const int kDisturbWidth = 5;  // zones: decoded | disturbed | junk
-    // 行数变化时，精灵整体按半行位移，保持视觉中心相对稳定。
-    const int kLayoutShiftPerLine = lineH / 2;
-
-    auto tokenUnit = [&](const String &s) -> float {
+    const int lineH = 18;
+    const int lineShift = lineH/2;
+    const int unitPerLine = 32;
+    
+    //判断一个字符是不是英文并且返回宽度
+    auto tokenUnit = [&](const String &s) -> uint16_t 
+    {
       if (!s.length()) return 0.0f;
       bool allAscii = true;
       for (int i = 0; i < s.length(); ++i) {
@@ -164,188 +162,33 @@ void showGlitchEffectUTF8(const char *text) {
           break;
         }
       }
-      if (allAscii) return 0.5f * s.length();
-      return 1.0f;
+      if (allAscii) return 1 * s.length();
+      return 2;
+    };
+    //计算将要显示的字符串的视觉长度
+    auto tokenLength = [&](const String show[]) -> uint16_t 
+    {
+      uint16_t Temp;
+      for(uint16_t i = 0; i < charCount; i++)
+      {
+        Temp += tokenUnit(show[i]);
+      }
+      return Temp;
     };
 
-    auto finalLineOf = [&](int idx) -> int {
-      for (int ln = 0; ln < fullLineCount; ++ln) {
-        if (idx >= fullLineStart[ln] && idx < fullLineEnd[ln]) return ln;
-      }
-      return fullLineCount - 1;
-    };
+    
+    //计算行数量 = 字符串长度/每行字符串数量+1
+    uint16_t lineNow = tokenLength(shown) / unitPerLine + 1;
+    //计算行绘制起始坐标（用于整体更新）
+    uint16_t baseY = tft.height()/2 - (lineNow * kDisturbWidth);
+    //计算行绘制局部坐标（用于局部刷新）
+    uint16_t shiftY = baseY + (FreezentLineNum + lineH);
 
-    // decodeFront 之前（含）可视作“完全进入破译区”的候选边界。
-    const int decodeFront = progressI - kDisturbWidth;
-    for (int ln = 0; ln < fullLineCount; ++ln) {
-      // 冻结条件（核心）：
-      // 只有当 final line 的最后一个字符都进入破译区，才整行冻结。
-      // 冻结后该行文本固定为原文，不再参与扰动刷新。
-      if (!lineFrozen[ln] && (fullLineEnd[ln] - 1) <= decodeFront) {
-        String fix = "";
-        for (int j = fullLineStart[ln]; j < fullLineEnd[ln]; ++j) fix += chars[j];
-        frozenLineText[ln] = fix;
-        lineFrozen[ln] = true;
-      }
-    }
 
-    // displayToken: 本帧最终用于排版/绘制的 token 序列。
-    // 如果某字符所在 final line 已冻结，则强制用原文 chars[j]；
-    // 否则使用外部传入的 shown[j]（可能是乱码、扰动字或已破译字）。
-    for (int j = 0; j < charCount; ++j) {
-      int ln = finalLineOf(j);
-      displayToken[j] = lineFrozen[ln] ? chars[j] : shown[j];
-    }
 
-    currentLineCount = 0;
-    if (charCount <= 0) {
-      currentLineStart[0] = 0;
-      currentLineEnd[0] = 0;
-      currentLineCount = 1;
-    } else {
-      int start = 0;
-      float units = 0.0f;
-      for (int j = 0; j < charCount && currentLineCount < 8; ++j) {
-        float u = tokenUnit(displayToken[j]);
-        if (j > start && units + u > kWrapUnits) {
-          currentLineStart[currentLineCount] = start;
-          currentLineEnd[currentLineCount] = j;
-          currentLineCount++;
-          start = j;
-          units = 0.0f;
-        }
-        units += u;
-      }
-      if (start < charCount && currentLineCount < 8) {
-        currentLineStart[currentLineCount] = start;
-        currentLineEnd[currentLineCount] = charCount;
-        currentLineCount++;
-      }
-      if (currentLineCount <= 0) {
-        currentLineStart[0] = 0;
-        currentLineEnd[0] = charCount;
-        currentLineCount = 1;
-      }
-    }
 
-    // frozenPrefixFinal：从第 0 行开始连续已冻结的 final line 数量
-    int frozenPrefixFinal = 0;
-    while (frozenPrefixFinal < fullLineCount && lineFrozen[frozenPrefixFinal]) {
-      frozenPrefixFinal++;
-    }
 
-    // frozenVisiblePrefix：在“当前动态换行”视图里，前缀连续完全冻结的可见行数量。
-    // 用它决定局部刷新起点，冻结前缀行可直接跳过绘制以节省刷新成本。
-    int frozenVisiblePrefix = 0;
-    for (int ln = 0; ln < currentLineCount; ++ln) {
-      bool allFrozen = true;
-      for (int j = currentLineStart[ln]; j < currentLineEnd[ln]; ++j) {
-        if (finalLineOf(j) >= frozenPrefixFinal) {
-          allFrozen = false;
-          break;
-        }
-      }
-      if (allFrozen) {
-        frozenVisiblePrefix++;
-      } else {
-        break;
-      }
-    }
 
-    // layoutChanged：仅在“行数变化”时触发布局级重绘。
-    // 冻结前缀变化不再视为布局变化，避免活动区转冻结时整块重刷导致位移观感。
-    const bool layoutChanged = (currentLineCount != prevCurrentLineCount);
-
-    const int baseY = 150 - (currentLineCount - 1) * kLayoutShiftPerLine;
-    const int imageY = (currentLineCount - 1) * kLayoutShiftPerLine - 60;
-    // drawStartLn：本帧重绘起始行。
-    // 为了覆盖“活动行 -> 冻结行”的交界过渡，使用上次/本次冻结前缀的较小值作为起点，
-    // 确保边界行至少重绘一帧，避免视觉跳变。
-    int prevPrefix = prevFrozenVisiblePrefix;
-    if (prevPrefix < 0) prevPrefix = frozenVisiblePrefix;
-    int drawStartLn = layoutChanged ? 0 : min(prevPrefix, frozenVisiblePrefix);
-    if (drawStartLn < 0) drawStartLn = 0;
-    if (drawStartLn >= currentLineCount) drawStartLn = currentLineCount - 1;
-
-    // dirtyTop/dirtyBottom：本帧局部脏矩形（精灵内坐标）
-    // 给顶部和底部留少量安全边距，避免字体抗锯齿像素被裁掉。
-    const int kDirtyPadTop = 3;
-    const int kDirtyPadBottom = 3;
-    int dirtyTop = y0;
-    int dirtyBottom = y0 + areaH - 1;
-    if (!layoutChanged && drawStartLn > 0 && drawStartLn < currentLineCount) {
-      int firstDynamicTextTop = 12 + drawStartLn * lineH - 8;  // 与 TL 绘制基线一致
-      int lastDynamicTextBottom = 12 + (currentLineCount - 1) * lineH - 8 + (lineH - 1);
-      dirtyTop = firstDynamicTextTop - kDirtyPadTop;
-      dirtyBottom = lastDynamicTextBottom + kDirtyPadBottom;
-    }
-    const int clippedTop = constrain(dirtyTop, y0, y0 + areaH);
-    const int clippedBottom = constrain(dirtyBottom, y0, y0 + areaH - 1);
-    const int clippedH = (clippedBottom >= clippedTop) ? (clippedBottom - clippedTop + 1) : 0;
-
-    // baseY 变化（通常是回退导致行数减少）时：
-    // 先清理新旧锚点之间“暴露出来的细条区域”，防止旧帧残留。
-    // 注意这里只清条带，不做整块清屏，避免黑闪。
-    if (prevBaseY >= 0 && baseY != prevBaseY) {
-      if (baseY < prevBaseY) {
-        const int stripY = baseY + areaH;
-        const int stripH = prevBaseY - baseY;
-        if (stripH > 0) tft.fillRect(0, stripY, areaW, stripH, TFT_BLACK);
-      } else {
-        const int stripY = prevBaseY;
-        const int stripH = baseY - prevBaseY;
-        if (stripH > 0) tft.fillRect(0, stripY, areaW, stripH, TFT_BLACK);
-      }
-    }
-
-    // 精灵内部清理策略：
-    // - 布局变动：清整个参与区域（y0..areaH）
-    // - 布局不变：只清活动脏矩形 clippedTop..clippedTop+clippedH
-    if (layoutChanged) {
-      Text.fillRect(0, y0, areaW, areaH, TFT_BLACK);
-      Text.pushImage(160 - 60, imageY, 120, 120, (uint16_t *)Index_B);
-    } else {
-      if (clippedH > 0) {
-        Text.fillRect(0, clippedTop, areaW, clippedH, TFT_BLACK);
-      }
-      Text.pushImage(160 - 60, imageY, 120, 120, (uint16_t *)Index_B);
-    }
-
-    String firstLineText = "";
-    for (int j = currentLineStart[0]; j < currentLineEnd[0]; ++j) firstLineText += displayToken[j];
-    int firstLineWidth = Text.textWidth(firstLineText);
-    int leftAlignedX = 160 - firstLineWidth / 2;
-    if (leftAlignedX < 0) leftAlignedX = 0;
-
-    // 绘制起点：
-    // - 布局变动：从 0 行重画（保证结构一致）
-    // - 布局稳定：从动态首行开始画，冻结前缀行跳过
-    for (int ln = drawStartLn; ln < currentLineCount; ++ln) {
-      String lineText = "";
-      for (int j = currentLineStart[ln]; j < currentLineEnd[ln]; ++j) lineText += displayToken[j];
-
-      int y = 12 + ln * lineH;
-      if (ln == 0) {
-        Text.setTextDatum(MC_DATUM);
-        Text.drawString(lineText, 160, y);
-      } else {
-        Text.setTextDatum(TL_DATUM);
-        Text.drawString(lineText, leftAlignedX, y - 8);
-      }
-    }
-
-    // 推送策略（脏矩形）：
-    // - 布局变动：整块推送（当前精灵可见区域）
-    // - 布局稳定：仅推送活动脏矩形
-    if (layoutChanged) {
-      Text.pushSprite(0, baseY, 0, y0, areaW, areaH);
-    } else if (clippedH > 0) {
-      Text.pushSprite(0, baseY + (clippedTop - y0), 0, clippedTop-2, areaW, clippedH);
-    }
-
-    prevCurrentLineCount = currentLineCount;
-    prevFrozenVisiblePrefix = frozenVisiblePrefix;
-    prevBaseY = baseY;
   };
 
   auto tryActivateWrong = [&](int j, int wrongProb) {
