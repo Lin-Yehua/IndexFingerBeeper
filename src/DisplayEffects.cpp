@@ -54,7 +54,6 @@ void showGlitchEffectUTF8(const char *text) {
     for (int j = 0; j < charLen; j++) {
       chars[charCount] += text[i + j];
     }
-
     i += charLen;
     charCount++;
   }
@@ -75,9 +74,11 @@ void showGlitchEffectUTF8(const char *text) {
   int currentLineStart[8] = {0};
   int currentLineEnd[8] = {0};
 
-  auto charUnit = [&](int idx) -> float {
+  auto charUnit = [&](int idx) -> float 
+  {
     return (chars[idx].length() > 1) ? 1.0f : 0.5f;
   };
+  
   {
     // 先预计算“最终分行”，后续冻结逻辑依赖它：
     // 只有某条 final line 完全进入破译区，才允许整行冻结。
@@ -149,12 +150,18 @@ void showGlitchEffectUTF8(const char *text) {
     // decoded(已破译区) | disturbed(扰动区) | junk(乱码区)
     // kDisturbWidth 决定扰动区宽度（字符数）。
     const int kDisturbWidth = 5;  // zones: decoded | disturbed | junk
-    const int lineH = 18;
-    const int lineShift = lineH/2;
-    const int unitPerLine = 32;
+    const int lineH = 18;   //行高
+    const int lineShift = lineH/2;    //行高:移位用
+    const int unitPerLine = 32;     //行最高字符单元数
+    const int maxLine = 8;
+    int gobleXmiddle = 160;         //屏幕中点
+    int gobleYmiddle = 150;
+    int spriteXmiddle = 160;         //屏幕中点
+    int spriteYmiddle = 50;
+    bool isGobalReflush = false;    
     int FreezentLineNum_last = 0;
-    int gobleXmiddle = 160;
-    int gobleYmiddle = 160;
+    String shownLine[maxLine];
+    
     //判断一个字符是不是英文并且返回宽度
     auto tokenUnit = [&](const String &s) -> uint16_t 
     {
@@ -170,10 +177,10 @@ void showGlitchEffectUTF8(const char *text) {
       return 2;
     };
 
-    //计算将要显示的字符串的视觉长度
-    auto getShowLength = [&](const String show[]) -> uint16_t 
+    //计算将要显示的字符串的单位长度
+    auto getShowStringLength = [&](const String show[]) -> uint16_t 
     {
-      uint16_t Temp;
+      uint16_t Temp = 0;
       for(uint16_t i = 0; i < charCount; i++)
       {
         Temp += tokenUnit(show[i]);
@@ -181,53 +188,126 @@ void showGlitchEffectUTF8(const char *text) {
       return Temp;
     };
     
+    //计算将要显示的字符串的视觉长度
+     auto getShowLength = [&](const String show[]) -> uint16_t 
+    {
+      return getShowStringLength(show)< 32 ? getShowStringLength(show) * 8 : unitPerLine * 8;
+    };
+    
     //计算当前进度的冻结行数
     auto getFreezentLineNum = [&](const String show[], int I) -> uint16_t 
     {
-      uint16_t Temp;
+      uint16_t Temp = 0;
       for(uint16_t i = 0; i < I - 5; i++)
       {
         Temp += tokenUnit(show[i]);
       }
       return Temp / unitPerLine;
     };
-
+    
     //计算列绘制起始坐标
     auto getBaseXShift = [&](const String show[]) -> uint16_t 
     {
-      uint16_t temp;
-      temp = getShowLength(show);
+      uint16_t temp = 0;
+      temp = getShowStringLength(show);
       if (temp <unitPerLine)
       {
-        return ((float)getShowLength(show) * 7.5f)/2;
+        return ((float)getShowLength(show))/2;
       }
       
-      return ((float)unitPerLine * 7.5f)/2;
+      return ((float)unitPerLine * 8)/2;
       
     };
         
+    //合并单元行到字符串
+    auto mergeLine = [&](const String show[], String* output) -> uint16_t
+    {
+      uint16_t lenIdx = 0;
+      uint16_t lineTemp = 0;
+      for (uint16_t i = 0; i < charCount; i++)
+      {
+        lineTemp += tokenUnit(show[i]);
+        if (lineTemp >= 31)
+        {
+          i--;
+          lineTemp = 0;
+          lenIdx++;
+        }
+        else
+        {
+          output[lenIdx] += show[i];
+        }
+      }
+      
+      return lenIdx + 1;
+    };
+
     
 
+    //获取当前的冻结行数量
+    FreezentLineNum_last = FreezentLineNum;
+    FreezentLineNum = getFreezentLineNum(shown,progressI);
     //计算行数量 = 字符串长度/每行字符串数量+1
-    uint16_t lineNow = getShowLength(shown) / unitPerLine + 1;
+    uint16_t lineNow = getShowStringLength(shown) / unitPerLine + 1;
+    
     //计算行绘制起始坐标（用于整体更新）
-    uint16_t baseY = gobleYmiddle - (lineNow * kDisturbWidth);
+    uint16_t baseY = gobleYmiddle - (lineNow * lineShift);
     //计算列绘制起始坐标（用于整体更新）
     uint16_t baseX = gobleXmiddle- getBaseXShift(shown);
     //计算精灵内的X起始截取坐标
     uint16_t baseX_sprite = baseX;
     //计算精灵内的Y起始截取坐标
-    uint16_t baseY_sprite = 
-    //获取当前冻结行
-    FreezentLineNum_last = FreezentLineNum;
-    FreezentLineNum = getFreezentLineNum(shown,progressI);
+    uint16_t baseY_sprite = FreezentLineNum * lineH;
     //计算行绘制局部坐标（用于局部刷新）
-    uint16_t shiftY = baseY + (FreezentLineNum + lineH);
+    uint16_t shiftY = baseY + (FreezentLineNum * lineH);
+    
+    uint16_t viewlen = getShowLength(shown);
 
-    Text.pushSprite(baseX,baseY,baseX)
+    uint8_t shownLine_len = mergeLine(shown,shownLine);
+
+    if(progressI == charCount - 1)
+    {
+      isGobalReflush = true;
+    }
+    //定向清除屏幕
+    
+    for (uint8_t i = FreezentLineNum; i < shownLine_len; i++)
+    {
+      if (i == 0)
+      {
+        Text.fillRect(spriteXmiddle - viewlen/2 - 2,i * lineH,viewlen + 4,lineH,0x00FF);/*这里的-2和+4是为了安全保证多加的*/
+      }
+      else
+      {
+        Text.fillRect(baseX,i * lineH,320-(baseX * 2),lineH,0x0000);
+      }
+    }
+    //绘制背景
+    Text.pushImage(gobleXmiddle - 60, (int)(gobleYmiddle-60) - (int)baseY ,120,120,(uint16_t*)Index_B);
 
 
-
+    //绘制文字
+    for (uint8_t i = FreezentLineNum; i < shownLine_len; i++)
+    {
+      if (i == 0)
+      {
+        Text.setTextDatum(TC_DATUM);
+        Text.drawString(shownLine[i], gobleXmiddle,i * lineH + 2);
+        Text.setTextDatum(TL_DATUM);
+      }
+      else
+      {
+        Text.drawString(shownLine[i], baseX,i * lineH  + 2);
+      }
+    }
+    if(isGobalReflush)
+    {
+      Text.pushSprite(baseX,baseY,baseX_sprite,0,viewlen,(lineNow * lineH));
+    }
+    else
+    {
+      Text.pushSprite(baseX,shiftY,baseX_sprite,baseY_sprite,viewlen,((lineNow - FreezentLineNum) * lineH));
+    }
 
   };
 
@@ -377,7 +457,8 @@ void showGlitchEffectUTF8(const char *text) {
 
     // [检测回滚条件]
     // 本帧执行过回滚则跳过检测，避免刚回退就再次触发。
-    if (!didRollbackThisFrame && rollbackEnabled && i >= 2) {
+    if (!didRollbackThisFrame && rollbackEnabled && i >= 2) 
+    {
       bool allWrong3 = true;
       for (int j = i - 2; j <= i; ++j) {
         if (j < 0 || j >= charCount || !incorrectNow[j]) {
@@ -393,7 +474,8 @@ void showGlitchEffectUTF8(const char *text) {
     // [按键处理]
     Key_loop();
     keycode = get_Keycode();
-    if (keycode == 2 && !keyLatch) {
+    if (keycode == 2 && !keyLatch) 
+    {
       keyLatch = true;
       if (!gEnableReprint) {
         forceFinishNow = true;
