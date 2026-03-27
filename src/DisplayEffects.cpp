@@ -15,7 +15,7 @@ void showGlitchEffectUTF8(const char *text) {
   static constexpr int kMaxChars = 128;
   static constexpr int kMaxLines = 8;
   static constexpr int kDisturbWidth = 5;
-  static constexpr int kJunkWidth = 10;
+  static constexpr int kJunkWidth = 20;
   static constexpr int kLineUnitCap = 32;  // 中文=2, ASCII=1
   static constexpr int kLineH = 18;
   static constexpr int kSpriteW = 320;
@@ -48,8 +48,6 @@ void showGlitchEffectUTF8(const char *text) {
   int charCount = 0;
   int fullLineCount = 0;
   int prevCurrentLineCount = -1;
-  int prevFrozenVisiblePrefix = -1;
-  int prevBaseY = -1;
   int keycode = 255;
   bool rollbackEnabled = gEnableReprint;
   bool forceFinishNow = false;
@@ -185,8 +183,13 @@ void showGlitchEffectUTF8(const char *text) {
     }
   };
 
+  auto tokenUnits = [&](const String &token) -> int {
+    if (!token.length()) return 0;
+    return (token.length() > 1) ? 2 : 1;
+  };
+
   // 构建当前帧 token：
-  // decoded | disturbed(5) | junk(10) | hidden
+  // decoded | disturbed(5) | junk(20) | hidden
   auto buildFrame = [&](int cursorI, bool collectIncorrect) {
     if (collectIncorrect) memset(incorrectNow, 0, sizeof(incorrectNow));
 
@@ -248,7 +251,7 @@ void showGlitchEffectUTF8(const char *text) {
       }
 
       if (j <= junkEnd) {
-        // 乱码区长度固定为 10。
+        // 乱码区长度固定为 20。
         char junk = junkChars[random(0, junkLen)];
         char s[2] = {junk, '\0'};
         shown[j] = String(s);
@@ -291,18 +294,38 @@ void showGlitchEffectUTF8(const char *text) {
       lineFrozen[li] = shouldFreeze;
     }
 
-    int lineCount = fullLineCount;
-    if (lineCount <= 0) lineCount = 1;
-    if (lineCount > kMaxLines) lineCount = kMaxLines;
+    int lineCount = 0;
+    for (int li = 0; li < frozenPrefix && lineCount < kMaxLines; ++li) {
+      frameLineText[lineCount++] = frozenLineText[li];
+    }
 
-    for (int li = 0; li < lineCount; ++li) {
-      if (lineFrozen[li]) {
-        frameLineText[li] = frozenLineText[li];
-      } else {
-        for (int j = fullLineStart[li]; j < fullLineEnd[li]; ++j) {
-          frameLineText[li] += shown[j];
+    // 活动区按“单位宽度”动态换行：
+    // 中文单位=2，ASCII单位=1。随破译抖动实时重排，保证可见行宽稳定。
+    const int activeStart = (frozenPrefix < fullLineCount) ? fullLineStart[frozenPrefix] : charCount;
+    if (lineCount < kMaxLines) {
+      int li = lineCount;
+      int usedUnits = 0;
+
+      for (int j = activeStart; j < charCount; ++j) {
+        const String &token = shown[j];
+        const int u = tokenUnits(token);
+        if (u <= 0) {
+          // shown 的右侧隐藏区是连续空串，遇到后可直接停止扫描。
+          if (j > activeStart) break;
+          continue;
         }
+
+        if (usedUnits + u > kLineUnitCap && frameLineText[li].length() > 0) {
+          ++li;
+          usedUnits = 0;
+          if (li >= kMaxLines) break;
+        }
+
+        frameLineText[li] += token;
+        usedUnits += u;
       }
+
+      lineCount = li + 1;
     }
 
     while (lineCount > 1 && frameLineText[lineCount - 1].length() == 0) {
@@ -312,9 +335,6 @@ void showGlitchEffectUTF8(const char *text) {
       lineCount = 1;
       frameLineText[0] = "";
     }
-
-    int visibleFrozenPrefix = frozenPrefix;
-    if (visibleFrozenPrefix > lineCount) visibleFrozenPrefix = lineCount;
 
     int localMiddleY = kGobalYmiddle - kSpriteScreenY;
     if (localMiddleY < (kLineH / 2)) localMiddleY = (kLineH / 2);
@@ -326,31 +346,24 @@ void showGlitchEffectUTF8(const char *text) {
     if (baseY < baseYMin) baseY = baseYMin;
     if (baseY > baseYMax) baseY = baseYMax;
 
-    bool globalRefresh = forceGlobalRefresh;
-    if (prevCurrentLineCount != lineCount ||
-        prevFrozenVisiblePrefix != visibleFrozenPrefix ||
-        prevBaseY != baseY ||
-        progressI >= charCount) {
-      globalRefresh = true;
-    }
+    const bool globalRefresh = forceGlobalRefresh || (prevCurrentLineCount != lineCount);
 
-    bool contentChanged = globalRefresh;
-    if (!contentChanged) {
+    int firstChangedLine = -1;
+    if (!globalRefresh) {
       for (int li = 0; li < lineCount; ++li) {
         if (frameLineText[li] != lastFrameLineText[li]) {
-          contentChanged = true;
+          firstChangedLine = li;
           break;
         }
       }
+      if (firstChangedLine < 0) return;
     }
-    if (!contentChanged) return;
 
     int drawStartLine = 0;
     int dirtyY0 = 0;
     int dirtyY1 = kSpriteH;
     if (!globalRefresh) {
-      drawStartLine = visibleFrozenPrefix;
-      if (drawStartLine >= lineCount) drawStartLine = lineCount - 1;
+      drawStartLine = firstChangedLine;
       dirtyY0 = baseY + drawStartLine * kLineH - (kLineH / 2);
       dirtyY1 = baseY + (lineCount - 1) * kLineH + (kLineH / 2);
     }
@@ -359,8 +372,6 @@ void showGlitchEffectUTF8(const char *text) {
     if (dirtyY1 > kSpriteH) dirtyY1 = kSpriteH;
     if (dirtyY1 <= dirtyY0) {
       prevCurrentLineCount = lineCount;
-      prevFrozenVisiblePrefix = visibleFrozenPrefix;
-      prevBaseY = baseY;
       for (int i = 0; i < kMaxLines; ++i) lastFrameLineText[i] = frameLineText[i];
       return;
     }
@@ -371,7 +382,7 @@ void showGlitchEffectUTF8(const char *text) {
       Text.pushImage(kLogoX, kLogoY, kLogoW, kLogoH, (uint16_t *)Index_B);
     }
 
-    const int firstLineWidth = Text.textWidth(frameLineText[0]);
+    const int firstLineWidth = Text.textWidth(frameLineText[0].c_str());
     int leftStartX = kCenterX - (firstLineWidth / 2);
     if (leftStartX < 0) leftStartX = 0;
     if (leftStartX > (kSpriteW - 1)) leftStartX = kSpriteW - 1;
@@ -403,8 +414,6 @@ void showGlitchEffectUTF8(const char *text) {
     Text.pushSprite(0, kSpriteScreenY + dirtyY0, 0, dirtyY0, kSpriteW, dirtyY1 - dirtyY0);
 
     prevCurrentLineCount = lineCount;
-    prevFrozenVisiblePrefix = visibleFrozenPrefix;
-    prevBaseY = baseY;
     for (int i = 0; i < kMaxLines; ++i) lastFrameLineText[i] = frameLineText[i];
   };
 
