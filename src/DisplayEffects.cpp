@@ -10,95 +10,122 @@
 #include "Key_Drv.h"
 
 void showGlitchEffectUTF8(const char *text) {
-  // 单条文本的最大字符数（按 UTF-8 字符分割后的“逻辑字符”计数）。
-  // 这里不是字节数，中文通常会占 3 字节，但仍计为 1 个逻辑字符。
+  if (!text) return;
+
   static constexpr int kMaxChars = 128;
-  // 为避免 loopTask 栈溢出，以下大数组全部使用静态工作区。
-  // 每次进入函数时会重置内容，不依赖上次状态。
+  static constexpr int kMaxLines = 8;
+  static constexpr int kDisturbWidth = 5;
+  static constexpr int kJunkWidth = 10;
+  static constexpr int kLineUnitCap = 32;  // 中文=2, ASCII=1
+  static constexpr int kLineH = 18;
+  static constexpr int kSpriteW = 320;
+  static constexpr int kSpriteH = 100;
+  static constexpr int kSpriteScreenY = 100;
+  static constexpr int kGobalYmiddle = 150;  // 显示区域中心（屏幕绝对坐标）
+  static constexpr int kCenterX = 160;
+  static constexpr int kLogoX = 160 - 60;
+  static constexpr int kLogoY = 50 - 60;
+  static constexpr int kLogoW = 120;
+  static constexpr int kLogoH = 120;
+
   static String chars[kMaxChars];
+  static uint8_t srcUnits[kMaxChars];
+  static String shown[kMaxChars];
   static bool wrongActive[kMaxChars];
   static String wrongChars[kMaxChars];
   static bool engFlickerActive[kMaxChars];
   static uint8_t engFlickerLeft[kMaxChars];
   static char engFlickerChar[kMaxChars];
-  static String displayToken[kMaxChars];
-  static String shown[kMaxChars];
-  //弃用
   static bool incorrectNow[kMaxChars];
 
-  uint8_t incorrectRange = 0b00000000;
+  static int fullLineStart[kMaxLines];
+  static int fullLineEnd[kMaxLines];
+  static bool lineFrozen[kMaxLines];
+  static String frozenLineText[kMaxLines];
+  static String frameLineText[kMaxLines];
+  static String lastFrameLineText[kMaxLines];
 
-  static int prevCurrentLineCount = -1;
-  static int prevFrozenVisiblePrefix = -1;
-  static int prevBaseY = -1;
   int charCount = 0;
+  int fullLineCount = 0;
+  int prevCurrentLineCount = -1;
+  int prevFrozenVisiblePrefix = -1;
+  int prevBaseY = -1;
   int keycode = 255;
   bool rollbackEnabled = gEnableReprint;
   bool forceFinishNow = false;
   bool keyLatch = false;
-  prevCurrentLineCount = -1;
-  prevFrozenVisiblePrefix = -1;
-  prevBaseY = -1;
 
-  // UTF-8 按字符切分：把 text 拆成 chars[]（每个元素是一个完整 UTF-8 字符串）
+  const int junkLen = (int)strlen(junkChars);
+  const char *kEnChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+  const int kEnCharsLen = (int)strlen(kEnChars);
+
+  for (int i = 0; i < kMaxChars; ++i) {
+    chars[i] = "";
+    srcUnits[i] = 0;
+    shown[i] = "";
+    wrongActive[i] = false;
+    wrongChars[i] = "";
+    engFlickerActive[i] = false;
+    engFlickerLeft[i] = 0;
+    engFlickerChar[i] = 0;
+    incorrectNow[i] = false;
+  }
+  for (int i = 0; i < kMaxLines; ++i) {
+    fullLineStart[i] = 0;
+    fullLineEnd[i] = 0;
+    lineFrozen[i] = false;
+    frozenLineText[i] = "";
+    frameLineText[i] = "";
+    lastFrameLineText[i] = "";
+  }
+
+  // UTF-8 按“逻辑字符”切分。
   for (int i = 0; text[i] != '\0' && charCount < kMaxChars;) {
     uint8_t c = (uint8_t)text[i];
     int charLen = 1;
-
     if ((c & 0x80) == 0x00) charLen = 1;
     else if ((c & 0xE0) == 0xC0) charLen = 2;
     else if ((c & 0xF0) == 0xE0) charLen = 3;
     else if ((c & 0xF8) == 0xF0) charLen = 4;
 
+    int validLen = 0;
+    while (validLen < charLen && text[i + validLen] != '\0') validLen++;
+    if (validLen <= 0) break;
+
     chars[charCount] = "";
-    for (int j = 0; j < charLen; j++) {
-      chars[charCount] += text[i + j];
-    }
-    i += charLen;
+    for (int j = 0; j < validLen; ++j) chars[charCount] += text[i + j];
+    srcUnits[charCount] = (chars[charCount].length() > 1) ? 2 : 1;
+
+    i += validLen;
     charCount++;
   }
 
-  // 换行宽度单位：
-  // - 中文（非 ASCII）记 1.0 单位
-  // - 英文/数字/符号记 0.5 单位
-  // 每行超过 16.0 单位就换行（即 16 汉字或约 32 英文）。
-  const float kWrapUnits = 16.0f;
-  int fullLineStart[8] = {0};
-  int fullLineEnd[8] = {0};
-  bool lineFrozen[8] = {false};
-  String frozenLineText[8];
-  // fullLine*: 基于“原文 chars[]”计算出的最终分行（用于冻结判定）
-  // currentLine*: 基于“当前显示 token（可能含乱码/已冻结）”计算的动态分行（用于当前帧绘制）
-  int fullLineCount = 0;
-  int currentLineCount = 1;
-  int currentLineStart[8] = {0};
-  int currentLineEnd[8] = {0};
+  if (charCount <= 0) {
+    Text.fillRect(0, 0, kSpriteW, kSpriteH, TFT_BLACK);
+    Text.pushImage(kLogoX, kLogoY, kLogoW, kLogoH, (uint16_t *)Index_B);
+    Text.pushSprite(0, kSpriteScreenY);
+    return;
+  }
 
-  auto charUnit = [&](int idx) -> float 
+  // 预计算最终分行：冻结判定严格按这组边界。
   {
-    return (chars[idx].length() > 1) ? 1.0f : 0.5f;
-  };
-  
-  {
-    // 先预计算“最终分行”，后续冻结逻辑依赖它：
-    // 只有某条 final line 完全进入破译区，才允许整行冻结。
     int start = 0;
-    float units = 0.0f;
-    for (int j = 0; j < charCount && fullLineCount < 8; ++j) {
-      float u = charUnit(j);
-      if (j > start && units + u > kWrapUnits) {
+    int units = 0;
+    for (int j = 0; j < charCount && fullLineCount < kMaxLines; ++j) {
+      const int u = srcUnits[j];
+      if (j > start && units + u > kLineUnitCap) {
         fullLineStart[fullLineCount] = start;
         fullLineEnd[fullLineCount] = j;
-        fullLineCount++;
+        ++fullLineCount;
         start = j;
-        units = 0.0f;
+        units = 0;
       }
       units += u;
     }
-    if (start < charCount && fullLineCount < 8) {
+    if (start < charCount && fullLineCount < kMaxLines) {
       fullLineStart[fullLineCount] = start;
       fullLineEnd[fullLineCount] = charCount;
-      fullLineCount++;
+      ++fullLineCount;
     }
     if (fullLineCount <= 0) {
       fullLineStart[0] = 0;
@@ -107,14 +134,12 @@ void showGlitchEffectUTF8(const char *text) {
     }
   }
 
-  auto mutateCharNearBoundary = [&](const String &src) -> String {
-    (void)src;
+  auto mutateCharNearBoundary = [&]() -> String {
     uint32_t cp = 0;
     if (random(100) < 15) {
       cp = 0x1234;
     } else {
-      const int idx = random(0, 4001);
-      cp = (uint32_t)Index_Han[idx];
+      cp = (uint32_t)Index_Han[random(0, 4001)];
     }
 
     char out[5] = {0};
@@ -131,175 +156,14 @@ void showGlitchEffectUTF8(const char *text) {
     return String(out);
   };
 
-  for (int j = 0; j < kMaxChars; ++j) {
-    wrongActive[j] = false;
-    wrongChars[j] = "";
-    engFlickerActive[j] = false;
-    engFlickerLeft[j] = 0;
-    engFlickerChar[j] = 0;
-  }
-
-  //随机英文闪烁的字符
-  const char *kEnChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-  
-  
-  //冻结行数量
-  int FreezentLineNum = 0;
-  auto drawWrapped = [&](String shown[], int progressI) {
-    // 三段区模型（按 i 的推进方向）：
-    // decoded(已破译区) | disturbed(扰动区) | junk(乱码区)
-    // kDisturbWidth 决定扰动区宽度（字符数）。
-    const int kDisturbWidth = 5;  // zones: decoded | disturbed | junk
-    const int lineH = 18;   //行高
-    const int lineShift = lineH/2;    //行高:移位用
-    const int unitPerLine = 32;     //行最高字符单元数
-    const int maxLine = 8;
-    int gobleXmiddle = 160;         //屏幕中点
-    int gobleYmiddle = 150;
-    int spriteXmiddle = 160;         //屏幕中点
-    int spriteYmiddle = 50;
-    bool isGobalReflush = false;    
-    int FreezentLineNum_last = 0;
-    String shownLine[maxLine];
-    
-    //判断一个字符是不是英文并且返回宽度
-    auto tokenUnit = [&](const String &s) -> uint16_t 
-    {
-      if (!s.length()) return 0.0f;
-      bool allAscii = true;
-      for (int i = 0; i < s.length(); ++i) {
-        if (((uint8_t)s[i]) & 0x80) {
-          allAscii = false;
-          break;
-        }
-      }
-      if (allAscii) return 1 * s.length();
-      return 2;
-    };
-
-    //计算将要显示的字符串的单位长度
-    auto getShowStringLength = [&](const String show[]) -> uint16_t 
-    {
-      uint16_t Temp = 0;
-      for(uint16_t i = 0; i < charCount; i++)
-      {
-        Temp += tokenUnit(show[i]);
-      }
-      return Temp;
-    };
-    
-    //计算将要显示的字符串的视觉长度
-    //用来决定精灵推送的尺寸,局部覆盖的尺寸,以及第一行和后行的对齐
-     auto getShowLength = [&](const String show[]) -> uint16_t 
-    {
-      
-    };
-    
-    //计算当前进度的冻结行数
-    auto getFreezentLineNum = [&](const String show[], int I) -> uint16_t 
-    {
-      uint16_t Temp = 0;
-      for(uint16_t i = 0; i < I - 5; i++)
-      {
-        Temp += tokenUnit(show[i]);
-      }
-      return Temp / unitPerLine;
-    };
-    
-    //计算列绘制起始坐标
-    //用来决定精灵推送的尺寸,局部覆盖的尺寸,以及第一行和后行的对齐
-    auto getBaseXShift = [&](const String show[]) -> uint16_t 
-    {
-      
-      
-    };
-        
-    //合并单元行到字符串
-    /*目前的这一版似乎有点小问题*/
-    auto mergeLine = [&](const String show[], String* output) -> uint16_t
-    {
-      uint16_t lenIdx = 0;
-      uint16_t lineTemp = 0;
-      for (uint16_t i = 0; i < charCount; i++)
-      {
-        lineTemp += tokenUnit(show[i]);
-        if (lineTemp > 32)
-        {
-          i--;
-          lineTemp = 0;
-          lenIdx++;
-        }
-        else
-        {
-          output[lenIdx] += show[i];
-        }
-      }
-      
-      return lenIdx + 1;
-    };
-
-    
-
-    //获取当前的冻结行数量
-    FreezentLineNum_last = FreezentLineNum;
-    FreezentLineNum = getFreezentLineNum(shown,progressI);
-    //计算行数量 = 字符串长度/每行字符串数量+1
-    uint16_t lineNow = getShowStringLength(shown) / unitPerLine + 1;
-    
-    //计算行绘制起始坐标（用于整体更新）
-    uint16_t baseY = gobleYmiddle - (lineNow * lineShift);
-    //计算列绘制起始坐标（用于整体更新）
-    uint16_t baseX = gobleXmiddle- getBaseXShift(shown);
-    //计算精灵内的X起始截取坐标
-    uint16_t baseX_sprite = baseX;
-    //计算精灵内的Y起始截取坐标
-    uint16_t baseY_sprite = FreezentLineNum * lineH;
-    //计算行绘制局部坐标（用于局部刷新）
-    uint16_t shiftY = baseY + (FreezentLineNum * lineH);
-    
-    uint16_t viewlen = getShowLength(shown);
-
-    uint8_t shownLine_len = mergeLine(shown,shownLine);
-
-    //判断是否需要全局刷新
-    /*
-    全局刷新也就是重新打印全部行,包括冻结的行
-    需要全局刷新的场景:
-    1.行变动(破译增加行数,回退减少行数,其中回退减少行数需要清除上下露出来的上一帧绘制残留.通过spriteBG来直接打印指定位置的背景)
-    2.打印的结尾
-    3.需要立刻全屏更新的时候(外部)
-    */
-
-    //定向清除屏幕(操作的是Text这个精灵)
-    /*
-    只清理一部分区域
-    1.清除当前活动的行的画面(fill 0x0000)
-    2.需要全局刷新时,清理全部画面
-    */
-    
-    //绘制背景图像
-    /*
-    
-    */
-    //绘制文字
-    /*
-    把前面分好行的shown打印出来,只打印
-    */
-
-    //更新图像
-    
-
-  };
-
   auto tryActivateWrong = [&](int j, int wrongProb) {
-    // 在扰动区内，按概率给已显示字符注入“错误字形”扰动。
     if (j < 0 || j >= charCount) return;
     if (wrongActive[j]) return;
     if (random(100) >= wrongProb) return;
 
     String candidate = chars[j];
     for (int t = 0; t < 6; ++t) {
-      candidate = mutateCharNearBoundary(chars[j]);
+      candidate = mutateCharNearBoundary();
       if (candidate != chars[j] && candidate != wrongChars[j]) break;
     }
     if (candidate != chars[j]) {
@@ -308,97 +172,240 @@ void showGlitchEffectUTF8(const char *text) {
     }
   };
 
-  
-  /*
-  填充字符函数
-  构建当前帧字符序列：
-   - 光标右侧填充乱码
-   - 光标左侧做扰动，并可选统计 incorrectNow（用于下一帧回滚判定）
-   - 光标位置显示原字符
-   - 出于性能考虑,以下这版每一个字都替换乱码的版本不使用,改为只显示10个字的乱码(乱码区长度固定,直到结尾才缩短),保证同一时刻只有2行在跳动(前面的冻结了),也就是说变成了10乱码区5扰动区
-   参数:光标位置
-  */
-  auto buildFrame = [&](int cursorI, bool collectIncorrect) 
-  {
-    if (collectIncorrect) {
-      memset(incorrectNow, 0, sizeof(incorrectNow));
-      incorrectRange = 0;
+  auto clearTransientState = [&](int l, int r) {
+    if (l < 0) l = 0;
+    if (r >= charCount) r = charCount - 1;
+    for (int j = l; j <= r; ++j) {
+      wrongActive[j] = false;
+      wrongChars[j] = "";
+      engFlickerActive[j] = false;
+      engFlickerLeft[j] = 0;
+      engFlickerChar[j] = 0;
+      incorrectNow[j] = false;
     }
-    //仅仅对5格内的扰动区做扫描
-    int posStart = cursorI - 6 > 0 ? cursorI - 6 : 0;
-    for (int j = posStart; j < charCount; ++j) 
-    {
-      bool isIncorrect = false;
+  };
+
+  // 构建当前帧 token：
+  // decoded | disturbed(5) | junk(10) | hidden
+  auto buildFrame = [&](int cursorI, bool collectIncorrect) {
+    if (collectIncorrect) memset(incorrectNow, 0, sizeof(incorrectNow));
+
+    const int disturbStart = (cursorI > kDisturbWidth) ? (cursorI - kDisturbWidth) : 0;
+    const int junkEnd = cursorI + kJunkWidth;
+
+    for (int j = 0; j < charCount; ++j) {
+      if (j < disturbStart) {
+        // 已破译区：固定正确，不抖动。
+        shown[j] = chars[j];
+        wrongActive[j] = false;
+        wrongChars[j] = "";
+        engFlickerActive[j] = false;
+        engFlickerLeft[j] = 0;
+        engFlickerChar[j] = 0;
+        continue;
+      }
 
       if (j < cursorI) {
-        const int dist = cursorI - j;       //计算距离
-        
-        if (dist <= 5)                       //距离小于5:扰动区
-        {
-          //设置错误概率
-          int wrongProb = (dist < 3) ? gWrongProb3 : gWrongProb5;
-          //添加扰动
-          bool isUtf8 = chars[j].length() > 1;
-          if (cursorI < charCount) 
-          {
-            tryActivateWrong(j, wrongProb);
-          }
-          //判断是否需要替换英文
-          if (isUtf8 && !engFlickerActive[j] && random(100) < 15) 
-          {
-            engFlickerActive[j] = true;
-            engFlickerLeft[j] = (uint8_t)random(1, 4);
-            engFlickerChar[j] = kEnChars[random((int)strlen(kEnChars))];
-          }
-          //如果当前需要替换英文,那就换英文,否则换回中文
-          if (engFlickerActive[j]) 
-          {
-            shown[j] = String(engFlickerChar[j]);
-            isIncorrect = true;
-            if (engFlickerLeft[j] > 0) engFlickerLeft[j]--;
-            if (engFlickerLeft[j] == 0) engFlickerActive[j] = false;
-          } 
-          else if (wrongActive[j]) 
-          {
-            shown[j] = wrongChars[j];
-            isIncorrect = true;
-          } 
-          else 
-          {
-            shown[j] = chars[j];
-          }
+        // 扰动区：错误字形 + 英文闪烁。
+        const int dist = cursorI - j;
+        const int wrongProb = (dist <= 3) ? gWrongProb3 : gWrongProb5;
+        bool isIncorrect = false;
 
-          if (collectIncorrect && dist <= 3) 
-          {
-            incorrectNow[j] = isIncorrect;
-            
-            //incorrectRange |= 0b00000001<<dist;
-          }
+        if (cursorI < charCount) tryActivateWrong(j, wrongProb);
 
-        } 
-        else 
-        {
-          wrongActive[j] = false;
-          engFlickerActive[j] = false;
-          engFlickerLeft[j] = 0;
+        const bool isUtf8 = chars[j].length() > 1;
+        if (isUtf8 && !engFlickerActive[j] && random(100) < 15) {
+          engFlickerActive[j] = true;
+          engFlickerLeft[j] = (uint8_t)random(1, 4);  // 1~3 帧
+          engFlickerChar[j] = kEnChars[random(0, kEnCharsLen)];
+        }
+
+        if (engFlickerActive[j]) {
+          shown[j] = String(engFlickerChar[j]);
+          isIncorrect = true;
+          if (engFlickerLeft[j] > 0) engFlickerLeft[j]--;
+          if (engFlickerLeft[j] == 0) engFlickerActive[j] = false;
+        } else if (wrongActive[j]) {
+          shown[j] = wrongChars[j];
+          isIncorrect = true;
+        } else {
           shown[j] = chars[j];
         }
 
-      } 
-      //当前光标处总是正确的
-      else if (j == cursorI) 
-      {
-        shown[j] = chars[j];
-      } 
-      //前面的部分填充乱码
-      else 
-      {
-        char junk = junkChars[random(strlen(junkChars))];
-        shown[j] = String(junk);
+        if (collectIncorrect && dist <= 3) incorrectNow[j] = isIncorrect;
+        continue;
       }
 
-      
+      if (j == cursorI) {
+        // 光标位始终正确。
+        shown[j] = chars[j];
+        wrongActive[j] = false;
+        wrongChars[j] = "";
+        engFlickerActive[j] = false;
+        engFlickerLeft[j] = 0;
+        engFlickerChar[j] = 0;
+        continue;
+      }
+
+      if (j <= junkEnd) {
+        // 乱码区长度固定为 10。
+        char junk = junkChars[random(0, junkLen)];
+        char s[2] = {junk, '\0'};
+        shown[j] = String(s);
+      } else {
+        // 右侧隐藏：减少每帧处理/绘制负担。
+        shown[j] = "";
+      }
+
+      wrongActive[j] = false;
+      wrongChars[j] = "";
+      engFlickerActive[j] = false;
+      engFlickerLeft[j] = 0;
+      engFlickerChar[j] = 0;
     }
+  };
+
+  auto drawWrapped = [&](int progressI, bool forceGlobalRefresh) {
+    for (int i = 0; i < kMaxLines; ++i) frameLineText[i] = "";
+
+    // 冻结线：只有最终分行完整进入 decoded 区才冻结。
+    int decodedEnd = progressI - kDisturbWidth;
+    if (decodedEnd < 0) decodedEnd = 0;
+    if (decodedEnd > charCount) decodedEnd = charCount;
+
+    int frozenPrefix = 0;
+    while (frozenPrefix < fullLineCount && fullLineEnd[frozenPrefix] <= decodedEnd) {
+      ++frozenPrefix;
+    }
+
+    for (int li = 0; li < fullLineCount; ++li) {
+      const bool shouldFreeze = (li < frozenPrefix);
+      if (shouldFreeze && !lineFrozen[li]) {
+        frozenLineText[li] = "";
+        for (int j = fullLineStart[li]; j < fullLineEnd[li]; ++j) {
+          frozenLineText[li] += chars[j];
+        }
+      } else if (!shouldFreeze && lineFrozen[li]) {
+        frozenLineText[li] = "";
+      }
+      lineFrozen[li] = shouldFreeze;
+    }
+
+    int lineCount = fullLineCount;
+    if (lineCount <= 0) lineCount = 1;
+    if (lineCount > kMaxLines) lineCount = kMaxLines;
+
+    for (int li = 0; li < lineCount; ++li) {
+      if (lineFrozen[li]) {
+        frameLineText[li] = frozenLineText[li];
+      } else {
+        for (int j = fullLineStart[li]; j < fullLineEnd[li]; ++j) {
+          frameLineText[li] += shown[j];
+        }
+      }
+    }
+
+    while (lineCount > 1 && frameLineText[lineCount - 1].length() == 0) {
+      lineCount--;
+    }
+    if (lineCount <= 0) {
+      lineCount = 1;
+      frameLineText[0] = "";
+    }
+
+    int visibleFrozenPrefix = frozenPrefix;
+    if (visibleFrozenPrefix > lineCount) visibleFrozenPrefix = lineCount;
+
+    int localMiddleY = kGobalYmiddle - kSpriteScreenY;
+    if (localMiddleY < (kLineH / 2)) localMiddleY = (kLineH / 2);
+    if (localMiddleY > (kSpriteH - (kLineH / 2))) localMiddleY = kSpriteH - (kLineH / 2);
+
+    int baseY = localMiddleY - ((lineCount - 1) * kLineH) / 2;
+    int baseYMin = kLineH / 2;
+    int baseYMax = kSpriteH - (lineCount - 1) * kLineH - (kLineH / 2);
+    if (baseY < baseYMin) baseY = baseYMin;
+    if (baseY > baseYMax) baseY = baseYMax;
+
+    bool globalRefresh = forceGlobalRefresh;
+    if (prevCurrentLineCount != lineCount ||
+        prevFrozenVisiblePrefix != visibleFrozenPrefix ||
+        prevBaseY != baseY ||
+        progressI >= charCount) {
+      globalRefresh = true;
+    }
+
+    bool contentChanged = globalRefresh;
+    if (!contentChanged) {
+      for (int li = 0; li < lineCount; ++li) {
+        if (frameLineText[li] != lastFrameLineText[li]) {
+          contentChanged = true;
+          break;
+        }
+      }
+    }
+    if (!contentChanged) return;
+
+    int drawStartLine = 0;
+    int dirtyY0 = 0;
+    int dirtyY1 = kSpriteH;
+    if (!globalRefresh) {
+      drawStartLine = visibleFrozenPrefix;
+      if (drawStartLine >= lineCount) drawStartLine = lineCount - 1;
+      dirtyY0 = baseY + drawStartLine * kLineH - (kLineH / 2);
+      dirtyY1 = baseY + (lineCount - 1) * kLineH + (kLineH / 2);
+    }
+
+    if (dirtyY0 < 0) dirtyY0 = 0;
+    if (dirtyY1 > kSpriteH) dirtyY1 = kSpriteH;
+    if (dirtyY1 <= dirtyY0) {
+      prevCurrentLineCount = lineCount;
+      prevFrozenVisiblePrefix = visibleFrozenPrefix;
+      prevBaseY = baseY;
+      for (int i = 0; i < kMaxLines; ++i) lastFrameLineText[i] = frameLineText[i];
+      return;
+    }
+
+    Text.fillRect(0, dirtyY0, kSpriteW, dirtyY1 - dirtyY0, TFT_BLACK);
+    const bool hitLogo = !(dirtyY1 <= kLogoY || dirtyY0 >= (kLogoY + kLogoH));
+    if (hitLogo) {
+      Text.pushImage(kLogoX, kLogoY, kLogoW, kLogoH, (uint16_t *)Index_B);
+    }
+
+    const int firstLineWidth = Text.textWidth(frameLineText[0]);
+    int leftStartX = kCenterX - (firstLineWidth / 2);
+    if (leftStartX < 0) leftStartX = 0;
+    if (leftStartX > (kSpriteW - 1)) leftStartX = kSpriteW - 1;
+
+    int drawFrom = globalRefresh ? 0 : drawStartLine;
+    if (lineCount <= 1) {
+      Text.setTextDatum(MC_DATUM);
+      for (int li = drawFrom; li < lineCount; ++li) {
+        if (!frameLineText[li].length()) continue;
+        const int y = baseY + li * kLineH;
+        Text.drawString(frameLineText[li], kCenterX, y);
+      }
+    } else {
+      if (drawFrom == 0) {
+        Text.setTextDatum(MC_DATUM);
+        if (frameLineText[0].length()) Text.drawString(frameLineText[0], kCenterX, baseY);
+        drawFrom = 1;
+      }
+      Text.setTextDatum(ML_DATUM);
+      int liStart = (drawFrom > 1) ? drawFrom : 1;
+      for (int li = liStart; li < lineCount; ++li) {
+        if (!frameLineText[li].length()) continue;
+        const int y = baseY + li * kLineH;
+        Text.drawString(frameLineText[li], leftStartX, y);
+      }
+    }
+    Text.setTextDatum(MC_DATUM);
+
+    Text.pushSprite(0, kSpriteScreenY + dirtyY0, 0, dirtyY0, kSpriteW, dirtyY1 - dirtyY0);
+
+    prevCurrentLineCount = lineCount;
+    prevFrozenVisiblePrefix = visibleFrozenPrefix;
+    prevBaseY = baseY;
+    for (int i = 0; i < kMaxLines; ++i) lastFrameLineText[i] = frameLineText[i];
   };
 
   int i = 0;
@@ -406,56 +413,29 @@ void showGlitchEffectUTF8(const char *text) {
   while (i < charCount) {
     bool didRollbackThisFrame = false;
 
-    // [生成字符序列]：一个跳动就是一帧
-    buildFrame(i, false);
-    // [带有回滚处理的绘制]
-    // 如果上一帧已标记回滚，本帧先执行回退，再重建并绘制。
+    // 下一帧执行回滚，避免同帧逻辑分叉过重。
     if (rollbackEnabled && rollbackPending) {
       rollbackPending = false;
       didRollbackThisFrame = true;
 
-      i -= 5;
+      i -= kDisturbWidth;
       if (i < 0) i = 0;
-
-      int clearL = i - 2;
-      if (clearL < 0) clearL = 0;
-      int clearR = i + 6;
-      if (clearR >= charCount) clearR = charCount - 1;
-      for (int j = clearL; j <= clearR; ++j) {
-        wrongActive[j] = false;
-        wrongChars[j] = "";
-        engFlickerActive[j] = false;
-        engFlickerLeft[j] = 0;
-      }
-
-      // 回退后重算当前帧：右侧重新填充乱码，并清空本帧错误标志统计。
-      memset(incorrectNow, 0, sizeof(incorrectNow));
-      buildFrame(i, false);
+      clearTransientState(i - 8, i + 12);
     }
-    drawWrapped(shown, i);
+
+    buildFrame(i, true);
+    drawWrapped(i, false);
     delay(10);
 
-    // [检测回滚条件]
-    // 本帧执行过回滚则跳过检测，避免刚回退就再次触发。
-    if (!didRollbackThisFrame && rollbackEnabled && i >= 2) 
-    {
-      bool allWrong3 = true;
-      for (int j = i - 2; j <= i; ++j) {
-        if (j < 0 || j >= charCount || !incorrectNow[j]) {
-          allWrong3 = false;
-          break;
-        }
-      }
-      if (allWrong3) {
-        // 非阻塞：只打标志，在下一帧执行回滚
-        rollbackPending = true;
-      }
+    // 回滚触发：仅检查光标左侧 3 个字符（dist=1,2,3）。
+    if (!didRollbackThisFrame && rollbackEnabled && i >= 3) {
+      const bool allWrong3 = incorrectNow[i - 1] && incorrectNow[i - 2] && incorrectNow[i - 3];
+      if (allWrong3) rollbackPending = true;
     }
-    // [按键处理]
+
     Key_loop();
     keycode = get_Keycode();
-    if (keycode == 2 && !keyLatch) 
-    {
+    if (keycode == 2 && !keyLatch) {
       keyLatch = true;
       if (!gEnableReprint) {
         forceFinishNow = true;
@@ -465,12 +445,9 @@ void showGlitchEffectUTF8(const char *text) {
         forceFinishNow = true;
       }
     }
-    if (keycode != 2) {
-      keyLatch = false;
-    }
+    if (keycode != 2) keyLatch = false;
     if (forceFinishNow) break;
 
-    // [音效处理]
     if (random(1, 100) <= 30 + Sound_count) {
       Sound_count = 0;
       mixer.playInsert("/BB2.wav");
@@ -478,13 +455,11 @@ void showGlitchEffectUTF8(const char *text) {
       Sound_count += 5;
     }
 
-    // 正常推进；若已打回滚标志，则停在当前位置，下一帧执行回滚。
-    if (!didRollbackThisFrame && !rollbackPending) {
-      i++;
-    }
+    if (!didRollbackThisFrame && !rollbackPending) i++;
   }
+
   for (int j = 0; j < charCount; ++j) shown[j] = chars[j];
-  drawWrapped(shown, charCount + 8);
+  drawWrapped(charCount + kDisturbWidth + kJunkWidth, true);
 }
 
 void task_LogoFadeInAndMove(void *pvParameters) {
