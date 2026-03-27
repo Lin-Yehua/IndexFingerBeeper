@@ -189,9 +189,10 @@ void showGlitchEffectUTF8(const char *text) {
     };
     
     //计算将要显示的字符串的视觉长度
+    //用来决定精灵推送的尺寸,局部覆盖的尺寸,以及第一行和后行的对齐
      auto getShowLength = [&](const String show[]) -> uint16_t 
     {
-      return getShowStringLength(show)< 32 ? getShowStringLength(show) * 8 : unitPerLine * 8;
+      
     };
     
     //计算当前进度的冻结行数
@@ -206,20 +207,15 @@ void showGlitchEffectUTF8(const char *text) {
     };
     
     //计算列绘制起始坐标
+    //用来决定精灵推送的尺寸,局部覆盖的尺寸,以及第一行和后行的对齐
     auto getBaseXShift = [&](const String show[]) -> uint16_t 
     {
-      uint16_t temp = 0;
-      temp = getShowStringLength(show);
-      if (temp <unitPerLine)
-      {
-        return ((float)getShowLength(show))/2;
-      }
       
-      return ((float)unitPerLine * 8)/2;
       
     };
         
     //合并单元行到字符串
+    /*目前的这一版似乎有点小问题*/
     auto mergeLine = [&](const String show[], String* output) -> uint16_t
     {
       uint16_t lenIdx = 0;
@@ -227,7 +223,7 @@ void showGlitchEffectUTF8(const char *text) {
       for (uint16_t i = 0; i < charCount; i++)
       {
         lineTemp += tokenUnit(show[i]);
-        if (lineTemp >= 31)
+        if (lineTemp > 32)
         {
           i--;
           lineTemp = 0;
@@ -265,49 +261,33 @@ void showGlitchEffectUTF8(const char *text) {
 
     uint8_t shownLine_len = mergeLine(shown,shownLine);
 
-    if(progressI == charCount - 1)
-    {
-      isGobalReflush = true;
-    }
-    //定向清除屏幕
+    //判断是否需要全局刷新
+    /*
+    全局刷新也就是重新打印全部行,包括冻结的行
+    需要全局刷新的场景:
+    1.行变动(破译增加行数,回退减少行数,其中回退减少行数需要清除上下露出来的上一帧绘制残留.通过spriteBG来直接打印指定位置的背景)
+    2.打印的结尾
+    3.需要立刻全屏更新的时候(外部)
+    */
+
+    //定向清除屏幕(操作的是Text这个精灵)
+    /*
+    只清理一部分区域
+    1.清除当前活动的行的画面(fill 0x0000)
+    2.需要全局刷新时,清理全部画面
+    */
     
-    for (uint8_t i = FreezentLineNum; i < shownLine_len; i++)
-    {
-      if (i == 0)
-      {
-        Text.fillRect(spriteXmiddle - viewlen/2 - 2,i * lineH,viewlen + 4,lineH,0x00FF);/*这里的-2和+4是为了安全保证多加的*/
-      }
-      else
-      {
-        Text.fillRect(baseX,i * lineH,320-(baseX * 2),lineH,0x0000);
-      }
-    }
-    //绘制背景
-    Text.pushImage(gobleXmiddle - 60, (int)(gobleYmiddle-60) - (int)baseY ,120,120,(uint16_t*)Index_B);
-
-
+    //绘制背景图像
+    /*
+    
+    */
     //绘制文字
-    for (uint8_t i = FreezentLineNum; i < shownLine_len; i++)
-    {
-      if (i == 0)
-      {
-        Text.setTextDatum(TC_DATUM);
-        Text.drawString(shownLine[i], gobleXmiddle,i * lineH + 2);
-        Text.setTextDatum(TL_DATUM);
-      }
-      else
-      {
-        Text.drawString(shownLine[i], baseX,i * lineH  + 2);
-      }
-    }
-    if(isGobalReflush)
-    {
-      Text.pushSprite(baseX,baseY,baseX_sprite,0,viewlen,(lineNow * lineH));
-    }
-    else
-    {
-      Text.pushSprite(baseX,shiftY,baseX_sprite,baseY_sprite,viewlen,((lineNow - FreezentLineNum) * lineH));
-    }
+    /*
+    把前面分好行的shown打印出来,只打印
+    */
+
+    //更新图像
+    
 
   };
 
@@ -335,7 +315,7 @@ void showGlitchEffectUTF8(const char *text) {
    - 光标右侧填充乱码
    - 光标左侧做扰动，并可选统计 incorrectNow（用于下一帧回滚判定）
    - 光标位置显示原字符
-
+   - 出于性能考虑,以下这版每一个字都替换乱码的版本不使用,改为只显示10个字的乱码(乱码区长度固定,直到结尾才缩短),保证同一时刻只有2行在跳动(前面的冻结了),也就是说变成了10乱码区5扰动区
    参数:光标位置
   */
   auto buildFrame = [&](int cursorI, bool collectIncorrect) 

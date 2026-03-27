@@ -7,6 +7,7 @@ const char *kLittleFsPartitionLabel = "littlefs";
 TFT_eSPI tft = TFT_eSPI();
 TFT_eSprite Text = TFT_eSprite(&tft);
 TFT_eSprite spriteBoot = TFT_eSprite(&tft);
+TFT_eSprite spriteBG = TFT_eSprite(&tft);
 CsvTextReader csv;
 WavMixerI2S mixer;
 

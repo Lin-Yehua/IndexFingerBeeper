@@ -18,6 +18,7 @@ extern const char *kLittleFsPartitionLabel;
 extern TFT_eSPI tft;
 extern TFT_eSprite Text;
 extern TFT_eSprite spriteBoot;
+extern TFT_eSprite spriteBG;
 extern CsvTextReader csv;
 extern WavMixerI2S mixer;
 

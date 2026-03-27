@@ -350,7 +350,9 @@ bool initProjectResources() {
   Text.setTextColor(0xff36, 0x0000);
   Text.drawString("PROJECT MOON", 180, 60);
   Text.setTextWrap(true, true);
-
+  spriteBG.createSprite(320, 120);
+  spriteBG.fillRect(0,0,320,120,0x0000);
+  spriteBG.pushImage(160 -60, 0, 120,120,(uint16_t*)Index_B);
   xTaskCreate(task_LogoFadeInAndMove, "LogoFadeMove", 20480, NULL, 1, NULL);
 
   message = csv.getTextById(1);
