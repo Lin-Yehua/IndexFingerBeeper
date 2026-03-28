@@ -418,8 +418,9 @@ void processAppLoop() {
       mixer.stopBG();
       mixer.playInsert("/BGend.wav");
       
-      tft.drawNumber(currentCsvId,20,100);
-      tft.drawNumber(csvCount,20,120);
+      //tft.drawNumber(currentCsvId,20,100);
+      //tft.drawNumber(csvCount,20,120);
     }
   }
 }
+
