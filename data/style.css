@@ -98,6 +98,26 @@ button.ghost {
   color: var(--danger);
 }
 
+.slider-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+input[type="range"] {
+  width: 100%;
+}
+
+.badge {
+  min-width: 52px;
+  text-align: center;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: #2b415c;
+  color: var(--text);
+  font-size: 13px;
+}
+
 @media (max-width: 640px) {
   .hero h1 {
     font-size: 24px;

@@ -12,8 +12,10 @@
 
 namespace {
 
-constexpr char kApSsid[] = u8"\u9075\u4ECE\u90FD\u5E02\u610F\u5FD7";
-constexpr char kApPassword[] = "12345678";
+constexpr char kDefaultApSsid[] = u8"\u9075\u4ECE\u90FD\u5E02\u610F\u5FD7";
+constexpr char kDefaultApPassword[] = "12345678";
+constexpr size_t kApSsidMaxLen = 32;
+constexpr size_t kApPasswordMaxLen = 64;
 constexpr uint16_t kHttpPort = 80;
 constexpr uint16_t kDnsPort = 53;
 constexpr BaseType_t kWebTaskCore = 0;
@@ -30,10 +32,122 @@ QueueHandle_t gMessageQueue = nullptr;
 TaskHandle_t gWebTaskHandle = nullptr;
 WebServer *gWebServer = nullptr;
 DNSServer *gDnsServer = nullptr;
+char gApSsid[kApSsidMaxLen] = {0};
+char gApPassword[kApPasswordMaxLen] = {0};
 volatile bool gWebTaskRunning = false;
 volatile bool gCsvReloadRequested = false;
 bool gPortalStarted = false;
 portMUX_TYPE gFlagMux = portMUX_INITIALIZER_UNLOCKED;
+
+void copyStringToBuf(const String &src, char *dst, size_t dstSize) {
+  if (!dst || dstSize == 0) return;
+  if (!src.length()) {
+    dst[0] = '\0';
+    return;
+  }
+  src.toCharArray(dst, dstSize);
+  dst[dstSize - 1] = '\0';
+}
+
+float clampGain(float value) {
+  if (value < 0.0f) return 0.0f;
+  if (value > 1.0f) return 1.0f;
+  return value;
+}
+
+int masterVolumePercent() {
+  const float avg = clampGain((gInsertGain + gBgGain) * 0.5f);
+  return static_cast<int>(avg * 100.0f + 0.5f);
+}
+
+void applyMasterVolumePercent(int percent) {
+  if (percent < 0) percent = 0;
+  if (percent > 100) percent = 100;
+  const float gain = static_cast<float>(percent) / 100.0f;
+  gInsertGain = gain;
+  gBgGain = gain;
+  mixer.setInsertGain(gInsertGain);
+  mixer.setBgGain(gBgGain);
+}
+
+String stripIniValue(String value) {
+  value.trim();
+  const int semicolon = value.indexOf(';');
+  if (semicolon >= 0) value = value.substring(0, semicolon);
+  const int hash = value.indexOf('#');
+  if (hash >= 0) value = value.substring(0, hash);
+  value.trim();
+  if (value.length() >= 2) {
+    const char first = value[0];
+    const char last = value[value.length() - 1];
+    if ((first == '"' && last == '"') || (first == '\'' && last == '\'')) {
+      value = value.substring(1, value.length() - 1);
+      value.trim();
+    }
+  }
+  return value;
+}
+
+void loadApCredentialsFromSettingIni() {
+  copyStringToBuf(String(kDefaultApSsid), gApSsid, sizeof(gApSsid));
+  copyStringToBuf(String(kDefaultApPassword), gApPassword, sizeof(gApPassword));
+
+  if (!fatMounted) return;
+  fs::File f = FFat.open("/setting.ini", FILE_READ);
+  if (!f) {
+    Serial.println("[WEB] /setting.ini not found, using default AP config");
+    return;
+  }
+
+  bool gotSsid = false;
+  bool gotPassword = false;
+  String ssidValue;
+  String passwordValue;
+
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (!line.length()) continue;
+    if (line.startsWith("#") || line.startsWith(";")) continue;
+
+    const int eq = line.indexOf('=');
+    if (eq <= 0) continue;
+
+    String key = line.substring(0, eq);
+    String value = line.substring(eq + 1);
+    key.trim();
+    key.toLowerCase();
+    value = stripIniValue(value);
+
+    if (key == "ssip" || key == "ssid") {
+      ssidValue = value;
+      gotSsid = true;
+    } else if (key == "password") {
+      passwordValue = value;
+      gotPassword = true;
+    }
+  }
+  f.close();
+
+  if (gotSsid) {
+    if (ssidValue.length()) {
+      copyStringToBuf(ssidValue, gApSsid, sizeof(gApSsid));
+    } else {
+      copyStringToBuf(String(kDefaultApSsid), gApSsid, sizeof(gApSsid));
+    }
+  }
+
+  if (gotPassword) {
+    if (!passwordValue.length()) {
+      gApPassword[0] = '\0';
+    } else if (passwordValue.length() >= 8) {
+      copyStringToBuf(passwordValue, gApPassword, sizeof(gApPassword));
+    } else {
+      gApPassword[0] = '\0';
+      Serial.println("[WEB] password length < 8, fallback to open AP");
+    }
+  }
+}
 
 void setCsvReloadRequested() {
   portENTER_CRITICAL(&gFlagMux);
@@ -94,6 +208,70 @@ bool enqueueMessage(const String &textRaw, String &errorOut) {
   return true;
 }
 
+bool persistAudioGainsToSettingIni() {
+  if (!fatMounted) return false;
+
+  String original;
+  if (FFat.exists("/setting.ini")) {
+    fs::File rf = FFat.open("/setting.ini", FILE_READ);
+    if (!rf) return false;
+    original = rf.readString();
+    rf.close();
+  }
+
+  bool foundInsert = false;
+  bool foundBg = false;
+  String output;
+  output.reserve(original.length() + 96);
+
+  int start = 0;
+  while (start <= original.length()) {
+    const int end = original.indexOf('\n', start);
+    String line = (end >= 0) ? original.substring(start, end) : original.substring(start);
+
+    String trimmed = line;
+    trimmed.trim();
+    if (trimmed.length() && !trimmed.startsWith("#") && !trimmed.startsWith(";")) {
+      const int eq = trimmed.indexOf('=');
+      if (eq > 0) {
+        String key = trimmed.substring(0, eq);
+        key.trim();
+        key.toLowerCase();
+        if (key == "insertgain") {
+          line = "InsertGain = " + String(gInsertGain, 3) + ";";
+          foundInsert = true;
+        } else if (key == "backgroundgain") {
+          line = "BackGroundGain = " + String(gBgGain, 3) + ";";
+          foundBg = true;
+        }
+      }
+    }
+
+    output += line;
+    if (end >= 0) {
+      output += '\n';
+      start = end + 1;
+    } else {
+      break;
+    }
+  }
+
+  if (!foundInsert) {
+    if (output.length() && output[output.length() - 1] != '\n') output += '\n';
+    output += "InsertGain = " + String(gInsertGain, 3) + ";\n";
+  }
+  if (!foundBg) {
+    if (output.length() && output[output.length() - 1] != '\n') output += '\n';
+    output += "BackGroundGain = " + String(gBgGain, 3) + ";\n";
+  }
+
+  fs::File wf = FFat.open("/setting.ini", "w");
+  if (!wf) return false;
+  const size_t written = wf.print(output);
+  wf.close();
+  return written == output.length();
+}
+
 String statusJson() {
   const UBaseType_t queued = gMessageQueue ? uxQueueMessagesWaiting(gMessageQueue) : 0;
   bool pendingReload = false;
@@ -105,6 +283,8 @@ String statusJson() {
   out += String(static_cast<unsigned int>(queued));
   out += ",\"csvReloadPending\":";
   out += pendingReload ? "true" : "false";
+  out += ",\"volume\":";
+  out += String(masterVolumePercent());
   out += "}";
   return out;
 }
@@ -168,6 +348,45 @@ void registerRoutes() {
 
   gWebServer->on("/api/status", HTTP_GET, []() {
     gWebServer->send(200, "application/json", statusJson());
+  });
+
+  gWebServer->on("/api/volume", HTTP_GET, []() {
+    String out = "{\"volume\":";
+    out += String(masterVolumePercent());
+    out += "}";
+    gWebServer->send(200, "application/json", out);
+  });
+
+  gWebServer->on("/api/volume", HTTP_POST, []() {
+    String value = gWebServer->arg("volume");
+    String persistArg = gWebServer->arg("persist");
+    if (!value.length() && gWebServer->hasArg("plain")) {
+      value = gWebServer->arg("plain");
+    }
+    if (!value.length()) {
+      gWebServer->send(400, "text/plain", "volume is empty");
+      return;
+    }
+
+    bool persist = true;
+    persistArg.trim();
+    persistArg.toLowerCase();
+    if (persistArg == "0" || persistArg == "false" || persistArg == "off" || persistArg == "no") {
+      persist = false;
+    }
+
+    applyMasterVolumePercent(value.toInt());
+    if (persist && !persistAudioGainsToSettingIni()) {
+      gWebServer->send(500, "text/plain", "volume applied but save /setting.ini failed");
+      return;
+    }
+
+    String out = "{\"volume\":";
+    out += String(masterVolumePercent());
+    out += ",\"persisted\":";
+    out += persist ? "true" : "false";
+    out += "}";
+    gWebServer->send(200, "application/json", out);
   });
 
   gWebServer->on("/api/csv", HTTP_GET, []() {
@@ -302,8 +521,16 @@ bool wirelessPortalStart() {
     }
   }
 
+  loadApCredentialsFromSettingIni();
+
   WiFi.mode(WIFI_AP);
-  if (!WiFi.softAP(kApSsid, kApPassword)) {
+  bool apOk = false;
+  if (gApPassword[0] == '\0') {
+    apOk = WiFi.softAP(gApSsid);
+  } else {
+    apOk = WiFi.softAP(gApSsid, gApPassword);
+  }
+  if (!apOk) {
     Serial.println("[WEB] softAP start failed");
     WiFi.mode(WIFI_OFF);
     return false;
@@ -329,7 +556,9 @@ bool wirelessPortalStart() {
 
   gPortalStarted = true;
   Serial.printf("[WEB] AP started SSID=%s PASS=%s IP=%s\n",
-                kApSsid, kApPassword, WiFi.softAPIP().toString().c_str());
+                gApSsid,
+                gApPassword[0] ? gApPassword : "<OPEN>",
+                WiFi.softAPIP().toString().c_str());
   return true;
 }
 
@@ -393,4 +622,3 @@ bool wirelessPortalHasPendingMessage() {
 bool wirelessPortalConsumeCsvReloadRequest() {
   return takeCsvReloadRequested();
 }
-
