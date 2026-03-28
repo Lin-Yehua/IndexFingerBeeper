@@ -605,6 +605,9 @@ String statusJson() {
   out += String(static_cast<unsigned int>(gApChannel));
   out += ",\"apPasswordSet\":";
   out += gApPassword[0] ? "true" : "false";
+  out += ",\"selfMac\":\"";
+  out += WiFi.softAPmacAddress();
+  out += "\"";
   out += "}";
   return out;
 }

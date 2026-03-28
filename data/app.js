@@ -11,12 +11,39 @@ const apSsidInput = document.getElementById("apSsidInput");
 const apPasswordInput = document.getElementById("apPasswordInput");
 const apChannelInput = document.getElementById("apChannelInput");
 const apConfigStatus = document.getElementById("apConfigStatus");
+const selfMacInput = document.getElementById("selfMacInput");
+const selfMacStatus = document.getElementById("selfMacStatus");
 
 let volumePushTimer = null;
 
 function setStatus(el, text, isError = false) {
   el.textContent = text || "";
   el.classList.toggle("error", !!isError);
+}
+
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (err) {}
+
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.focus();
+  ta.select();
+  let ok = false;
+  try {
+    ok = document.execCommand("copy");
+  } catch (err) {
+    ok = false;
+  }
+  document.body.removeChild(ta);
+  return ok;
 }
 
 async function loadCsv() {
@@ -65,6 +92,7 @@ async function refreshStatus() {
     const data = await resp.json();
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     setStatus(msgStatus, `WebQueue: ${data.queue} | HostQueue: ${data.hostQueue} | CSV reload pending: ${data.csvReloadPending} | AP: ${data.apSsid || "-"} CH:${data.apChannel || "-"}`);
+    selfMacInput.value = data.selfMac || "";
     if (typeof data.volume === "number" && document.activeElement !== volumeSlider) {
       setVolumeUi(data.volume);
     }
@@ -205,6 +233,15 @@ volumeSlider.addEventListener("change", () => {
 });
 document.getElementById("btnSaveHostMac").addEventListener("click", saveHostMac);
 document.getElementById("btnSaveApConfig").addEventListener("click", saveApConfig);
+document.getElementById("btnCopySelfMac").addEventListener("click", async () => {
+  const mac = (selfMacInput.value || "").trim();
+  if (!mac) {
+    setStatus(selfMacStatus, "MAC is empty", true);
+    return;
+  }
+  const ok = await copyText(mac);
+  setStatus(selfMacStatus, ok ? "MAC copied" : "Copy failed", !ok);
+});
 
 setInterval(refreshStatus, 1000);
 loadCsv();

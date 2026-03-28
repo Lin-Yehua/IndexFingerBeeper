@@ -7,6 +7,7 @@
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <esp_now.h>
+#include <vector>
 
 #include "EspNowMessage.h"
 
@@ -24,154 +25,46 @@ constexpr uint16_t kDnsPort = 53;
 constexpr BaseType_t kWebTaskCore = 0;
 constexpr UBaseType_t kWebTaskPriority = 1;
 constexpr uint32_t kWebTaskStack = 8192;
+constexpr char kWhitelistCsvPath[] = "/espnow_clients.csv";
+constexpr size_t kClientNoteMaxLen = 63;
+
+struct WhitelistEntry {
+  uint8_t mac[6];
+  char macText[18];
+  char note[kClientNoteMaxLen + 1];
+};
 
 const char kHostPortalHtml[] PROGMEM = R"HTML(
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>ESP-NOW Host</title>
-  <style>
-    :root{--bg:#0b1017;--card:#182435;--edge:#2e4661;--text:#f4f8ff;--muted:#b4c5dd;--accent:#53e4ff;--accent2:#8eff7a;--danger:#ff8f8f}
-    *{box-sizing:border-box}
-    body{margin:0;font-family:"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;background:radial-gradient(120% 120% at 50% 0%,#102138 0%,var(--bg) 60%);color:var(--text)}
-    .page{width:min(900px,100%);margin:0 auto;padding:16px}
-    .hero{margin-bottom:14px}
-    .hero h1{margin:0 0 8px;font-size:28px;line-height:1.15;color:var(--accent)}
-    .hero p{margin:0;color:var(--muted)}
-    .card{border:1px solid var(--edge);background:linear-gradient(180deg,#1b2d43,var(--card));border-radius:14px;padding:14px;margin-bottom:14px}
-    .card h2{margin:0 0 10px;font-size:18px}
-    textarea,input{width:100%;padding:12px;border-radius:10px;border:1px solid #456181;background:#0d1825;color:var(--text)}
-    textarea{min-height:130px;resize:vertical}
-    .row{display:flex;gap:10px;margin-top:10px;flex-wrap:wrap}
-    button{border:none;border-radius:10px;padding:10px 14px;min-width:110px;font-weight:600;color:#04111a;background:linear-gradient(135deg,var(--accent),var(--accent2));cursor:pointer}
-    button.ghost{color:var(--text);background:#2b415c}
-    .status{min-height:20px;margin:10px 0 0;color:var(--muted);white-space:pre-wrap}
-    .status.error{color:var(--danger)}
-    .tip{font-size:13px;color:var(--muted)}
-  </style>
-</head>
+<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ESP-NOW Host</title>
+<style>body{font-family:Segoe UI,Microsoft YaHei,sans-serif;background:#0b1017;color:#f4f8ff;margin:0;padding:12px}.c{background:#182435;border:1px solid #2e4661;border-radius:12px;padding:12px;margin-bottom:10px}textarea,input{width:100%;box-sizing:border-box;border:1px solid #456181;border-radius:8px;background:#0d1825;color:#f4f8ff;padding:10px}textarea{min-height:120px}.r{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px}button{border:0;border-radius:8px;padding:9px 12px;font-weight:700}button.p{background:#53e4ff;color:#04111a}button.g{background:#2b415c;color:#f4f8ff}.s{min-height:18px;color:#b4c5dd;margin-top:8px;white-space:pre-wrap}.e{color:#ff8f8f}.box{max-height:180px;overflow:auto;border:1px solid #3d5875;border-radius:8px;padding:8px;background:#0f1a28}.it{display:flex;gap:6px;align-items:center;padding:4px 0;border-bottom:1px solid rgba(180,197,221,.15)}.it:last-child{border-bottom:none}</style></head>
 <body>
-  <main class="page">
-    <header class="hero">
-      <h1>ESP-NOW Host</h1>
-      <p>Broadcast message to all clients. Config can be saved to <code>/setting.ini</code>.</p>
-    </header>
-
-    <section class="card">
-      <h2>1) Broadcast Message</h2>
-      <textarea id="msgBox" maxlength="192" placeholder="Text to broadcast"></textarea>
-      <div class="row">
-        <button id="btnSend" type="button">Broadcast</button>
-        <button id="btnClear" type="button" class="ghost">Clear</button>
-      </div>
-      <p id="sendStatus" class="status"></p>
-    </section>
-
-    <section class="card">
-      <h2>2) Host Communication Config</h2>
-      <input id="ssidInput" type="text" maxlength="32" placeholder="SSID">
-      <div class="row"></div>
-      <input id="passwordInput" type="text" maxlength="63" placeholder="Password (empty = open AP)">
-      <div class="row"></div>
-      <input id="channelInput" type="number" min="1" max="13" step="1" placeholder="ESP-NOW / AP channel (1-13)">
-      <div class="row">
-        <button id="btnSaveConfig" type="button">Save Config</button>
-      </div>
-      <p id="configStatus" class="status"></p>
-      <p class="tip">Save writes to /setting.ini. Reboot to apply new AP config.</p>
-    </section>
-
-    <section class="card">
-      <h2>3) Runtime Status</h2>
-      <p id="runtimeStatus" class="status"></p>
-    </section>
-  </main>
-
-  <script>
-    const msgBox = document.getElementById('msgBox');
-    const sendStatus = document.getElementById('sendStatus');
-    const runtimeStatus = document.getElementById('runtimeStatus');
-    const ssidInput = document.getElementById('ssidInput');
-    const passwordInput = document.getElementById('passwordInput');
-    const channelInput = document.getElementById('channelInput');
-    const configStatus = document.getElementById('configStatus');
-
-    function setStatus(el, text, isError = false) {
-      el.textContent = text || '';
-      el.classList.toggle('error', !!isError);
-    }
-
-    async function sendBroadcast() {
-      try {
-        const body = new FormData();
-        body.append('text', msgBox.value);
-        const resp = await fetch('/api/send', { method: 'POST', body });
-        const text = await resp.text();
-        if (!resp.ok) throw new Error(text || ('HTTP ' + resp.status));
-        setStatus(sendStatus, text || 'broadcast sent');
-        msgBox.value = '';
-      } catch (err) {
-        setStatus(sendStatus, 'Broadcast failed: ' + err.message, true);
-      }
-    }
-
-    async function loadConfig() {
-      try {
-        const resp = await fetch('/api/config');
-        const data = await resp.json();
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        ssidInput.value = data.ssid || '';
-        passwordInput.value = '';
-        channelInput.value = String(data.channel || 1);
-        setStatus(configStatus, data.passwordSet ? 'Password is set on device' : 'Open AP (no password)');
-      } catch (err) {
-        setStatus(configStatus, 'Config load failed: ' + err.message, true);
-      }
-    }
-
-    async function saveConfig() {
-      try {
-        const body = new FormData();
-        body.append('ssid', ssidInput.value.trim());
-        body.append('password', passwordInput.value);
-        body.append('channel', channelInput.value.trim());
-        const resp = await fetch('/api/config', { method: 'POST', body });
-        const raw = await resp.text();
-        if (!resp.ok) throw new Error(raw || ('HTTP ' + resp.status));
-        const data = JSON.parse(raw);
-        setStatus(configStatus, 'Saved: SSID=' + data.ssid + ', CH=' + data.channel + '. Reboot required to fully apply.');
-        passwordInput.value = '';
-      } catch (err) {
-        setStatus(configStatus, 'Config save failed: ' + err.message, true);
-      }
-    }
-
-    async function refreshStatus() {
-      try {
-        const resp = await fetch('/api/status');
-        const data = await resp.json();
-        if (!resp.ok) throw new Error('HTTP ' + resp.status);
-        setStatus(runtimeStatus, 'SSID: ' + data.ssid + ' | IP: ' + data.ip + ' | CH: ' + data.channel + ' | MAC: ' + data.mac);
-      } catch (err) {
-        setStatus(runtimeStatus, 'Status failed: ' + err.message, true);
-      }
-    }
-
-    document.getElementById('btnSend').addEventListener('click', sendBroadcast);
-    document.getElementById('btnClear').addEventListener('click', () => {
-      msgBox.value = '';
-      msgBox.focus();
-    });
-    document.getElementById('btnSaveConfig').addEventListener('click', saveConfig);
-
-    loadConfig();
-    refreshStatus();
-    setInterval(refreshStatus, 1000);
-  </script>
-</body>
-</html>
+<div class="c"><h3>1) Send</h3><textarea id="msg" maxlength="192" placeholder="Text to send"></textarea>
+<div class="r"><label><input id="wl" type="checkbox">Whitelist range</label><label><input id="tg" type="checkbox">Targeted</label></div>
+<div id="tbox" class="box" style="display:none"><div id="tlist"></div></div>
+<div class="r"><button id="send" class="p">Send</button><button id="clear" class="g">Clear</button></div><p id="ss" class="s"></p></div>
+<div class="c"><h3>2) Whitelist CSV (FFat)</h3><div class="r"><button id="lcsv" class="p">Load CSV</button><button id="scsv" class="p">Save CSV</button></div><textarea id="csv" placeholder="MAC,Name&#10;AA:BB:CC:DD:EE:FF,Client-1"></textarea><p id="cs" class="s"></p></div>
+<div class="c"><h3>3) AP Config</h3><input id="ssid" maxlength="32" placeholder="SSID"><div class="r"></div><input id="pwd" maxlength="63" placeholder="Password (empty=open)"><div class="r"></div><input id="ch" type="number" min="1" max="13" step="1" placeholder="Channel 1-13"><div class="r"><button id="scfg" class="p">Save Config</button></div><p id="cfgs" class="s"></p></div>
+<div class="c"><h3>4) Device MAC</h3><div class="r"><input id="smac" readonly><button id="cmac" class="g">Copy MAC</button></div><p id="ms" class="s"></p><p id="rs" class="s"></p></div>
+<script>
+const q=id=>document.getElementById(id),msg=q('msg'),wl=q('wl'),tg=q('tg'),tbox=q('tbox'),tlist=q('tlist'),csv=q('csv'),ssid=q('ssid'),pwd=q('pwd'),ch=q('ch'),smac=q('smac');
+function st(el,t,e=false){el.textContent=t||'';el.classList.toggle('e',!!e)}function ut(){tbox.style.display=(wl.checked&&tg.checked)?'block':'none'}
+function msel(){return Array.from(document.querySelectorAll('.tc:checked')).map(x=>x.value).join(',')}
+async function cp(t){try{if(navigator.clipboard&&window.isSecureContext){await navigator.clipboard.writeText(t);return true}}catch(e){}const a=document.createElement('textarea');a.value=t;a.style.position='fixed';a.style.opacity='0';document.body.appendChild(a);a.focus();a.select();let ok=false;try{ok=document.execCommand('copy')}catch(e){}document.body.removeChild(a);return ok}
+async function modeLoad(){try{const r=await fetch('/api/sendmode');const d=await r.json();if(!r.ok)throw new Error('HTTP '+r.status);wl.checked=!!d.whitelistEnabled;tg.checked=!!d.targetedMode;ut()}catch(e){st(q('ss'),'Load mode failed: '+e.message,true)}}
+async function modeSave(){try{const b=new FormData();b.append('whitelistEnabled',wl.checked?'1':'0');b.append('targetedMode',tg.checked?'1':'0');const r=await fetch('/api/sendmode',{method:'POST',body:b});const t=await r.text();if(!r.ok)throw new Error(t||('HTTP '+r.status));const d=JSON.parse(t);wl.checked=!!d.whitelistEnabled;tg.checked=!!d.targetedMode;ut();st(q('ss'),'Send mode updated')}catch(e){st(q('ss'),'Save mode failed: '+e.message,true)}}
+function tr(items){tlist.innerHTML='';if(!items||!items.length){const p=document.createElement('p');p.className='s';p.textContent='No whitelist clients';tlist.appendChild(p);return}items.forEach((x,i)=>{const l=document.createElement('label');l.className='it';const c=document.createElement('input');c.type='checkbox';c.className='tc';c.value=x.mac;if(i===0)c.checked=true;const s=document.createElement('span');s.textContent=(x.name||'(no name)')+' | '+x.mac;l.appendChild(c);l.appendChild(s);tlist.appendChild(l)})}
+async function targets(){try{const r=await fetch('/api/targets');const d=await r.json();if(!r.ok)throw new Error('HTTP '+r.status);tr(d.items||[])}catch(e){st(q('cs'),'Load targets failed: '+e.message,true)}}
+async function csvLoad(){try{const r=await fetch('/api/whitelistcsv');const t=await r.text();if(!r.ok)throw new Error(t||('HTTP '+r.status));csv.value=t;st(q('cs'),'CSV loaded')}catch(e){st(q('cs'),'Load CSV failed: '+e.message,true)}}
+async function csvSave(){try{const b=new FormData();b.append('content',csv.value);const r=await fetch('/api/whitelistcsv',{method:'POST',body:b});const t=await r.text();if(!r.ok)throw new Error(t||('HTTP '+r.status));st(q('cs'),t||'CSV saved');await targets()}catch(e){st(q('cs'),'Save CSV failed: '+e.message,true)}}
+async function send(){try{const b=new FormData();b.append('text',msg.value);if(wl.checked&&tg.checked)b.append('targets',msel());const r=await fetch('/api/send',{method:'POST',body:b});const t=await r.text();if(!r.ok)throw new Error(t||('HTTP '+r.status));st(q('ss'),t||'sent');msg.value=''}catch(e){st(q('ss'),'Send failed: '+e.message,true)}}
+async function cfgLoad(){try{const r=await fetch('/api/config');const d=await r.json();if(!r.ok)throw new Error('HTTP '+r.status);ssid.value=d.ssid||'';pwd.value='';ch.value=String(d.channel||1);st(q('cfgs'),d.passwordSet?'Password is set':'Open AP')}catch(e){st(q('cfgs'),'Config load failed: '+e.message,true)}}
+async function cfgSave(){try{const b=new FormData();b.append('ssid',ssid.value.trim());b.append('password',pwd.value);b.append('channel',ch.value.trim());const r=await fetch('/api/config',{method:'POST',body:b});const t=await r.text();if(!r.ok)throw new Error(t||('HTTP '+r.status));const d=JSON.parse(t);st(q('cfgs'),'Saved: SSID='+d.ssid+', CH='+d.channel+'. Reboot required.');pwd.value=''}catch(e){st(q('cfgs'),'Config save failed: '+e.message,true)}}
+async function rs(){try{const r=await fetch('/api/status');const d=await r.json();if(!r.ok)throw new Error('HTTP '+r.status);smac.value=d.selfMac||d.mac||'';st(q('rs'),'SSID:'+d.ssid+' | IP:'+d.ip+' | CH:'+d.channel+' | WL:'+(d.whitelistEnabled?'on':'off')+' | TG:'+(d.targetedMode?'on':'off')+' | N:'+d.whitelistCount)}catch(e){st(q('rs'),'Status failed: '+e.message,true)}}
+q('send').onclick=send;q('clear').onclick=()=>{msg.value='';msg.focus()};q('lcsv').onclick=csvLoad;q('scsv').onclick=csvSave;q('scfg').onclick=cfgSave;
+wl.onchange=async()=>{if(!wl.checked)tg.checked=false;ut();await modeSave()};tg.onchange=async()=>{if(tg.checked)wl.checked=true;ut();await modeSave()};
+q('cmac').onclick=async()=>{const t=(smac.value||'').trim();if(!t){st(q('ms'),'MAC is empty',true);return}const ok=await cp(t);st(q('ms'),ok?'MAC copied':'Copy failed',!ok)};
+(async()=>{await modeLoad();await csvLoad();await targets();await cfgLoad();await rs();setInterval(rs,1000)})();
+</script></body></html>
 )HTML";
 
 TaskHandle_t gWebTaskHandle = nullptr;
@@ -184,6 +77,9 @@ uint16_t gEspNowSeq = 0;
 char gApSsid[kApSsidMaxLen] = {0};
 char gApPassword[kApPasswordMaxLen] = {0};
 uint8_t gApChannel = kDefaultApChannel;
+bool gWhitelistEnabled = true;
+bool gTargetedMode = false;
+std::vector<WhitelistEntry> gWhitelistEntries;
 
 void copyStringToBuf(const String &src, char *dst, size_t dstSize) {
   if (!dst || dstSize == 0) return;
@@ -206,11 +102,25 @@ bool parseApChannel(const String &raw, uint8_t &outChannel) {
   s.trim();
   if (!s.length()) return false;
   const int channel = s.toInt();
-  if (channel < static_cast<int>(kApChannelMin) || channel > static_cast<int>(kApChannelMax)) {
-    return false;
-  }
+  if (channel < static_cast<int>(kApChannelMin) || channel > static_cast<int>(kApChannelMax)) return false;
   outChannel = static_cast<uint8_t>(channel);
   return true;
+}
+
+bool parseBoolString(const String &raw, bool &outValue) {
+  String v = raw;
+  v.trim();
+  v.toLowerCase();
+  if (!v.length()) return false;
+  if (v == "1" || v == "true" || v == "on" || v == "yes" || v == "enable" || v == "enabled") {
+    outValue = true;
+    return true;
+  }
+  if (v == "0" || v == "false" || v == "off" || v == "no" || v == "disable" || v == "disabled") {
+    outValue = false;
+    return true;
+  }
+  return false;
 }
 
 String stripIniValue(String value) {
@@ -231,10 +141,246 @@ String stripIniValue(String value) {
   return value;
 }
 
+String formatMacString(const uint8_t mac[6]) {
+  char buf[18] = {0};
+  snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  return String(buf);
+}
+
+bool parseMacString(const String &text, uint8_t outMac[6]) {
+  if (!outMac) return false;
+  String s = text;
+  s.trim();
+  if (!s.length()) return false;
+
+  unsigned int b[6] = {0};
+  int n = sscanf(s.c_str(), "%x:%x:%x:%x:%x:%x", &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]);
+  if (n != 6) n = sscanf(s.c_str(), "%x-%x-%x-%x-%x-%x", &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]);
+  if (n != 6) return false;
+
+  for (int i = 0; i < 6; ++i) {
+    if (b[i] > 0xFFU) return false;
+    outMac[i] = static_cast<uint8_t>(b[i]);
+  }
+  return true;
+}
+
+String jsonEscape(const String &src) {
+  String out;
+  out.reserve(src.length() + 8);
+  for (size_t i = 0; i < src.length(); ++i) {
+    const char c = src[i];
+    switch (c) {
+      case '"': out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default:
+        if (static_cast<unsigned char>(c) < 0x20U) {
+          char buf[7];
+          snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned int>(static_cast<unsigned char>(c)));
+          out += buf;
+        } else {
+          out += c;
+        }
+        break;
+    }
+  }
+  return out;
+}
+
+bool ensureWhitelistCsvExists() {
+  if (FFat.exists(kWhitelistCsvPath)) return true;
+  fs::File f = FFat.open(kWhitelistCsvPath, "w");
+  if (!f) return false;
+  const String content = "MAC,Name\n";
+  const size_t written = f.print(content);
+  f.close();
+  return written == content.length();
+}
+
+String readWhitelistCsvText() {
+  fs::File f = FFat.open(kWhitelistCsvPath, FILE_READ);
+  if (!f) return "";
+  String content = f.readString();
+  f.close();
+  return content;
+}
+
+bool saveWhitelistCsvText(const String &content) {
+  fs::File f = FFat.open(kWhitelistCsvPath, "w");
+  if (!f) return false;
+  const size_t written = f.print(content);
+  f.close();
+  return written == content.length();
+}
+
+bool parseWhitelistCsv(const String &csvText, std::vector<WhitelistEntry> &outEntries, String &errorOut, bool strictMode) {
+  outEntries.clear();
+  errorOut = "";
+
+  int start = 0;
+  int lineNo = 0;
+  while (start <= csvText.length()) {
+    const int end = csvText.indexOf('\n', start);
+    String line = (end >= 0) ? csvText.substring(start, end) : csvText.substring(start);
+    if (line.endsWith("\r")) line.remove(line.length() - 1);
+    ++lineNo;
+
+    String trimmed = line;
+    trimmed.trim();
+    if (trimmed.length() == 0 || trimmed.startsWith("#") || trimmed.startsWith(";")) {
+      if (end >= 0) {
+        start = end + 1;
+        continue;
+      }
+      break;
+    }
+
+    String lower = trimmed;
+    lower.toLowerCase();
+    if (lineNo == 1 && lower.indexOf("mac") >= 0) {
+      if (end >= 0) {
+        start = end + 1;
+        continue;
+      }
+      break;
+    }
+
+    const int comma = line.indexOf(',');
+    String macText = (comma >= 0) ? line.substring(0, comma) : line;
+    String note = (comma >= 0) ? line.substring(comma + 1) : "";
+    macText.trim();
+    note.trim();
+
+    if (!macText.length()) {
+      if (strictMode) {
+        errorOut = "line " + String(lineNo) + ": empty MAC";
+        return false;
+      }
+      if (end >= 0) {
+        start = end + 1;
+        continue;
+      }
+      break;
+    }
+
+    uint8_t mac[6] = {0};
+    if (!parseMacString(macText, mac)) {
+      if (strictMode) {
+        errorOut = "line " + String(lineNo) + ": invalid MAC format";
+        return false;
+      }
+      if (end >= 0) {
+        start = end + 1;
+        continue;
+      }
+      break;
+    }
+
+    bool existed = false;
+    for (size_t i = 0; i < outEntries.size(); ++i) {
+      if (memcmp(outEntries[i].mac, mac, 6) == 0) {
+        copyStringToBuf(note, outEntries[i].note, sizeof(outEntries[i].note));
+        existed = true;
+        break;
+      }
+    }
+
+    if (!existed) {
+      WhitelistEntry entry = {};
+      memcpy(entry.mac, mac, 6);
+      copyStringToBuf(formatMacString(mac), entry.macText, sizeof(entry.macText));
+      copyStringToBuf(note, entry.note, sizeof(entry.note));
+      outEntries.push_back(entry);
+    }
+
+    if (end >= 0) {
+      start = end + 1;
+    } else {
+      break;
+    }
+  }
+
+  return true;
+}
+
+bool reloadWhitelistFromFat(String &errorOut) {
+  if (!ensureWhitelistCsvExists()) {
+    errorOut = "cannot create whitelist csv";
+    return false;
+  }
+
+  std::vector<WhitelistEntry> parsed;
+  String parseError;
+  if (!parseWhitelistCsv(readWhitelistCsvText(), parsed, parseError, false)) {
+    errorOut = parseError;
+    return false;
+  }
+  gWhitelistEntries = parsed;
+  return true;
+}
+
+bool persistWhitelistEnabledToSettingIni(bool enabled) {
+  String original;
+  if (FFat.exists("/setting.ini")) {
+    fs::File rf = FFat.open("/setting.ini", FILE_READ);
+    if (!rf) return false;
+    original = rf.readString();
+    rf.close();
+  }
+
+  bool found = false;
+  String output;
+  output.reserve(original.length() + 48);
+
+  int start = 0;
+  while (start <= original.length()) {
+    const int end = original.indexOf('\n', start);
+    String line = (end >= 0) ? original.substring(start, end) : original.substring(start);
+
+    String trimmed = line;
+    trimmed.trim();
+    if (trimmed.length() && !trimmed.startsWith("#") && !trimmed.startsWith(";")) {
+      const int eq = trimmed.indexOf('=');
+      if (eq > 0) {
+        String key = trimmed.substring(0, eq);
+        key.trim();
+        key.toLowerCase();
+        if (key == "hostwhitelistenabled") {
+          line = String("HostWhitelistEnabled = ") + (enabled ? "true;" : "false;");
+          found = true;
+        }
+      }
+    }
+
+    output += line;
+    if (end >= 0) {
+      output += '\n';
+      start = end + 1;
+    } else {
+      break;
+    }
+  }
+
+  if (!found) {
+    if (output.length() && output[output.length() - 1] != '\n') output += '\n';
+    output += String("HostWhitelistEnabled = ") + (enabled ? "true;\n" : "false;\n");
+  }
+
+  fs::File wf = FFat.open("/setting.ini", "w");
+  if (!wf) return false;
+  const size_t written = wf.print(output);
+  wf.close();
+  return written == output.length();
+}
+
 void loadApCredentialsFromSettingIni() {
   copyStringToBuf(String(kDefaultApSsid), gApSsid, sizeof(gApSsid));
   copyStringToBuf(String(kDefaultApPassword), gApPassword, sizeof(gApPassword));
   gApChannel = kDefaultApChannel;
+  gWhitelistEnabled = true;
 
   fs::File f = FFat.open("/setting.ini", FILE_READ);
   if (!f) {
@@ -269,11 +415,10 @@ void loadApCredentialsFromSettingIni() {
       }
     } else if (key == "espnowchannel" || key == "channel" || key == "apchannel") {
       uint8_t parsed = kDefaultApChannel;
-      if (parseApChannel(value, parsed)) {
-        gApChannel = parsed;
-      } else {
-        gApChannel = kDefaultApChannel;
-      }
+      if (parseApChannel(value, parsed)) gApChannel = parsed;
+    } else if (key == "hostwhitelistenabled") {
+      bool parsed = true;
+      if (parseBoolString(value, parsed)) gWhitelistEnabled = parsed;
     }
   }
   f.close();
@@ -301,8 +446,9 @@ bool persistHostConfigToSettingIni(const String &ssidRaw, const String &password
   bool foundSsid = false;
   bool foundPassword = false;
   bool foundChannel = false;
+  bool foundWhitelist = false;
   String output;
-  output.reserve(original.length() + 128);
+  output.reserve(original.length() + 160);
 
   int start = 0;
   while (start <= original.length()) {
@@ -326,6 +472,9 @@ bool persistHostConfigToSettingIni(const String &ssidRaw, const String &password
         } else if (key == "espnowchannel" || key == "channel" || key == "apchannel") {
           line = "EspNowChannel = " + String(static_cast<unsigned int>(channel)) + ";";
           foundChannel = true;
+        } else if (key == "hostwhitelistenabled") {
+          line = String("HostWhitelistEnabled = ") + (gWhitelistEnabled ? "true;" : "false;");
+          foundWhitelist = true;
         }
       }
     }
@@ -350,6 +499,10 @@ bool persistHostConfigToSettingIni(const String &ssidRaw, const String &password
   if (!foundChannel) {
     if (output.length() && output[output.length() - 1] != '\n') output += '\n';
     output += "EspNowChannel = " + String(static_cast<unsigned int>(channel)) + ";\n";
+  }
+  if (!foundWhitelist) {
+    if (output.length() && output[output.length() - 1] != '\n') output += '\n';
+    output += String("HostWhitelistEnabled = ") + (gWhitelistEnabled ? "true;\n" : "false;\n");
   }
 
   fs::File wf = FFat.open("/setting.ini", "w");
@@ -386,7 +539,7 @@ bool initEspNowBroadcaster() {
   peer.ifidx = WIFI_IF_AP;
   const esp_err_t addRet = esp_now_add_peer(&peer);
   if (addRet != ESP_OK && addRet != ESP_ERR_ESPNOW_EXIST) {
-    Serial.printf("[HOST][ESPNOW] add peer failed: %d\n", static_cast<int>(addRet));
+    Serial.printf("[HOST][ESPNOW] add broadcast peer failed: %d\n", static_cast<int>(addRet));
     esp_now_deinit();
     return false;
   }
@@ -402,35 +555,181 @@ void deinitEspNowBroadcaster() {
   gEspNowReady = false;
 }
 
-bool sendBroadcastText(const String &rawText, String &errorOut) {
-  if (!gEspNowReady) {
-    errorOut = "esp-now not ready";
+bool ensureEspNowPeer(const uint8_t mac[6], String &errorOut) {
+  if (esp_now_is_peer_exist(mac)) return true;
+
+  esp_now_peer_info_t peer = {};
+  memcpy(peer.peer_addr, mac, 6);
+  peer.channel = 0;
+  peer.encrypt = false;
+  peer.ifidx = WIFI_IF_AP;
+  const esp_err_t ret = esp_now_add_peer(&peer);
+  if (ret != ESP_OK && ret != ESP_ERR_ESPNOW_EXIST) {
+    errorOut = "add peer failed";
     return false;
   }
+  return true;
+}
 
+bool buildPacketFromText(const String &rawText, EspNowTextPacket &pkt, String &errorOut) {
   String text = rawText;
   text.trim();
   if (!text.length()) {
     errorOut = "text is empty";
     return false;
   }
-  if (text.length() > kEspNowTextMaxBytes - 1) {
-    text.remove(kEspNowTextMaxBytes - 1);
-  }
+  if (text.length() > kEspNowTextMaxBytes - 1) text.remove(kEspNowTextMaxBytes - 1);
 
-  EspNowTextPacket pkt = {};
+  pkt = {};
   pkt.magic = kEspNowTextMagic;
   pkt.type = kEspNowMsgTypeText;
   pkt.seq = gEspNowSeq++;
   text.toCharArray(pkt.text, sizeof(pkt.text));
+  return true;
+}
 
-  uint8_t broadcastAddr[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
-  const esp_err_t ret = esp_now_send(broadcastAddr, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
+bool sendPacketToMac(const uint8_t mac[6], const EspNowTextPacket &pkt, String &errorOut) {
+  if (!ensureEspNowPeer(mac, errorOut)) return false;
+  const esp_err_t ret = esp_now_send(mac, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
   if (ret != ESP_OK) {
     errorOut = "esp-now send failed";
     return false;
   }
   return true;
+}
+
+bool findWhitelistEntryByMac(const uint8_t mac[6], WhitelistEntry &outEntry) {
+  for (size_t i = 0; i < gWhitelistEntries.size(); ++i) {
+    if (memcmp(gWhitelistEntries[i].mac, mac, 6) == 0) {
+      outEntry = gWhitelistEntries[i];
+      return true;
+    }
+  }
+  return false;
+}
+
+bool collectSelectedTargets(const String &targetsRaw, std::vector<WhitelistEntry> &outTargets, String &errorOut) {
+  outTargets.clear();
+
+  String normalized = targetsRaw;
+  normalized.replace(";", ",");
+  normalized.replace("\n", ",");
+  normalized.replace("\r", ",");
+
+  int start = 0;
+  while (start <= normalized.length()) {
+    const int end = normalized.indexOf(',', start);
+    String token = (end >= 0) ? normalized.substring(start, end) : normalized.substring(start);
+    token.trim();
+
+    if (token.length()) {
+      uint8_t mac[6] = {0};
+      if (!parseMacString(token, mac)) {
+        errorOut = "invalid target MAC: " + token;
+        return false;
+      }
+
+      WhitelistEntry entry = {};
+      if (!findWhitelistEntryByMac(mac, entry)) {
+        errorOut = "target not in whitelist: " + token;
+        return false;
+      }
+
+      bool exists = false;
+      for (size_t i = 0; i < outTargets.size(); ++i) {
+        if (memcmp(outTargets[i].mac, entry.mac, 6) == 0) {
+          exists = true;
+          break;
+        }
+      }
+      if (!exists) outTargets.push_back(entry);
+    }
+
+    if (end >= 0) {
+      start = end + 1;
+    } else {
+      break;
+    }
+  }
+
+  if (outTargets.empty()) {
+    errorOut = "no target selected";
+    return false;
+  }
+  return true;
+}
+
+bool sendTextByCurrentMode(const String &rawText, const String &targetsRaw, String &resultOut, String &errorOut) {
+  if (!gEspNowReady) {
+    errorOut = "esp-now not ready";
+    return false;
+  }
+
+  EspNowTextPacket pkt = {};
+  if (!buildPacketFromText(rawText, pkt, errorOut)) return false;
+
+  if (!gWhitelistEnabled) {
+    uint8_t broadcastAddr[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+    const esp_err_t ret = esp_now_send(broadcastAddr, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
+    if (ret != ESP_OK) {
+      errorOut = "broadcast send failed";
+      return false;
+    }
+    resultOut = "broadcast sent to all (whitelist OFF)";
+    return true;
+  }
+
+  if (gWhitelistEntries.empty()) {
+    errorOut = "whitelist is empty";
+    return false;
+  }
+
+  std::vector<WhitelistEntry> targets;
+  if (gTargetedMode) {
+    if (!collectSelectedTargets(targetsRaw, targets, errorOut)) return false;
+  } else {
+    targets = gWhitelistEntries;
+  }
+
+  int okCount = 0;
+  int failCount = 0;
+  String lastFail;
+  for (size_t i = 0; i < targets.size(); ++i) {
+    String err;
+    if (sendPacketToMac(targets[i].mac, pkt, err)) {
+      ++okCount;
+    } else {
+      ++failCount;
+      lastFail = targets[i].macText;
+      if (err.length()) lastFail += " (" + err + ")";
+    }
+  }
+
+  if (okCount == 0) {
+    errorOut = "send failed";
+    if (lastFail.length()) errorOut += ": " + lastFail;
+    return false;
+  }
+
+  resultOut = "sent " + String(okCount) + "/" + String(static_cast<unsigned int>(targets.size()));
+  if (failCount > 0) resultOut += ", failed=" + String(failCount);
+  return true;
+}
+
+String targetsJson() {
+  String out = "{\"count\":";
+  out += String(static_cast<unsigned int>(gWhitelistEntries.size()));
+  out += ",\"items\":[";
+  for (size_t i = 0; i < gWhitelistEntries.size(); ++i) {
+    if (i > 0) out += ",";
+    out += "{\"mac\":\"";
+    out += gWhitelistEntries[i].macText;
+    out += "\",\"name\":\"";
+    out += jsonEscape(String(gWhitelistEntries[i].note));
+    out += "\"}";
+  }
+  out += "]}";
+  return out;
 }
 
 String statusJson() {
@@ -440,10 +739,18 @@ String statusJson() {
   out += String(gApSsid);
   out += "\",\"mac\":\"";
   out += WiFi.softAPmacAddress();
+  out += "\",\"selfMac\":\"";
+  out += WiFi.softAPmacAddress();
   out += "\",\"channel\":";
   out += String(WiFi.channel());
   out += ",\"passwordSet\":";
   out += gApPassword[0] ? "true" : "false";
+  out += ",\"whitelistEnabled\":";
+  out += gWhitelistEnabled ? "true" : "false";
+  out += ",\"targetedMode\":";
+  out += gTargetedMode ? "true" : "false";
+  out += ",\"whitelistCount\":";
+  out += String(static_cast<unsigned int>(gWhitelistEntries.size()));
   out += "}";
   return out;
 }
@@ -453,30 +760,102 @@ void sendPortalPage() {
 }
 
 void registerRoutes() {
-  gWebServer->on("/", HTTP_GET, []() {
-    sendPortalPage();
-  });
-  gWebServer->on("/index.html", HTTP_GET, []() {
-    sendPortalPage();
-  });
+  gWebServer->on("/", HTTP_GET, []() { sendPortalPage(); });
+  gWebServer->on("/index.html", HTTP_GET, []() { sendPortalPage(); });
 
   gWebServer->on("/api/status", HTTP_GET, []() {
     gWebServer->send(200, "application/json", statusJson());
   });
 
-  gWebServer->on("/api/send", HTTP_POST, []() {
-    String text = gWebServer->arg("text");
-    if (!text.length() && gWebServer->hasArg("plain")) {
-      text = gWebServer->arg("plain");
+  gWebServer->on("/api/sendmode", HTTP_GET, []() {
+    String out = "{\"whitelistEnabled\":";
+    out += gWhitelistEnabled ? "true" : "false";
+    out += ",\"targetedMode\":";
+    out += gTargetedMode ? "true" : "false";
+    out += "}";
+    gWebServer->send(200, "application/json", out);
+  });
+
+  gWebServer->on("/api/sendmode", HTTP_POST, []() {
+    bool nextWhitelist = gWhitelistEnabled;
+    bool nextTargeted = gTargetedMode;
+
+    if (gWebServer->hasArg("whitelistEnabled")) {
+      if (!parseBoolString(gWebServer->arg("whitelistEnabled"), nextWhitelist)) {
+        gWebServer->send(400, "text/plain", "invalid whitelistEnabled");
+        return;
+      }
+    }
+    if (gWebServer->hasArg("targetedMode")) {
+      if (!parseBoolString(gWebServer->arg("targetedMode"), nextTargeted)) {
+        gWebServer->send(400, "text/plain", "invalid targetedMode");
+        return;
+      }
     }
 
-    String error;
-    if (!sendBroadcastText(text, error)) {
-      gWebServer->send(400, "text/plain", error);
+    if (!nextWhitelist) nextTargeted = false;
+    if (nextWhitelist != gWhitelistEnabled) {
+      if (!persistWhitelistEnabledToSettingIni(nextWhitelist)) {
+        gWebServer->send(500, "text/plain", "save /setting.ini failed");
+        return;
+      }
+    }
+
+    gWhitelistEnabled = nextWhitelist;
+    gTargetedMode = nextTargeted;
+
+    String out = "{\"whitelistEnabled\":";
+    out += gWhitelistEnabled ? "true" : "false";
+    out += ",\"targetedMode\":";
+    out += gTargetedMode ? "true" : "false";
+    out += "}";
+    gWebServer->send(200, "application/json", out);
+  });
+
+  gWebServer->on("/api/targets", HTTP_GET, []() {
+    gWebServer->send(200, "application/json", targetsJson());
+  });
+
+  gWebServer->on("/api/whitelistcsv", HTTP_GET, []() {
+    if (!ensureWhitelistCsvExists()) {
+      gWebServer->send(500, "text/plain", "cannot create whitelist csv");
+      return;
+    }
+    gWebServer->send(200, "text/plain; charset=utf-8", readWhitelistCsvText());
+  });
+
+  gWebServer->on("/api/whitelistcsv", HTTP_POST, []() {
+    String content = gWebServer->arg("content");
+    if (!content.length() && gWebServer->hasArg("plain")) content = gWebServer->arg("plain");
+
+    std::vector<WhitelistEntry> parsed;
+    String parseError;
+    if (!parseWhitelistCsv(content, parsed, parseError, true)) {
+      gWebServer->send(400, "text/plain", parseError);
+      return;
+    }
+    if (!saveWhitelistCsvText(content)) {
+      gWebServer->send(500, "text/plain", "save whitelist csv failed");
       return;
     }
 
-    gWebServer->send(200, "text/plain", "broadcast sent");
+    gWhitelistEntries = parsed;
+    String out = "saved whitelist csv, entries=" + String(static_cast<unsigned int>(gWhitelistEntries.size()));
+    gWebServer->send(200, "text/plain", out);
+  });
+
+  gWebServer->on("/api/send", HTTP_POST, []() {
+    String text = gWebServer->arg("text");
+    if (!text.length() && gWebServer->hasArg("plain")) text = gWebServer->arg("plain");
+    const String targets = gWebServer->arg("targets");
+
+    String result;
+    String error;
+    if (!sendTextByCurrentMode(text, targets, result, error)) {
+      gWebServer->send(400, "text/plain", error.length() ? error : "send failed");
+      return;
+    }
+    gWebServer->send(200, "text/plain", result);
   });
 
   gWebServer->on("/api/config", HTTP_GET, []() {
@@ -492,12 +871,8 @@ void registerRoutes() {
 
   gWebServer->on("/api/config", HTTP_POST, []() {
     String ssid = gWebServer->arg("ssid");
-    if (!ssid.length() && gWebServer->hasArg("ssip")) {
-      ssid = gWebServer->arg("ssip");
-    }
-    if (!ssid.length() && gWebServer->hasArg("plain")) {
-      ssid = gWebServer->arg("plain");
-    }
+    if (!ssid.length() && gWebServer->hasArg("ssip")) ssid = gWebServer->arg("ssip");
+    if (!ssid.length() && gWebServer->hasArg("plain")) ssid = gWebServer->arg("plain");
     String password = gWebServer->arg("password");
     String channelArg = gWebServer->arg("channel");
 
@@ -547,9 +922,7 @@ void registerRoutes() {
     gWebServer->send(200, "application/json", out);
   });
 
-  auto captiveRedirect = []() {
-    redirectToPortal();
-  };
+  auto captiveRedirect = []() { redirectToPortal(); };
   gWebServer->on("/generate_204", HTTP_GET, captiveRedirect);
   gWebServer->on("/gen_204", HTTP_GET, captiveRedirect);
   gWebServer->on("/hotspot-detect.html", HTTP_GET, captiveRedirect);
@@ -615,6 +988,10 @@ bool hostPortalStart() {
   if (gPortalStarted) return true;
 
   loadApCredentialsFromSettingIni();
+  String wlError;
+  if (!reloadWhitelistFromFat(wlError)) {
+    Serial.printf("[HOST] whitelist load failed: %s\n", wlError.c_str());
+  }
 
   WiFi.mode(WIFI_AP_STA);
   bool apOk = false;
@@ -636,15 +1013,7 @@ bool hostPortalStart() {
   }
 
   gWebTaskRunning = true;
-  const BaseType_t ok = xTaskCreatePinnedToCore(
-      webServerTask,
-      "HostWebPortal",
-      kWebTaskStack,
-      nullptr,
-      kWebTaskPriority,
-      &gWebTaskHandle,
-      kWebTaskCore);
-
+  const BaseType_t ok = xTaskCreatePinnedToCore(webServerTask, "HostWebPortal", kWebTaskStack, nullptr, kWebTaskPriority, &gWebTaskHandle, kWebTaskCore);
   if (ok != pdPASS) {
     gWebTaskRunning = false;
     deinitEspNowBroadcaster();
@@ -655,12 +1024,16 @@ bool hostPortalStart() {
   }
 
   gPortalStarted = true;
-  Serial.printf("[HOST] AP started SSID=%s PASS=%s IP=%s CH=%d MAC=%s\n",
+  Serial.printf("[HOST] AP started SSID=%s PASS=%s IP=%s CH=%d MAC=%s WL=%d TARGET=%d CSV=%s count=%u\n",
                 gApSsid,
                 gApPassword[0] ? gApPassword : "<OPEN>",
                 WiFi.softAPIP().toString().c_str(),
                 WiFi.channel(),
-                WiFi.softAPmacAddress().c_str());
+                WiFi.softAPmacAddress().c_str(),
+                gWhitelistEnabled ? 1 : 0,
+                gTargetedMode ? 1 : 0,
+                kWhitelistCsvPath,
+                static_cast<unsigned int>(gWhitelistEntries.size()));
   return true;
 }
 
