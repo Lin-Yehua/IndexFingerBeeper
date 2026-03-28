@@ -8,6 +8,7 @@
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <esp_now.h>
+#include <esp_wifi.h>
 
 #include "AppGlobals.h"
 #include "EspNowMessage.h"
@@ -100,6 +101,26 @@ bool parseBoolString(const String &raw, bool &outValue) {
     return true;
   }
   return false;
+}
+
+bool forceStaChannel(uint8_t channel) {
+  if (channel < kApChannelMin || channel > kApChannelMax) {
+    Serial.printf("[ESPNOW] invalid channel: %u\n", static_cast<unsigned int>(channel));
+    return false;
+  }
+
+  const esp_err_t setRet = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+  if (setRet != ESP_OK) {
+    Serial.printf("[ESPNOW] esp_wifi_set_channel failed: %d\n", static_cast<int>(setRet));
+    return false;
+  }
+
+  uint8_t primary = 0;
+  wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
+  if (esp_wifi_get_channel(&primary, &second) == ESP_OK) {
+    Serial.printf("[ESPNOW] STA channel locked to %u\n", static_cast<unsigned int>(primary));
+  }
+  return true;
 }
 
 int masterVolumePercent() {
@@ -1010,6 +1031,13 @@ bool wirelessPortalStart() {
   }
 
   WiFi.mode(gEnableAp ? WIFI_AP_STA : WIFI_STA);
+  if (!gEnableAp && gEnableEspNow) {
+    delay(10);
+    if (!forceStaChannel(gApChannel)) {
+      WiFi.mode(WIFI_OFF);
+      return false;
+    }
+  }
 
   if (gEnableAp) {
     bool apOk = false;
