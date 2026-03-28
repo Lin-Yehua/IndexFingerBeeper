@@ -3,8 +3,10 @@
 #include <Arduino.h>
 #include <FS.h>
 #include <FFat.h>
+#include <LittleFS.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <DNSServer.h>
 
 #include "AppGlobals.h"
 
@@ -13,21 +15,21 @@ namespace {
 constexpr char kApSsid[] = "ESP32-TFT-AP";
 constexpr char kApPassword[] = "12345678";
 constexpr uint16_t kHttpPort = 80;
+constexpr uint16_t kDnsPort = 53;
 constexpr BaseType_t kWebTaskCore = 0;
 constexpr UBaseType_t kWebTaskPriority = 1;
 constexpr uint32_t kWebTaskStack = 8192;
-constexpr size_t kSenderMaxLen = 24;
 constexpr size_t kTextMaxLen = 240;
 constexpr size_t kQueueDepth = 24;
 
 struct WebQueuedMessage {
-  char sender[kSenderMaxLen + 1];
   char text[kTextMaxLen + 1];
 };
 
 QueueHandle_t gMessageQueue = nullptr;
 TaskHandle_t gWebTaskHandle = nullptr;
 WebServer *gWebServer = nullptr;
+DNSServer *gDnsServer = nullptr;
 volatile bool gWebTaskRunning = false;
 volatile bool gCsvReloadRequested = false;
 bool gPortalStarted = false;
@@ -68,16 +70,11 @@ bool saveDataCsvText(const String &content) {
   return true;
 }
 
-bool enqueueMessage(const String &senderRaw, const String &textRaw, String &errorOut) {
+bool enqueueMessage(const String &textRaw, String &errorOut) {
   if (!gMessageQueue) {
     errorOut = "queue not ready";
     return false;
   }
-
-  String sender = senderRaw;
-  sender.trim();
-  if (!sender.length()) sender = "WEB";
-  if (sender.length() > kSenderMaxLen) sender.remove(kSenderMaxLen);
 
   String text = textRaw;
   text.trim();
@@ -88,7 +85,6 @@ bool enqueueMessage(const String &senderRaw, const String &textRaw, String &erro
   if (text.length() > kTextMaxLen) text.remove(kTextMaxLen);
 
   WebQueuedMessage msg = {};
-  sender.toCharArray(msg.sender, sizeof(msg.sender));
   text.toCharArray(msg.text, sizeof(msg.text));
 
   if (xQueueSend(gMessageQueue, &msg, 0) != pdTRUE) {
@@ -113,45 +109,61 @@ String statusJson() {
   return out;
 }
 
-String buildIndexHtml() {
-  String html;
-  html.reserve(5200);
-  html += "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>";
-  html += "<title>ESP32 AP Control</title><style>";
-  html += "body{font-family:Arial,sans-serif;background:#101820;color:#f2f2f2;margin:0;padding:14px;}";
-  html += "h1{margin:0 0 8px;font-size:22px;}h2{font-size:18px;margin:8px 0;}";
-  html += ".card{background:#1d2a3a;border-radius:10px;padding:12px;margin-bottom:12px;}";
-  html += "textarea,input{width:100%;border:0;border-radius:8px;padding:10px;box-sizing:border-box;}";
-  html += "textarea{min-height:180px;resize:vertical;}button{margin-top:8px;border:0;border-radius:8px;padding:10px 14px;cursor:pointer;}";
-  html += ".row{display:flex;gap:8px;flex-wrap:wrap;}.row button{flex:1;min-width:120px;}";
-  html += ".status{margin-top:8px;font-size:13px;opacity:0.85;white-space:pre-wrap;}";
-  html += "</style></head><body>";
-  html += "<h1>ESP32 AP Control</h1>";
-  html += "<div class='card'><h2>1) Edit /data.csv</h2>";
-  html += "<div class='row'><button onclick='loadCsv()'>Load CSV</button><button onclick='saveCsv()'>Save CSV</button></div>";
-  html += "<textarea id='csvBox' placeholder='id,text'></textarea><div id='csvStatus' class='status'></div></div>";
-  html += "<div class='card'><h2>2) Push Message Queue</h2>";
-  html += "<input id='sender' maxlength='24' placeholder='Sender (optional)'>";
-  html += "<textarea id='msg' maxlength='240' placeholder='Message to show on screen'></textarea>";
-  html += "<div class='row'><button onclick='sendMsg()'>Send</button><button onclick='clearMsg()'>Clear</button></div>";
-  html += "<div id='msgStatus' class='status'></div></div>";
-  html += "<script>";
-  html += "const csvBox=document.getElementById('csvBox');";
-  html += "const csvStatus=document.getElementById('csvStatus');";
-  html += "const msgStatus=document.getElementById('msgStatus');";
-  html += "async function loadCsv(){try{const r=await fetch('/api/csv');const t=await r.text();if(!r.ok)throw new Error(t||('HTTP '+r.status));csvBox.value=t;csvStatus.textContent='CSV loaded';}catch(e){csvStatus.textContent='Load failed: '+e.message;}}";
-  html += "async function saveCsv(){try{const fd=new FormData();fd.append('content',csvBox.value);const r=await fetch('/api/csv',{method:'POST',body:fd});const t=await r.text();if(!r.ok)throw new Error(t||('HTTP '+r.status));csvStatus.textContent=t||'CSV saved';}catch(e){csvStatus.textContent='Save failed: '+e.message;}}";
-  html += "async function sendMsg(){try{const fd=new FormData();fd.append('sender',document.getElementById('sender').value);fd.append('text',document.getElementById('msg').value);const r=await fetch('/api/send',{method:'POST',body:fd});const t=await r.text();if(!r.ok)throw new Error(t||('HTTP '+r.status));msgStatus.textContent=t||'Queued';document.getElementById('msg').value='';await refreshStatus();}catch(e){msgStatus.textContent='Send failed: '+e.message;}}";
-  html += "function clearMsg(){document.getElementById('msg').value='';}";
-  html += "async function refreshStatus(){try{const r=await fetch('/api/status');const j=await r.json();msgStatus.textContent='Queue: '+j.queue+' | csvReloadPending: '+j.csvReloadPending;}catch(e){}}";
-  html += "setInterval(refreshStatus,1000);loadCsv();refreshStatus();";
-  html += "</script></body></html>";
-  return html;
+String apRootUrl() {
+  String url = "http://";
+  url += WiFi.softAPIP().toString();
+  url += "/";
+  return url;
+}
+
+void redirectToPortal() {
+  gWebServer->sendHeader("Location", apRootUrl(), true);
+  gWebServer->send(302, "text/plain", "");
+}
+
+String detectContentType(const String &path) {
+  if (path.endsWith(".html")) return "text/html; charset=utf-8";
+  if (path.endsWith(".css")) return "text/css";
+  if (path.endsWith(".js")) return "application/javascript";
+  if (path.endsWith(".json")) return "application/json";
+  if (path.endsWith(".txt")) return "text/plain; charset=utf-8";
+  if (path.endsWith(".png")) return "image/png";
+  if (path.endsWith(".jpg") || path.endsWith(".jpeg")) return "image/jpeg";
+  if (path.endsWith(".svg")) return "image/svg+xml";
+  return "application/octet-stream";
+}
+
+bool streamFromLittleFs(const String &path) {
+  if (!LittleFS.exists(path)) return false;
+  fs::File f = LittleFS.open(path, FILE_READ);
+  if (!f) return false;
+  gWebServer->sendHeader("Cache-Control", "no-store");
+  gWebServer->streamFile(f, detectContentType(path));
+  f.close();
+  return true;
+}
+
+void handleStaticFile(const String &path) {
+  if (!streamFromLittleFs(path)) {
+    gWebServer->send(404, "text/plain", "file not found");
+  }
 }
 
 void registerRoutes() {
   gWebServer->on("/", HTTP_GET, []() {
-    gWebServer->send(200, "text/html", buildIndexHtml());
+    if (!streamFromLittleFs("/index.html")) {
+      gWebServer->send(500, "text/plain", "missing /index.html in LittleFS");
+    }
+  });
+
+  gWebServer->on("/index.html", HTTP_GET, []() {
+    handleStaticFile("/index.html");
+  });
+  gWebServer->on("/style.css", HTTP_GET, []() {
+    handleStaticFile("/style.css");
+  });
+  gWebServer->on("/app.js", HTTP_GET, []() {
+    handleStaticFile("/app.js");
   });
 
   gWebServer->on("/api/status", HTTP_GET, []() {
@@ -185,12 +197,11 @@ void registerRoutes() {
 
   gWebServer->on("/api/send", HTTP_POST, []() {
     String error;
-    const String sender = gWebServer->arg("sender");
     String text = gWebServer->arg("text");
     if (!text.length() && gWebServer->hasArg("plain")) {
       text = gWebServer->arg("plain");
     }
-    if (!enqueueMessage(sender, text, error)) {
+    if (!enqueueMessage(text, error)) {
       const int code = (error == "queue is full") ? 503 : 400;
       gWebServer->send(code, "text/plain", error);
       return;
@@ -201,33 +212,71 @@ void registerRoutes() {
     gWebServer->send(200, "text/plain", reply);
   });
 
+  auto captiveRedirect = []() {
+    redirectToPortal();
+  };
+
+  gWebServer->on("/generate_204", HTTP_GET, captiveRedirect);
+  gWebServer->on("/gen_204", HTTP_GET, captiveRedirect);
+  gWebServer->on("/hotspot-detect.html", HTTP_GET, captiveRedirect);
+  gWebServer->on("/connecttest.txt", HTTP_GET, captiveRedirect);
+  gWebServer->on("/ncsi.txt", HTTP_GET, captiveRedirect);
+  gWebServer->on("/fwlink", HTTP_GET, captiveRedirect);
+
   gWebServer->onNotFound([]() {
-    gWebServer->send(404, "text/plain", "not found");
+    const String uri = gWebServer->uri();
+    if (uri.startsWith("/api/")) {
+      gWebServer->send(404, "text/plain", "not found");
+      return;
+    }
+
+    if (LittleFS.exists(uri)) {
+      handleStaticFile(uri);
+      return;
+    }
+
+    redirectToPortal();
   });
 }
 
 void webServerTask(void *param) {
   (void)param;
   gWebServer = new WebServer(kHttpPort);
-  if (!gWebServer) {
+  gDnsServer = new DNSServer();
+  if (!gWebServer || !gDnsServer) {
+    if (gDnsServer) {
+      delete gDnsServer;
+      gDnsServer = nullptr;
+    }
+    if (gWebServer) {
+      delete gWebServer;
+      gWebServer = nullptr;
+    }
     gWebTaskRunning = false;
     gWebTaskHandle = nullptr;
     vTaskDelete(nullptr);
     return;
   }
 
+  gDnsServer->setErrorReplyCode(DNSReplyCode::NoError);
+  gDnsServer->start(kDnsPort, "*", WiFi.softAPIP());
+
   registerRoutes();
   gWebServer->begin();
-  Serial.printf("[WEB] HTTP ready: http://%s/\n", WiFi.softAPIP().toString().c_str());
+  Serial.printf("[WEB] HTTP ready: %s\n", apRootUrl().c_str());
 
   while (gWebTaskRunning) {
+    gDnsServer->processNextRequest();
     gWebServer->handleClient();
     vTaskDelay(pdMS_TO_TICKS(8));
   }
 
   gWebServer->stop();
+  gDnsServer->stop();
   delete gWebServer;
+  delete gDnsServer;
   gWebServer = nullptr;
+  gDnsServer = nullptr;
   gWebTaskHandle = nullptr;
   vTaskDelete(nullptr);
 }
@@ -236,6 +285,14 @@ void webServerTask(void *param) {
 
 bool wirelessPortalStart() {
   if (gPortalStarted) return true;
+
+  if (!LittleFS.exists("/index.html") ||
+      !LittleFS.exists("/style.css") ||
+      !LittleFS.exists("/app.js")) {
+    Serial.println("[WEB] missing web files in LittleFS (/index.html /style.css /app.js)");
+    Serial.println("[WEB] run: pio run -t uploadfs -e 4d_systems_esp32s3_gen4_r8n16");
+    return false;
+  }
 
   if (!gMessageQueue) {
     gMessageQueue = xQueueCreate(kQueueDepth, sizeof(WebQueuedMessage));
@@ -295,6 +352,12 @@ void wirelessPortalStop() {
     gWebServer = nullptr;
   }
 
+  if (gDnsServer) {
+    gDnsServer->stop();
+    delete gDnsServer;
+    gDnsServer = nullptr;
+  }
+
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_OFF);
 
@@ -318,12 +381,8 @@ bool wirelessPortalPopMessage(String &outMessage) {
   WebQueuedMessage msg = {};
   if (xQueueReceive(gMessageQueue, &msg, 0) != pdTRUE) return false;
 
-  outMessage.reserve(strlen(msg.sender) + strlen(msg.text) + 4);
-  outMessage += "[";
-  outMessage += msg.sender;
-  outMessage += "] ";
-  outMessage += msg.text;
-  return true;
+  outMessage = msg.text;
+  return outMessage.length() > 0;
 }
 
 bool wirelessPortalConsumeCsvReloadRequest() {

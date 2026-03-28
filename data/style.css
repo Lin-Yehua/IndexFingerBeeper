@@ -1,0 +1,113 @@
+:root {
+  --bg: #0b1017;
+  --card: #182435;
+  --card-edge: #2e4661;
+  --text: #f4f8ff;
+  --muted: #b4c5dd;
+  --accent: #53e4ff;
+  --accent-2: #8eff7a;
+  --danger: #ff8f8f;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: radial-gradient(120% 120% at 50% 0%, #102138 0%, var(--bg) 60%);
+  color: var(--text);
+}
+
+.page {
+  width: min(980px, 100%);
+  margin: 0 auto;
+  padding: 16px;
+}
+
+.hero {
+  margin-bottom: 14px;
+}
+
+.hero h1 {
+  margin: 0 0 8px;
+  font-size: 28px;
+  line-height: 1.15;
+  color: var(--accent);
+}
+
+.hero p {
+  margin: 0;
+  color: var(--muted);
+}
+
+.card {
+  border: 1px solid var(--card-edge);
+  background: linear-gradient(180deg, #1b2d43, var(--card));
+  border-radius: 14px;
+  padding: 14px;
+  margin-bottom: 14px;
+}
+
+.card h2 {
+  margin: 0 0 10px;
+  font-size: 18px;
+}
+
+textarea {
+  width: 100%;
+  min-height: 180px;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid #456181;
+  background: #0d1825;
+  color: var(--text);
+  resize: vertical;
+}
+
+.row {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+button {
+  border: none;
+  border-radius: 10px;
+  padding: 10px 14px;
+  min-width: 110px;
+  font-weight: 600;
+  color: #04111a;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+}
+
+button.ghost {
+  color: var(--text);
+  background: #2b415c;
+}
+
+.status {
+  min-height: 20px;
+  margin: 10px 0 0;
+  color: var(--muted);
+  white-space: pre-wrap;
+}
+
+.status.error {
+  color: var(--danger);
+}
+
+@media (max-width: 640px) {
+  .hero h1 {
+    font-size: 24px;
+  }
+
+  .row {
+    flex-wrap: wrap;
+  }
+
+  button {
+    flex: 1;
+  }
+}

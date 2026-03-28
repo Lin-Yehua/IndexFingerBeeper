@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>&#38656;&#35201;&#25191;&#34892;&#25805;&#20316;</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="page">
+    <header class="hero">
+      <h1>&#38656;&#35201;&#25191;&#34892;&#25805;&#20316;</h1>
+      <p>Edit <code>/data.csv</code>, or queue text for immediate screen insertion.</p>
+    </header>
+
+    <section class="card">
+      <h2>1) Edit data.csv</h2>
+      <div class="row">
+        <button id="btnLoadCsv" type="button">Load</button>
+        <button id="btnSaveCsv" type="button">Save</button>
+      </div>
+      <textarea id="csvBox" placeholder="id,text"></textarea>
+      <p id="csvStatus" class="status"></p>
+    </section>
+
+    <section class="card">
+      <h2>2) Queue immediate text</h2>
+      <textarea id="msgBox" maxlength="240" placeholder="Text to display on screen"></textarea>
+      <div class="row">
+        <button id="btnSendMsg" type="button">Send</button>
+        <button id="btnClearMsg" type="button" class="ghost">Clear</button>
+      </div>
+      <p id="msgStatus" class="status"></p>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>
