@@ -3,6 +3,7 @@
 #include "esp_system.h"
 #include "AppGlobals.h"
 #include "UsbAppMode.h"
+#include "WirelessPortal.h"
 
 void setup() {
   Serial.begin(115200);
@@ -45,7 +46,9 @@ void setup() {
   } else {
     Serial.println("[BOOT] USB not detected -> APP mode");
     if (enterAppMode()) {
-      initProjectResources();
+      if (initProjectResources()) {
+        wirelessPortalStart();
+      }
     }
   }
   usbHostActivePrev = usbHostActive;
@@ -55,6 +58,7 @@ void loop() {
   if (usbHostActive != usbHostActivePrev) {
     if (usbHostActive) {
       Serial.println("[AUTO] USB plugged -> USB mode");
+      wirelessPortalStop();
       enterUsbMode();
     } else {
       Serial.println("[AUTO] USB unplugged -> restart app");

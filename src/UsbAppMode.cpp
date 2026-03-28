@@ -9,6 +9,7 @@
 #include "AppGlobals.h"
 #include "UsbAppMode.h"
 #include "DisplayEffects.h"
+#include "WirelessPortal.h"
 #include "Index_B.h"
 #include "Key_Drv.h"
 
@@ -370,7 +371,38 @@ bool initProjectResources() {
   return true;
 }
 
+static void playMessageWithGlitch(const char *text) {
+  if (!text || !text[0]) return;
+
+  mixer.playBG("/BG.wav");
+  mixer.playInsert("/BGstart.wav");
+  Text.fillRect(0, 0, tft.width(), 100, TFT_BLACK);
+  Text.pushImage(160 - 60, 50 - 60, 120, 120, (uint16_t *)Index_B);
+  Text.pushSprite(0, 150 - 50);
+  showGlitchEffectUTF8(text);
+  mixer.stopBG();
+  mixer.playInsert("/BGend.wav");
+}
+
 void processAppLoop() {
+  if (wirelessPortalConsumeCsvReloadRequest()) {
+    if (csv.load(FFat, "/data.csv")) {
+      csvCount = 0;
+      RUNSTATE = 0;
+      Serial.println("[WEB] /data.csv reloaded");
+    } else {
+      Serial.println("[WEB] /data.csv reload failed");
+    }
+  }
+
+  String queuedMessage;
+  if (wirelessPortalPopMessage(queuedMessage)) {
+    do {
+      playMessageWithGlitch(queuedMessage.c_str());
+    } while (wirelessPortalPopMessage(queuedMessage));
+    return;
+  }
+
   int csvTotal = csv.size();
   if (csvTotal > kCsvArrayCapacity) {
     csvTotal = kCsvArrayCapacity;
@@ -401,26 +433,19 @@ void processAppLoop() {
       const int currentCsvId = csvArray[csvCount];
       csvCount++;
 
-      message = csv.getTextById(currentCsvId);
-      if (!message) {
-        static String messageFallback;
-        messageFallback = "CSV id not found: ";
-        messageFallback += String(currentCsvId);
-        message = messageFallback.c_str();
+      String localMessage;
+      const char *csvMessage = csv.getTextById(currentCsvId);
+      if (csvMessage) {
+        localMessage = csvMessage;
+      } else {
+        localMessage = "CSV id not found: ";
+        localMessage += String(currentCsvId);
       }
-      mixer.playBG("/BG.wav");
-      mixer.playInsert("/BGstart.wav");
-      //手动清除屏幕
-      Text.fillRect(0, 0, tft.width(), 100, TFT_BLACK);
-      Text.pushImage(160-60,50-60,120,120,(uint16_t *)Index_B);
-      Text.pushSprite(0,150-50);
-      showGlitchEffectUTF8(message);
-      mixer.stopBG();
-      mixer.playInsert("/BGend.wav");
-      
+      message = localMessage.c_str();
+      playMessageWithGlitch(message);
+
       //tft.drawNumber(currentCsvId,20,100);
       //tft.drawNumber(csvCount,20,120);
     }
   }
 }
-
