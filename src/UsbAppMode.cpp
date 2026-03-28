@@ -385,6 +385,9 @@ static void playMessageWithGlitch(const char *text) {
 }
 
 void processAppLoop() {
+  static bool webInterruptActive = false;
+  static bool webInterruptKeyLatch = false;
+
   if (wirelessPortalConsumeCsvReloadRequest()) {
     if (csv.load(FFat, "/data.csv")) {
       csvCount = 0;
@@ -395,11 +398,40 @@ void processAppLoop() {
     }
   }
 
-  String queuedMessage;
-  if (wirelessPortalPopMessage(queuedMessage)) {
-    do {
+  if (!webInterruptActive && wirelessPortalHasPendingMessage()) {
+    String queuedMessage;
+    if (wirelessPortalPopMessage(queuedMessage)) {
+      webInterruptActive = true;
+      webInterruptKeyLatch = false;
+      Serial.println("[WEB] interrupt started");
       playMessageWithGlitch(queuedMessage.c_str());
-    } while (wirelessPortalPopMessage(queuedMessage));
+      return;
+    }
+  }
+
+  if (webInterruptActive) {
+    Key_loop();
+    const uint8_t key = get_Keycode();
+    if (key == 2 && !webInterruptKeyLatch) {
+      webInterruptKeyLatch = true;
+      String queuedMessage;
+      if (wirelessPortalPopMessage(queuedMessage)) {
+        playMessageWithGlitch(queuedMessage.c_str());
+        if (!wirelessPortalHasPendingMessage()) {
+          webInterruptActive = false;
+          webInterruptKeyLatch = false;
+          Serial.println("[WEB] interrupt finished");
+        }
+      } else {
+        webInterruptActive = false;
+        webInterruptKeyLatch = false;
+        Serial.println("[WEB] interrupt finished");
+      }
+      return;
+    }
+    if (key != 2) {
+      webInterruptKeyLatch = false;
+    }
     return;
   }
 

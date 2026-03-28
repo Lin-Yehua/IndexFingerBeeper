@@ -12,7 +12,7 @@
 
 namespace {
 
-constexpr char kApSsid[] = "ESP32-TFT-AP";
+constexpr char kApSsid[] = u8"\u9075\u4ECE\u90FD\u5E02\u610F\u5FD7";
 constexpr char kApPassword[] = "12345678";
 constexpr uint16_t kHttpPort = 80;
 constexpr uint16_t kDnsPort = 53;
@@ -20,7 +20,7 @@ constexpr BaseType_t kWebTaskCore = 0;
 constexpr UBaseType_t kWebTaskPriority = 1;
 constexpr uint32_t kWebTaskStack = 8192;
 constexpr size_t kTextMaxLen = 240;
-constexpr size_t kQueueDepth = 24;
+constexpr size_t kQueueDepth = 128;
 
 struct WebQueuedMessage {
   char text[kTextMaxLen + 1];
@@ -385,6 +385,12 @@ bool wirelessPortalPopMessage(String &outMessage) {
   return outMessage.length() > 0;
 }
 
+bool wirelessPortalHasPendingMessage() {
+  if (!gMessageQueue) return false;
+  return uxQueueMessagesWaiting(gMessageQueue) > 0;
+}
+
 bool wirelessPortalConsumeCsvReloadRequest() {
   return takeCsvReloadRequested();
 }
+

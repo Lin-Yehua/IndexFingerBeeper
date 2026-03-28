@@ -5,4 +5,5 @@
 bool wirelessPortalStart();
 void wirelessPortalStop();
 bool wirelessPortalPopMessage(String &outMessage);
+bool wirelessPortalHasPendingMessage();
 bool wirelessPortalConsumeCsvReloadRequest();
