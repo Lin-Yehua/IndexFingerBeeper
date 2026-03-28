@@ -41,6 +41,7 @@ DNSServer *gDnsServer = nullptr;
 char gApSsid[kApSsidMaxLen] = {0};
 char gApPassword[kApPasswordMaxLen] = {0};
 uint8_t gApChannel = kDefaultApChannel;
+bool gEnableAp = true;
 bool gEspNowReady = false;
 uint8_t gHostMacFilter[6] = {0};
 bool gHostMacFilterEnabled = false;
@@ -82,6 +83,22 @@ bool parseApChannel(const String &raw, uint8_t &outChannel) {
   }
   outChannel = static_cast<uint8_t>(channel);
   return true;
+}
+
+bool parseBoolString(const String &raw, bool &outValue) {
+  String v = raw;
+  v.trim();
+  v.toLowerCase();
+  if (!v.length()) return false;
+  if (v == "1" || v == "true" || v == "on" || v == "yes" || v == "enable" || v == "enabled") {
+    outValue = true;
+    return true;
+  }
+  if (v == "0" || v == "false" || v == "off" || v == "no" || v == "disable" || v == "disabled") {
+    outValue = false;
+    return true;
+  }
+  return false;
 }
 
 int masterVolumePercent() {
@@ -173,6 +190,7 @@ void loadApCredentialsFromSettingIni() {
   copyStringToBuf(String(kDefaultApSsid), gApSsid, sizeof(gApSsid));
   copyStringToBuf(String(kDefaultApPassword), gApPassword, sizeof(gApPassword));
   gApChannel = kDefaultApChannel;
+  gEnableAp = true;
   applyHostMacFilterSetting("", false);
 
   if (!fatMounted) return;
@@ -218,6 +236,11 @@ void loadApCredentialsFromSettingIni() {
     } else if (key == "espnowchannel" || key == "channel" || key == "apchannel") {
       channelValue = value;
       gotChannel = true;
+    } else if (key == "enableap") {
+      bool parsed = true;
+      if (parseBoolString(value, parsed)) {
+        gEnableAp = parsed;
+      }
     }
   }
   f.close();
@@ -348,6 +371,7 @@ bool persistApConfigToSettingIni(const String &ssidRaw, const String &passwordRa
   bool foundSsid = false;
   bool foundPassword = false;
   bool foundChannel = false;
+  bool foundEnableAp = false;
   String output;
   output.reserve(original.length() + 128);
 
@@ -373,6 +397,9 @@ bool persistApConfigToSettingIni(const String &ssidRaw, const String &passwordRa
         } else if (key == "espnowchannel" || key == "channel" || key == "apchannel") {
           line = "EspNowChannel = " + String(static_cast<unsigned int>(channel)) + ";";
           foundChannel = true;
+        } else if (key == "enableap") {
+          line = String("EnableAP = ") + (gEnableAp ? "true;" : "false;");
+          foundEnableAp = true;
         }
       }
     }
@@ -397,6 +424,10 @@ bool persistApConfigToSettingIni(const String &ssidRaw, const String &passwordRa
   if (!foundChannel) {
     if (output.length() && output[output.length() - 1] != '\n') output += '\n';
     output += "EspNowChannel = " + String(static_cast<unsigned int>(channel)) + ";\n";
+  }
+  if (!foundEnableAp) {
+    if (output.length() && output[output.length() - 1] != '\n') output += '\n';
+    output += String("EnableAP = ") + (gEnableAp ? "true;\n" : "false;\n");
   }
 
   fs::File wf = FFat.open("/setting.ini", "w");
@@ -605,6 +636,8 @@ String statusJson() {
   out += String(static_cast<unsigned int>(gApChannel));
   out += ",\"apPasswordSet\":";
   out += gApPassword[0] ? "true" : "false";
+  out += ",\"enableAp\":";
+  out += gEnableAp ? "true" : "false";
   out += ",\"selfMac\":\"";
   out += WiFi.softAPmacAddress();
   out += "\"";
@@ -957,6 +990,11 @@ bool wirelessPortalStart() {
   }
 
   loadApCredentialsFromSettingIni();
+  if (!gEnableAp) {
+    Serial.println("[WEB] EnableAP=false, skip AP/web portal startup");
+    WiFi.mode(WIFI_OFF);
+    return true;
+  }
 
   WiFi.mode(WIFI_AP_STA);
   bool apOk = false;
@@ -996,11 +1034,12 @@ bool wirelessPortalStart() {
   }
 
   gPortalStarted = true;
-  Serial.printf("[WEB] AP started SSID=%s PASS=%s IP=%s CH=%d HostMAC=%s\n",
+  Serial.printf("[WEB] AP started SSID=%s PASS=%s IP=%s CH=%d EnableAP=%d HostMAC=%s\n",
                 gApSsid,
                 gApPassword[0] ? gApPassword : "<OPEN>",
                 WiFi.softAPIP().toString().c_str(),
                 WiFi.channel(),
+                gEnableAp ? 1 : 0,
                 gHostMacFilterEnabled ? gHostMacFilterText : "<ANY>");
   return true;
 }
