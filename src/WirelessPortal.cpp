@@ -42,6 +42,7 @@ char gApSsid[kApSsidMaxLen] = {0};
 char gApPassword[kApPasswordMaxLen] = {0};
 uint8_t gApChannel = kDefaultApChannel;
 bool gEnableAp = true;
+bool gEnableEspNow = true;
 bool gEspNowReady = false;
 uint8_t gHostMacFilter[6] = {0};
 bool gHostMacFilterEnabled = false;
@@ -191,6 +192,7 @@ void loadApCredentialsFromSettingIni() {
   copyStringToBuf(String(kDefaultApPassword), gApPassword, sizeof(gApPassword));
   gApChannel = kDefaultApChannel;
   gEnableAp = true;
+  gEnableEspNow = true;
   applyHostMacFilterSetting("", false);
 
   if (!fatMounted) return;
@@ -240,6 +242,11 @@ void loadApCredentialsFromSettingIni() {
       bool parsed = true;
       if (parseBoolString(value, parsed)) {
         gEnableAp = parsed;
+      }
+    } else if (key == "enableespnow") {
+      bool parsed = true;
+      if (parseBoolString(value, parsed)) {
+        gEnableEspNow = parsed;
       }
     }
   }
@@ -638,8 +645,10 @@ String statusJson() {
   out += gApPassword[0] ? "true" : "false";
   out += ",\"enableAp\":";
   out += gEnableAp ? "true" : "false";
+  out += ",\"enableEspNow\":";
+  out += gEnableEspNow ? "true" : "false";
   out += ",\"selfMac\":\"";
-  out += WiFi.softAPmacAddress();
+  out += gEnableAp ? WiFi.softAPmacAddress() : WiFi.macAddress();
   out += "\"";
   out += "}";
   return out;
@@ -966,80 +975,93 @@ void webServerTask(void *param) {
 bool wirelessPortalStart() {
   if (gPortalStarted) return true;
 
-  if (!LittleFS.exists("/index.html") ||
-      !LittleFS.exists("/style.css") ||
-      !LittleFS.exists("/app.js")) {
-    Serial.println("[WEB] missing web files in LittleFS (/index.html /style.css /app.js)");
-    Serial.println("[WEB] run: pio run -t uploadfs -e 4d_systems_esp32s3_gen4_r8n16");
-    return false;
-  }
-
-  if (!gMessageQueue) {
-    gMessageQueue = xQueueCreate(kQueueDepth, sizeof(WebQueuedMessage));
-    if (!gMessageQueue) {
-      Serial.println("[WEB] queue create failed");
-      return false;
-    }
-  }
-  if (!gHostMessageQueue) {
-    gHostMessageQueue = xQueueCreate(kQueueDepth, sizeof(WebQueuedMessage));
-    if (!gHostMessageQueue) {
-      Serial.println("[ESPNOW] host queue create failed");
-      return false;
-    }
-  }
-
   loadApCredentialsFromSettingIni();
-  if (!gEnableAp) {
-    Serial.println("[WEB] EnableAP=false, skip AP/web portal startup");
+  if (!gEnableAp && !gEnableEspNow) {
+    Serial.println("[WEB] EnableAP=false and EnableESPNOW=false, wireless off");
     WiFi.mode(WIFI_OFF);
     return true;
   }
 
-  WiFi.mode(WIFI_AP_STA);
-  bool apOk = false;
-  if (gApPassword[0] == '\0') {
-    apOk = WiFi.softAP(gApSsid, nullptr, gApChannel);
-  } else {
-    apOk = WiFi.softAP(gApSsid, gApPassword, gApChannel);
+  if (gEnableAp) {
+    if (!LittleFS.exists("/index.html") ||
+        !LittleFS.exists("/style.css") ||
+        !LittleFS.exists("/app.js")) {
+      Serial.println("[WEB] missing web files in LittleFS (/index.html /style.css /app.js)");
+      Serial.println("[WEB] run: pio run -t uploadfs -e 4d_systems_esp32s3_gen4_r8n16");
+      return false;
+    }
+
+    if (!gMessageQueue) {
+      gMessageQueue = xQueueCreate(kQueueDepth, sizeof(WebQueuedMessage));
+      if (!gMessageQueue) {
+        Serial.println("[WEB] queue create failed");
+        return false;
+      }
+    }
   }
-  if (!apOk) {
-    Serial.println("[WEB] softAP start failed");
-    WiFi.mode(WIFI_OFF);
-    return false;
+  if (gEnableEspNow) {
+    if (!gHostMessageQueue) {
+      gHostMessageQueue = xQueueCreate(kQueueDepth, sizeof(WebQueuedMessage));
+      if (!gHostMessageQueue) {
+        Serial.println("[ESPNOW] host queue create failed");
+        return false;
+      }
+    }
   }
 
-  if (!initEspNowReceiver()) {
-    WiFi.softAPdisconnect(true);
-    WiFi.mode(WIFI_OFF);
-    return false;
+  WiFi.mode(gEnableAp ? WIFI_AP_STA : WIFI_STA);
+
+  if (gEnableAp) {
+    bool apOk = false;
+    if (gApPassword[0] == '\0') {
+      apOk = WiFi.softAP(gApSsid, nullptr, gApChannel);
+    } else {
+      apOk = WiFi.softAP(gApSsid, gApPassword, gApChannel);
+    }
+    if (!apOk) {
+      Serial.println("[WEB] softAP start failed");
+      WiFi.mode(WIFI_OFF);
+      return false;
+    }
   }
 
-  gWebTaskRunning = true;
-  const BaseType_t ok = xTaskCreatePinnedToCore(
-      webServerTask,
-      "WebPortal",
-      kWebTaskStack,
-      nullptr,
-      kWebTaskPriority,
-      &gWebTaskHandle,
-      kWebTaskCore);
+  if (gEnableEspNow) {
+    if (!initEspNowReceiver()) {
+      if (gEnableAp) WiFi.softAPdisconnect(true);
+      WiFi.mode(WIFI_OFF);
+      return false;
+    }
+  }
 
-  if (ok != pdPASS) {
-    gWebTaskRunning = false;
-    WiFi.softAPdisconnect(true);
-    WiFi.mode(WIFI_OFF);
-    Serial.println("[WEB] task create failed");
-    return false;
+  if (gEnableAp) {
+    gWebTaskRunning = true;
+    const BaseType_t ok = xTaskCreatePinnedToCore(
+        webServerTask,
+        "WebPortal",
+        kWebTaskStack,
+        nullptr,
+        kWebTaskPriority,
+        &gWebTaskHandle,
+        kWebTaskCore);
+
+    if (ok != pdPASS) {
+      gWebTaskRunning = false;
+      deinitEspNowReceiver();
+      WiFi.softAPdisconnect(true);
+      WiFi.mode(WIFI_OFF);
+      Serial.println("[WEB] task create failed");
+      return false;
+    }
   }
 
   gPortalStarted = true;
-  Serial.printf("[WEB] AP started SSID=%s PASS=%s IP=%s CH=%d EnableAP=%d HostMAC=%s\n",
-                gApSsid,
-                gApPassword[0] ? gApPassword : "<OPEN>",
-                WiFi.softAPIP().toString().c_str(),
-                WiFi.channel(),
+  Serial.printf("[WEB] wireless started EnableAP=%d EnableESPNOW=%d SSID=%s PASS=%s AP_IP=%s CH=%d HostMAC=%s\n",
                 gEnableAp ? 1 : 0,
+                gEnableEspNow ? 1 : 0,
+                gEnableAp ? gApSsid : "<AP-OFF>",
+                gEnableAp ? (gApPassword[0] ? gApPassword : "<OPEN>") : "<AP-OFF>",
+                gEnableAp ? WiFi.softAPIP().toString().c_str() : "<AP-OFF>",
+                WiFi.channel(),
                 gHostMacFilterEnabled ? gHostMacFilterText : "<ANY>");
   return true;
 }
