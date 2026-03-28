@@ -41,6 +41,29 @@
       </div>
       <p id="volumeStatus" class="status"></p>
     </section>
+
+    <section class="card">
+      <h2>4) Host MAC (ESP-NOW source filter)</h2>
+      <input id="hostMacInput" type="text" placeholder="AA:BB:CC:DD:EE:FF (empty = accept all)">
+      <div class="row">
+        <button id="btnSaveHostMac" type="button">Save Host MAC</button>
+      </div>
+      <p id="hostMacStatus" class="status"></p>
+    </section>
+
+    <section class="card">
+      <h2>5) AP / ESP-NOW Channel</h2>
+      <input id="apSsidInput" type="text" maxlength="32" placeholder="AP SSID">
+      <div class="field"></div>
+      <input id="apPasswordInput" type="text" maxlength="63" placeholder="AP Password (empty = open AP)">
+      <div class="field"></div>
+      <input id="apChannelInput" type="number" min="1" max="13" step="1" placeholder="Channel (1-13)">
+      <div class="row">
+        <button id="btnSaveApConfig" type="button">Save AP Config</button>
+      </div>
+      <p id="apConfigStatus" class="status"></p>
+      <p class="status">Saved to <code>/setting.ini</code>, reboot required to fully apply.</p>
+    </section>
   </main>
 
   <script src="/app.js"></script>

@@ -7,15 +7,20 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
+#include <esp_now.h>
 
 #include "AppGlobals.h"
+#include "EspNowMessage.h"
 
 namespace {
 
 constexpr char kDefaultApSsid[] = u8"\u9075\u4ECE\u90FD\u5E02\u610F\u5FD7";
 constexpr char kDefaultApPassword[] = "12345678";
-constexpr size_t kApSsidMaxLen = 32;
-constexpr size_t kApPasswordMaxLen = 64;
+constexpr uint8_t kDefaultApChannel = 1;
+constexpr uint8_t kApChannelMin = 1;
+constexpr uint8_t kApChannelMax = 13;
+constexpr size_t kApSsidMaxLen = 33;
+constexpr size_t kApPasswordMaxLen = 65;
 constexpr uint16_t kHttpPort = 80;
 constexpr uint16_t kDnsPort = 53;
 constexpr BaseType_t kWebTaskCore = 0;
@@ -29,11 +34,17 @@ struct WebQueuedMessage {
 };
 
 QueueHandle_t gMessageQueue = nullptr;
+QueueHandle_t gHostMessageQueue = nullptr;
 TaskHandle_t gWebTaskHandle = nullptr;
 WebServer *gWebServer = nullptr;
 DNSServer *gDnsServer = nullptr;
 char gApSsid[kApSsidMaxLen] = {0};
 char gApPassword[kApPasswordMaxLen] = {0};
+uint8_t gApChannel = kDefaultApChannel;
+bool gEspNowReady = false;
+uint8_t gHostMacFilter[6] = {0};
+bool gHostMacFilterEnabled = false;
+char gHostMacFilterText[18] = {0};
 volatile bool gWebTaskRunning = false;
 volatile bool gCsvReloadRequested = false;
 bool gPortalStarted = false;
@@ -53,6 +64,24 @@ float clampGain(float value) {
   if (value < 0.0f) return 0.0f;
   if (value > 1.0f) return 1.0f;
   return value;
+}
+
+uint8_t clampApChannel(int channel) {
+  if (channel < static_cast<int>(kApChannelMin)) return kApChannelMin;
+  if (channel > static_cast<int>(kApChannelMax)) return kApChannelMax;
+  return static_cast<uint8_t>(channel);
+}
+
+bool parseApChannel(const String &raw, uint8_t &outChannel) {
+  String s = raw;
+  s.trim();
+  if (!s.length()) return false;
+  const int channel = s.toInt();
+  if (channel < static_cast<int>(kApChannelMin) || channel > static_cast<int>(kApChannelMax)) {
+    return false;
+  }
+  outChannel = static_cast<uint8_t>(channel);
+  return true;
 }
 
 int masterVolumePercent() {
@@ -88,9 +117,63 @@ String stripIniValue(String value) {
   return value;
 }
 
+String formatMacString(const uint8_t mac[6]) {
+  char buf[18] = {0};
+  snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  return String(buf);
+}
+
+bool parseMacString(const String &text, uint8_t outMac[6]) {
+  if (!outMac) return false;
+  String s = text;
+  s.trim();
+  if (!s.length()) return false;
+
+  unsigned int b[6] = {0};
+  int n = sscanf(s.c_str(), "%x:%x:%x:%x:%x:%x", &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]);
+  if (n != 6) {
+    n = sscanf(s.c_str(), "%x-%x-%x-%x-%x-%x", &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]);
+  }
+  if (n != 6) return false;
+
+  for (int i = 0; i < 6; ++i) {
+    if (b[i] > 0xFFU) return false;
+    outMac[i] = static_cast<uint8_t>(b[i]);
+  }
+  return true;
+}
+
+bool applyHostMacFilterSetting(const String &rawMac, bool printOnError) {
+  String value = rawMac;
+  value.trim();
+  if (!value.length()) {
+    memset(gHostMacFilter, 0, sizeof(gHostMacFilter));
+    gHostMacFilterEnabled = false;
+    gHostMacFilterText[0] = '\0';
+    return true;
+  }
+
+  uint8_t parsed[6] = {0};
+  if (!parseMacString(value, parsed)) {
+    if (printOnError) {
+      Serial.printf("[WEB] invalid HostMAC format: %s\n", value.c_str());
+    }
+    return false;
+  }
+
+  memcpy(gHostMacFilter, parsed, sizeof(gHostMacFilter));
+  gHostMacFilterEnabled = true;
+  const String fmt = formatMacString(gHostMacFilter);
+  copyStringToBuf(fmt, gHostMacFilterText, sizeof(gHostMacFilterText));
+  return true;
+}
+
 void loadApCredentialsFromSettingIni() {
   copyStringToBuf(String(kDefaultApSsid), gApSsid, sizeof(gApSsid));
   copyStringToBuf(String(kDefaultApPassword), gApPassword, sizeof(gApPassword));
+  gApChannel = kDefaultApChannel;
+  applyHostMacFilterSetting("", false);
 
   if (!fatMounted) return;
   fs::File f = FFat.open("/setting.ini", FILE_READ);
@@ -101,8 +184,12 @@ void loadApCredentialsFromSettingIni() {
 
   bool gotSsid = false;
   bool gotPassword = false;
+  bool gotHostMac = false;
+  bool gotChannel = false;
   String ssidValue;
   String passwordValue;
+  String hostMacValue;
+  String channelValue;
 
   while (f.available()) {
     String line = f.readStringUntil('\n');
@@ -125,6 +212,12 @@ void loadApCredentialsFromSettingIni() {
     } else if (key == "password") {
       passwordValue = value;
       gotPassword = true;
+    } else if (key == "hostmac") {
+      hostMacValue = value;
+      gotHostMac = true;
+    } else if (key == "espnowchannel" || key == "channel" || key == "apchannel") {
+      channelValue = value;
+      gotChannel = true;
     }
   }
   f.close();
@@ -147,7 +240,222 @@ void loadApCredentialsFromSettingIni() {
       Serial.println("[WEB] password length < 8, fallback to open AP");
     }
   }
+
+  if (gotHostMac) {
+    if (!applyHostMacFilterSetting(hostMacValue, true)) {
+      applyHostMacFilterSetting("", false);
+    }
+  }
+
+  if (gotChannel) {
+    uint8_t parsed = kDefaultApChannel;
+    if (parseApChannel(channelValue, parsed)) {
+      gApChannel = parsed;
+    } else {
+      gApChannel = kDefaultApChannel;
+      Serial.printf("[WEB] invalid channel in /setting.ini: %s, fallback=%u\n",
+                    channelValue.c_str(),
+                    static_cast<unsigned int>(gApChannel));
+    }
+  }
 }
+
+bool persistHostMacToSettingIni(const String &hostMacRaw) {
+  if (!fatMounted) return false;
+
+  String hostMac = hostMacRaw;
+  hostMac.trim();
+  if (hostMac.length()) {
+    uint8_t mac[6] = {0};
+    if (!parseMacString(hostMac, mac)) return false;
+    hostMac = formatMacString(mac);
+  }
+
+  String original;
+  if (FFat.exists("/setting.ini")) {
+    fs::File rf = FFat.open("/setting.ini", FILE_READ);
+    if (!rf) return false;
+    original = rf.readString();
+    rf.close();
+  }
+
+  bool foundHostMac = false;
+  String output;
+  output.reserve(original.length() + 48);
+
+  int start = 0;
+  while (start <= original.length()) {
+    const int end = original.indexOf('\n', start);
+    String line = (end >= 0) ? original.substring(start, end) : original.substring(start);
+
+    String trimmed = line;
+    trimmed.trim();
+    if (trimmed.length() && !trimmed.startsWith("#") && !trimmed.startsWith(";")) {
+      const int eq = trimmed.indexOf('=');
+      if (eq > 0) {
+        String key = trimmed.substring(0, eq);
+        key.trim();
+        key.toLowerCase();
+        if (key == "hostmac") {
+          line = "HostMAC = \"" + hostMac + "\";";
+          foundHostMac = true;
+        }
+      }
+    }
+
+    output += line;
+    if (end >= 0) {
+      output += '\n';
+      start = end + 1;
+    } else {
+      break;
+    }
+  }
+
+  if (!foundHostMac) {
+    if (output.length() && output[output.length() - 1] != '\n') output += '\n';
+    output += "HostMAC = \"" + hostMac + "\";\n";
+  }
+
+  fs::File wf = FFat.open("/setting.ini", "w");
+  if (!wf) return false;
+  const size_t written = wf.print(output);
+  wf.close();
+  return written == output.length();
+}
+
+bool persistApConfigToSettingIni(const String &ssidRaw, const String &passwordRaw, uint8_t channel) {
+  if (!fatMounted) return false;
+
+  String ssid = ssidRaw;
+  String password = passwordRaw;
+  ssid.trim();
+  password.trim();
+  channel = clampApChannel(channel);
+
+  if (!ssid.length()) return false;
+  if (ssid.length() >= sizeof(gApSsid)) return false;
+  if (password.length() && (password.length() < 8 || password.length() > 63)) return false;
+
+  String original;
+  if (FFat.exists("/setting.ini")) {
+    fs::File rf = FFat.open("/setting.ini", FILE_READ);
+    if (!rf) return false;
+    original = rf.readString();
+    rf.close();
+  }
+
+  bool foundSsid = false;
+  bool foundPassword = false;
+  bool foundChannel = false;
+  String output;
+  output.reserve(original.length() + 128);
+
+  int start = 0;
+  while (start <= original.length()) {
+    const int end = original.indexOf('\n', start);
+    String line = (end >= 0) ? original.substring(start, end) : original.substring(start);
+
+    String trimmed = line;
+    trimmed.trim();
+    if (trimmed.length() && !trimmed.startsWith("#") && !trimmed.startsWith(";")) {
+      const int eq = trimmed.indexOf('=');
+      if (eq > 0) {
+        String key = trimmed.substring(0, eq);
+        key.trim();
+        key.toLowerCase();
+        if (key == "ssip" || key == "ssid") {
+          line = "SSID = \"" + ssid + "\";";
+          foundSsid = true;
+        } else if (key == "password") {
+          line = "Password = \"" + password + "\";";
+          foundPassword = true;
+        } else if (key == "espnowchannel" || key == "channel" || key == "apchannel") {
+          line = "EspNowChannel = " + String(static_cast<unsigned int>(channel)) + ";";
+          foundChannel = true;
+        }
+      }
+    }
+
+    output += line;
+    if (end >= 0) {
+      output += '\n';
+      start = end + 1;
+    } else {
+      break;
+    }
+  }
+
+  if (!foundSsid) {
+    if (output.length() && output[output.length() - 1] != '\n') output += '\n';
+    output += "SSID = \"" + ssid + "\";\n";
+  }
+  if (!foundPassword) {
+    if (output.length() && output[output.length() - 1] != '\n') output += '\n';
+    output += "Password = \"" + password + "\";\n";
+  }
+  if (!foundChannel) {
+    if (output.length() && output[output.length() - 1] != '\n') output += '\n';
+    output += "EspNowChannel = " + String(static_cast<unsigned int>(channel)) + ";\n";
+  }
+
+  fs::File wf = FFat.open("/setting.ini", "w");
+  if (!wf) return false;
+  const size_t written = wf.print(output);
+  wf.close();
+  return written == output.length();
+}
+
+void onEspNowRecv(const uint8_t *macAddr, const uint8_t *data, int dataLen) {
+  if (!gHostMessageQueue) return;
+  if (!data || dataLen < static_cast<int>(sizeof(EspNowTextPacket))) return;
+
+  if (gHostMacFilterEnabled) {
+    if (!macAddr || memcmp(macAddr, gHostMacFilter, 6) != 0) return;
+  }
+
+  const EspNowTextPacket *pkt = reinterpret_cast<const EspNowTextPacket *>(data);
+  if (pkt->magic != kEspNowTextMagic || pkt->type != kEspNowMsgTypeText) return;
+
+  WebQueuedMessage msg = {};
+  msg.text[0] = '\0';
+  const size_t maxCopy = sizeof(msg.text) - 1;
+  size_t n = strnlen(pkt->text, kEspNowTextMaxBytes);
+  if (n > maxCopy) n = maxCopy;
+  memcpy(msg.text, pkt->text, n);
+  msg.text[n] = '\0';
+  if (!msg.text[0]) return;
+
+  if (xQueueSend(gHostMessageQueue, &msg, 0) != pdTRUE) {
+    WebQueuedMessage drop = {};
+    (void)xQueueReceive(gHostMessageQueue, &drop, 0);
+    (void)xQueueSend(gHostMessageQueue, &msg, 0);
+  }
+}
+
+bool initEspNowReceiver() {
+  if (gEspNowReady) return true;
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("[ESPNOW] init failed");
+    return false;
+  }
+  if (esp_now_register_recv_cb(onEspNowRecv) != ESP_OK) {
+    Serial.println("[ESPNOW] register recv callback failed");
+    esp_now_deinit();
+    return false;
+  }
+  gEspNowReady = true;
+  Serial.println("[ESPNOW] receiver ready");
+  return true;
+}
+
+void deinitEspNowReceiver() {
+  if (!gEspNowReady) return;
+  esp_now_unregister_recv_cb();
+  esp_now_deinit();
+  gEspNowReady = false;
+}
+
 
 void setCsvReloadRequested() {
   portENTER_CRITICAL(&gFlagMux);
@@ -274,6 +582,7 @@ bool persistAudioGainsToSettingIni() {
 
 String statusJson() {
   const UBaseType_t queued = gMessageQueue ? uxQueueMessagesWaiting(gMessageQueue) : 0;
+  const UBaseType_t hostQueued = gHostMessageQueue ? uxQueueMessagesWaiting(gHostMessageQueue) : 0;
   bool pendingReload = false;
   portENTER_CRITICAL(&gFlagMux);
   pendingReload = gCsvReloadRequested;
@@ -283,8 +592,19 @@ String statusJson() {
   out += String(static_cast<unsigned int>(queued));
   out += ",\"csvReloadPending\":";
   out += pendingReload ? "true" : "false";
+  out += ",\"hostQueue\":";
+  out += String(static_cast<unsigned int>(hostQueued));
   out += ",\"volume\":";
   out += String(masterVolumePercent());
+  out += ",\"hostMac\":\"";
+  out += gHostMacFilterEnabled ? String(gHostMacFilterText) : "";
+  out += "\"";
+  out += ",\"apSsid\":\"";
+  out += String(gApSsid);
+  out += "\",\"apChannel\":";
+  out += String(static_cast<unsigned int>(gApChannel));
+  out += ",\"apPasswordSet\":";
+  out += gApPassword[0] ? "true" : "false";
   out += "}";
   return out;
 }
@@ -386,6 +706,111 @@ void registerRoutes() {
     out += ",\"persisted\":";
     out += persist ? "true" : "false";
     out += "}";
+    gWebServer->send(200, "application/json", out);
+  });
+
+  gWebServer->on("/api/hostmac", HTTP_GET, []() {
+    String out = "{\"hostMac\":\"";
+    out += gHostMacFilterEnabled ? String(gHostMacFilterText) : "";
+    out += "\",\"enabled\":";
+    out += gHostMacFilterEnabled ? "true" : "false";
+    out += "}";
+    gWebServer->send(200, "application/json", out);
+  });
+
+  gWebServer->on("/api/hostmac", HTTP_POST, []() {
+    String hostMac = gWebServer->arg("hostMac");
+    if (!hostMac.length() && gWebServer->hasArg("hostmac")) {
+      hostMac = gWebServer->arg("hostmac");
+    }
+    if (!hostMac.length() && gWebServer->hasArg("plain")) {
+      hostMac = gWebServer->arg("plain");
+    }
+    hostMac.trim();
+
+    if (!applyHostMacFilterSetting(hostMac, false)) {
+      gWebServer->send(400, "text/plain", "invalid hostMac format");
+      return;
+    }
+    if (!persistHostMacToSettingIni(hostMac)) {
+      gWebServer->send(500, "text/plain", "hostMac applied but save /setting.ini failed");
+      return;
+    }
+
+    String out = "{\"hostMac\":\"";
+    out += gHostMacFilterEnabled ? String(gHostMacFilterText) : "";
+    out += "\",\"enabled\":";
+    out += gHostMacFilterEnabled ? "true" : "false";
+    out += "}";
+    gWebServer->send(200, "application/json", out);
+  });
+
+  gWebServer->on("/api/apconfig", HTTP_GET, []() {
+    String out = "{\"ssid\":\"";
+    out += String(gApSsid);
+    out += "\",\"passwordSet\":";
+    out += gApPassword[0] ? "true" : "false";
+    out += ",\"channel\":";
+    out += String(static_cast<unsigned int>(gApChannel));
+    out += "}";
+    gWebServer->send(200, "application/json", out);
+  });
+
+  gWebServer->on("/api/apconfig", HTTP_POST, []() {
+    String ssid = gWebServer->arg("ssid");
+    if (!ssid.length() && gWebServer->hasArg("ssip")) {
+      ssid = gWebServer->arg("ssip");
+    }
+    if (!ssid.length() && gWebServer->hasArg("plain")) {
+      ssid = gWebServer->arg("plain");
+    }
+
+    String password = gWebServer->arg("password");
+    String channelArg = gWebServer->arg("channel");
+
+    ssid.trim();
+    password.trim();
+    channelArg.trim();
+
+    if (!ssid.length()) {
+      gWebServer->send(400, "text/plain", "ssid is empty");
+      return;
+    }
+    if (ssid.length() >= sizeof(gApSsid)) {
+      gWebServer->send(400, "text/plain", "ssid too long");
+      return;
+    }
+    if (password.length() && (password.length() < 8 || password.length() > 63)) {
+      gWebServer->send(400, "text/plain", "password must be empty or 8-63 chars");
+      return;
+    }
+
+    uint8_t nextChannel = gApChannel;
+    if (channelArg.length() && !parseApChannel(channelArg, nextChannel)) {
+      gWebServer->send(400, "text/plain", "channel must be 1-13");
+      return;
+    }
+
+    if (!persistApConfigToSettingIni(ssid, password, nextChannel)) {
+      gWebServer->send(500, "text/plain", "save /setting.ini failed");
+      return;
+    }
+
+    copyStringToBuf(ssid, gApSsid, sizeof(gApSsid));
+    if (!password.length()) {
+      gApPassword[0] = '\0';
+    } else {
+      copyStringToBuf(password, gApPassword, sizeof(gApPassword));
+    }
+    gApChannel = nextChannel;
+
+    String out = "{\"ssid\":\"";
+    out += String(gApSsid);
+    out += "\",\"passwordSet\":";
+    out += gApPassword[0] ? "true" : "false";
+    out += ",\"channel\":";
+    out += String(static_cast<unsigned int>(gApChannel));
+    out += ",\"rebootRequired\":true}";
     gWebServer->send(200, "application/json", out);
   });
 
@@ -520,18 +945,31 @@ bool wirelessPortalStart() {
       return false;
     }
   }
+  if (!gHostMessageQueue) {
+    gHostMessageQueue = xQueueCreate(kQueueDepth, sizeof(WebQueuedMessage));
+    if (!gHostMessageQueue) {
+      Serial.println("[ESPNOW] host queue create failed");
+      return false;
+    }
+  }
 
   loadApCredentialsFromSettingIni();
 
-  WiFi.mode(WIFI_AP);
+  WiFi.mode(WIFI_AP_STA);
   bool apOk = false;
   if (gApPassword[0] == '\0') {
-    apOk = WiFi.softAP(gApSsid);
+    apOk = WiFi.softAP(gApSsid, nullptr, gApChannel);
   } else {
-    apOk = WiFi.softAP(gApSsid, gApPassword);
+    apOk = WiFi.softAP(gApSsid, gApPassword, gApChannel);
   }
   if (!apOk) {
     Serial.println("[WEB] softAP start failed");
+    WiFi.mode(WIFI_OFF);
+    return false;
+  }
+
+  if (!initEspNowReceiver()) {
+    WiFi.softAPdisconnect(true);
     WiFi.mode(WIFI_OFF);
     return false;
   }
@@ -555,10 +993,12 @@ bool wirelessPortalStart() {
   }
 
   gPortalStarted = true;
-  Serial.printf("[WEB] AP started SSID=%s PASS=%s IP=%s\n",
+  Serial.printf("[WEB] AP started SSID=%s PASS=%s IP=%s CH=%d HostMAC=%s\n",
                 gApSsid,
                 gApPassword[0] ? gApPassword : "<OPEN>",
-                WiFi.softAPIP().toString().c_str());
+                WiFi.softAPIP().toString().c_str(),
+                WiFi.channel(),
+                gHostMacFilterEnabled ? gHostMacFilterText : "<ANY>");
   return true;
 }
 
@@ -587,12 +1027,18 @@ void wirelessPortalStop() {
     gDnsServer = nullptr;
   }
 
+  deinitEspNowReceiver();
+
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_OFF);
 
   if (gMessageQueue) {
     WebQueuedMessage drop = {};
     while (xQueueReceive(gMessageQueue, &drop, 0) == pdTRUE) {}
+  }
+  if (gHostMessageQueue) {
+    WebQueuedMessage drop = {};
+    while (xQueueReceive(gHostMessageQueue, &drop, 0) == pdTRUE) {}
   }
 
   portENTER_CRITICAL(&gFlagMux);
@@ -617,6 +1063,22 @@ bool wirelessPortalPopMessage(String &outMessage) {
 bool wirelessPortalHasPendingMessage() {
   if (!gMessageQueue) return false;
   return uxQueueMessagesWaiting(gMessageQueue) > 0;
+}
+
+bool wirelessPortalPopHostMessage(String &outMessage) {
+  outMessage = "";
+  if (!gHostMessageQueue) return false;
+
+  WebQueuedMessage msg = {};
+  if (xQueueReceive(gHostMessageQueue, &msg, 0) != pdTRUE) return false;
+
+  outMessage = msg.text;
+  return outMessage.length() > 0;
+}
+
+bool wirelessPortalHasPendingHostMessage() {
+  if (!gHostMessageQueue) return false;
+  return uxQueueMessagesWaiting(gHostMessageQueue) > 0;
 }
 
 bool wirelessPortalConsumeCsvReloadRequest() {

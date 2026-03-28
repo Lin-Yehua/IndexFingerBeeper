@@ -66,6 +66,24 @@ textarea {
   resize: vertical;
 }
 
+input[type="text"] {
+  width: 100%;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid #456181;
+  background: #0d1825;
+  color: var(--text);
+}
+
+input[type="number"] {
+  width: 100%;
+  padding: 12px;
+  border-radius: 10px;
+  border: 1px solid #456181;
+  background: #0d1825;
+  color: var(--text);
+}
+
 .row {
   display: flex;
   gap: 10px;
@@ -96,6 +114,10 @@ button.ghost {
 
 .status.error {
   color: var(--danger);
+}
+
+.field {
+  height: 10px;
 }
 
 .slider-row {

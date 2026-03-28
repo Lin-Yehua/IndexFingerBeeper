@@ -5,6 +5,12 @@ const msgStatus = document.getElementById("msgStatus");
 const volumeSlider = document.getElementById("volumeSlider");
 const volumeValue = document.getElementById("volumeValue");
 const volumeStatus = document.getElementById("volumeStatus");
+const hostMacInput = document.getElementById("hostMacInput");
+const hostMacStatus = document.getElementById("hostMacStatus");
+const apSsidInput = document.getElementById("apSsidInput");
+const apPasswordInput = document.getElementById("apPasswordInput");
+const apChannelInput = document.getElementById("apChannelInput");
+const apConfigStatus = document.getElementById("apConfigStatus");
 
 let volumePushTimer = null;
 
@@ -58,12 +64,77 @@ async function refreshStatus() {
     const resp = await fetch("/api/status");
     const data = await resp.json();
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    setStatus(msgStatus, `Queue: ${data.queue} | CSV reload pending: ${data.csvReloadPending}`);
+    setStatus(msgStatus, `WebQueue: ${data.queue} | HostQueue: ${data.hostQueue} | CSV reload pending: ${data.csvReloadPending} | AP: ${data.apSsid || "-"} CH:${data.apChannel || "-"}`);
     if (typeof data.volume === "number" && document.activeElement !== volumeSlider) {
       setVolumeUi(data.volume);
     }
   } catch (err) {
     setStatus(msgStatus, `Status failed: ${err.message}`, true);
+  }
+}
+
+async function loadHostMac() {
+  try {
+    const resp = await fetch("/api/hostmac");
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    hostMacInput.value = data.hostMac || "";
+    setStatus(hostMacStatus, data.enabled
+      ? `Host MAC filter enabled: ${data.hostMac}`
+      : "Host MAC filter disabled (accept all)");
+  } catch (err) {
+    setStatus(hostMacStatus, `Host MAC load failed: ${err.message}`, true);
+  }
+}
+
+async function saveHostMac() {
+  try {
+    const body = new FormData();
+    body.append("hostMac", hostMacInput.value.trim());
+    const resp = await fetch("/api/hostmac", { method: "POST", body });
+    const raw = await resp.text();
+    if (!resp.ok) throw new Error(raw || `HTTP ${resp.status}`);
+    const data = JSON.parse(raw);
+    hostMacInput.value = data.hostMac || "";
+    setStatus(hostMacStatus, data.enabled
+      ? `Host MAC saved: ${data.hostMac}`
+      : "Host MAC filter disabled");
+  } catch (err) {
+    setStatus(hostMacStatus, `Host MAC save failed: ${err.message}`, true);
+  }
+}
+
+async function loadApConfig() {
+  try {
+    const resp = await fetch("/api/apconfig");
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    apSsidInput.value = data.ssid || "";
+    apPasswordInput.value = "";
+    apChannelInput.value = String(data.channel || 1);
+    setStatus(apConfigStatus, data.passwordSet
+      ? "AP password is set on device"
+      : "Open AP (no password)");
+  } catch (err) {
+    setStatus(apConfigStatus, `AP config load failed: ${err.message}`, true);
+  }
+}
+
+async function saveApConfig() {
+  try {
+    const body = new FormData();
+    body.append("ssid", apSsidInput.value.trim());
+    body.append("password", apPasswordInput.value);
+    body.append("channel", apChannelInput.value.trim());
+    const resp = await fetch("/api/apconfig", { method: "POST", body });
+    const raw = await resp.text();
+    if (!resp.ok) throw new Error(raw || `HTTP ${resp.status}`);
+    const data = JSON.parse(raw);
+    setStatus(apConfigStatus, `Saved: SSID=${data.ssid} CH=${data.channel}. Reboot required.`);
+    apPasswordInput.value = "";
+    await refreshStatus();
+  } catch (err) {
+    setStatus(apConfigStatus, `AP config save failed: ${err.message}`, true);
   }
 }
 
@@ -132,8 +203,12 @@ volumeSlider.addEventListener("change", () => {
   setVolumeUi(volumeSlider.value);
   pushVolumeWithPersist(volumeSlider.value, true);
 });
+document.getElementById("btnSaveHostMac").addEventListener("click", saveHostMac);
+document.getElementById("btnSaveApConfig").addEventListener("click", saveApConfig);
 
 setInterval(refreshStatus, 1000);
 loadCsv();
 loadVolume();
+loadHostMac();
+loadApConfig();
 refreshStatus();

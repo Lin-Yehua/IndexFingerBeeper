@@ -398,6 +398,15 @@ void processAppLoop() {
     }
   }
 
+  String hostBroadcastMessage;
+  if (wirelessPortalPopHostMessage(hostBroadcastMessage)) {
+    if (webInterruptActive) {
+      Serial.println("[ESPNOW] preempt web interrupt");
+    }
+    playMessageWithGlitch(hostBroadcastMessage.c_str());
+    return;
+  }
+
   if (!webInterruptActive && wirelessPortalHasPendingMessage()) {
     String queuedMessage;
     if (wirelessPortalPopMessage(queuedMessage)) {
