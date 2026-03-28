@@ -9,3 +9,4 @@ bool wirelessPortalHasPendingMessage();
 bool wirelessPortalPopHostMessage(String &outMessage);
 bool wirelessPortalHasPendingHostMessage();
 bool wirelessPortalConsumeCsvReloadRequest();
+bool wirelessPortalInstantRefreshNoKeyEnabled();

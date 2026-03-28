@@ -5,6 +5,8 @@ const msgStatus = document.getElementById("msgStatus");
 const volumeSlider = document.getElementById("volumeSlider");
 const volumeValue = document.getElementById("volumeValue");
 const volumeStatus = document.getElementById("volumeStatus");
+const instantRefreshNoKey = document.getElementById("instantRefreshNoKey");
+const refreshModeStatus = document.getElementById("refreshModeStatus");
 const hostMacInput = document.getElementById("hostMacInput");
 const hostMacStatus = document.getElementById("hostMacStatus");
 const apSsidInput = document.getElementById("apSsidInput");
@@ -93,11 +95,45 @@ async function refreshStatus() {
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     setStatus(msgStatus, `WebQueue: ${data.queue} | HostQueue: ${data.hostQueue} | CSV reload pending: ${data.csvReloadPending} | AP: ${data.apSsid || "-"} CH:${data.apChannel || "-"}`);
     selfMacInput.value = data.selfMac || "";
+    if (typeof data.instantRefreshNoKey === "boolean" && document.activeElement !== instantRefreshNoKey) {
+      instantRefreshNoKey.checked = data.instantRefreshNoKey;
+    }
     if (typeof data.volume === "number" && document.activeElement !== volumeSlider) {
       setVolumeUi(data.volume);
     }
   } catch (err) {
     setStatus(msgStatus, `Status failed: ${err.message}`, true);
+  }
+}
+
+async function loadRefreshMode() {
+  try {
+    const resp = await fetch("/api/refreshmode");
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    instantRefreshNoKey.checked = !!data.instantRefreshNoKey;
+    setStatus(refreshModeStatus, instantRefreshNoKey.checked
+      ? "Instant refresh enabled"
+      : "Wait key press for queued web messages");
+  } catch (err) {
+    setStatus(refreshModeStatus, `Refresh mode load failed: ${err.message}`, true);
+  }
+}
+
+async function saveRefreshMode() {
+  try {
+    const body = new FormData();
+    body.append("instantRefreshNoKey", instantRefreshNoKey.checked ? "1" : "0");
+    const resp = await fetch("/api/refreshmode", { method: "POST", body });
+    const raw = await resp.text();
+    if (!resp.ok) throw new Error(raw || `HTTP ${resp.status}`);
+    const data = JSON.parse(raw);
+    instantRefreshNoKey.checked = !!data.instantRefreshNoKey;
+    setStatus(refreshModeStatus, instantRefreshNoKey.checked
+      ? "Instant refresh saved"
+      : "Key-gated refresh saved");
+  } catch (err) {
+    setStatus(refreshModeStatus, `Refresh mode save failed: ${err.message}`, true);
   }
 }
 
@@ -223,6 +259,7 @@ document.getElementById("btnClearMsg").addEventListener("click", () => {
   msgBox.value = "";
   msgBox.focus();
 });
+instantRefreshNoKey.addEventListener("change", saveRefreshMode);
 volumeSlider.addEventListener("input", () => {
   setVolumeUi(volumeSlider.value);
   scheduleVolumePush();
@@ -246,6 +283,7 @@ document.getElementById("btnCopySelfMac").addEventListener("click", async () => 
 setInterval(refreshStatus, 1000);
 loadCsv();
 loadVolume();
+loadRefreshMode();
 loadHostMac();
 loadApConfig();
 refreshStatus();

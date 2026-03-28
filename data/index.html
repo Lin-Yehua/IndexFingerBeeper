@@ -30,6 +30,8 @@
         <button id="btnSendMsg" type="button">Send</button>
         <button id="btnClearMsg" type="button" class="ghost">Clear</button>
       </div>
+      <label class="status"><input id="instantRefreshNoKey" type="checkbox"> Instant refresh (no key press)</label>
+      <p id="refreshModeStatus" class="status"></p>
       <p id="msgStatus" class="status"></p>
     </section>
 
@@ -66,11 +68,12 @@
     </section>
 
     <section class="card">
-      <h2>6) Device MAC</h2>
+      <h2>6) Device MAC (STA target)</h2>
       <input id="selfMacInput" type="text" readonly>
       <div class="row">
         <button id="btnCopySelfMac" type="button" class="ghost">Copy MAC</button>
       </div>
+      <p class="status">Use this MAC in host whitelist/targeted send.</p>
       <p id="selfMacStatus" class="status"></p>
     </section>
   </main>

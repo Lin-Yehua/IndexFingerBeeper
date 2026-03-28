@@ -7,6 +7,7 @@
 #include <WebServer.h>
 #include <DNSServer.h>
 #include <esp_now.h>
+#include <esp_wifi.h>
 #include <vector>
 
 #include "EspNowMessage.h"
@@ -42,9 +43,9 @@ const char kHostPortalHtml[] PROGMEM = R"HTML(
 <div class="r"><label><input id="wl" type="checkbox">Whitelist range</label><label><input id="tg" type="checkbox">Targeted</label></div>
 <div id="tbox" class="box" style="display:none"><div id="tlist"></div></div>
 <div class="r"><button id="send" class="p">Send</button><button id="clear" class="g">Clear</button></div><p id="ss" class="s"></p></div>
-<div class="c"><h3>2) Whitelist CSV (FFat)</h3><div class="r"><button id="lcsv" class="p">Load CSV</button><button id="scsv" class="p">Save CSV</button></div><textarea id="csv" placeholder="MAC,Name&#10;AA:BB:CC:DD:EE:FF,Client-1"></textarea><p id="cs" class="s"></p></div>
+<div class="c"><h3>2) Whitelist CSV (FFat)</h3><div class="r"><button id="lcsv" class="p">Load CSV</button><button id="scsv" class="p">Save CSV</button></div><textarea id="csv" placeholder="MAC,Name&#10;AA:BB:CC:DD:EE:FF,Client-1"></textarea><p class="s">Use client STA MAC for targeted mode.</p><p id="cs" class="s"></p></div>
 <div class="c"><h3>3) AP Config</h3><input id="ssid" maxlength="32" placeholder="SSID"><div class="r"></div><input id="pwd" maxlength="63" placeholder="Password (empty=open)"><div class="r"></div><input id="ch" type="number" min="1" max="13" step="1" placeholder="Channel 1-13"><div class="r"><button id="scfg" class="p">Save Config</button></div><p id="cfgs" class="s"></p></div>
-<div class="c"><h3>4) Device MAC</h3><div class="r"><input id="smac" readonly><button id="cmac" class="g">Copy MAC</button></div><p id="ms" class="s"></p><p id="rs" class="s"></p></div>
+<div class="c"><h3>4) Device MAC (STA source)</h3><div class="r"><input id="smac" readonly><button id="cmac" class="g">Copy MAC</button></div><p id="ms" class="s"></p><p id="rs" class="s"></p></div>
 <script>
 const q=id=>document.getElementById(id),msg=q('msg'),wl=q('wl'),tg=q('tg'),tbox=q('tbox'),tlist=q('tlist'),csv=q('csv'),ssid=q('ssid'),pwd=q('pwd'),ch=q('ch'),smac=q('smac');
 function st(el,t,e=false){el.textContent=t||'';el.classList.toggle('e',!!e)}function ut(){tbox.style.display=(wl.checked&&tg.checked)?'block':'none'}
@@ -59,7 +60,7 @@ async function csvSave(){try{const b=new FormData();b.append('content',csv.value
 async function send(){try{const b=new FormData();b.append('text',msg.value);if(wl.checked&&tg.checked)b.append('targets',msel());const r=await fetch('/api/send',{method:'POST',body:b});const t=await r.text();if(!r.ok)throw new Error(t||('HTTP '+r.status));st(q('ss'),t||'sent');msg.value=''}catch(e){st(q('ss'),'Send failed: '+e.message,true)}}
 async function cfgLoad(){try{const r=await fetch('/api/config');const d=await r.json();if(!r.ok)throw new Error('HTTP '+r.status);ssid.value=d.ssid||'';pwd.value='';ch.value=String(d.channel||1);st(q('cfgs'),d.passwordSet?'Password is set':'Open AP')}catch(e){st(q('cfgs'),'Config load failed: '+e.message,true)}}
 async function cfgSave(){try{const b=new FormData();b.append('ssid',ssid.value.trim());b.append('password',pwd.value);b.append('channel',ch.value.trim());const r=await fetch('/api/config',{method:'POST',body:b});const t=await r.text();if(!r.ok)throw new Error(t||('HTTP '+r.status));const d=JSON.parse(t);st(q('cfgs'),'Saved: SSID='+d.ssid+', CH='+d.channel+'. Reboot required.');pwd.value=''}catch(e){st(q('cfgs'),'Config save failed: '+e.message,true)}}
-async function rs(){try{const r=await fetch('/api/status');const d=await r.json();if(!r.ok)throw new Error('HTTP '+r.status);smac.value=d.selfMac||d.mac||'';st(q('rs'),'SSID:'+d.ssid+' | IP:'+d.ip+' | CH:'+d.channel+' | WL:'+(d.whitelistEnabled?'on':'off')+' | TG:'+(d.targetedMode?'on':'off')+' | N:'+d.whitelistCount)}catch(e){st(q('rs'),'Status failed: '+e.message,true)}}
+async function rs(){try{const r=await fetch('/api/status');const d=await r.json();if(!r.ok)throw new Error('HTTP '+r.status);smac.value=d.selfMac||d.mac||'';const tx='TX ok:'+String(d.sendOkCount||0)+' fail:'+String(d.sendFailCount||0)+' last:'+(d.lastSendMac||'-')+'/'+((d.lastSendOk===null)?'?' :(d.lastSendOk?'ok':'fail'));st(q('rs'),'SSID:'+d.ssid+' | IP:'+d.ip+' | CH:'+d.channel+' | WL:'+(d.whitelistEnabled?'on':'off')+' | TG:'+(d.targetedMode?'on':'off')+' | N:'+d.whitelistCount+' | '+tx)}catch(e){st(q('rs'),'Status failed: '+e.message,true)}}
 q('send').onclick=send;q('clear').onclick=()=>{msg.value='';msg.focus()};q('lcsv').onclick=csvLoad;q('scsv').onclick=csvSave;q('scfg').onclick=cfgSave;
 wl.onchange=async()=>{if(!wl.checked)tg.checked=false;ut();await modeSave()};tg.onchange=async()=>{if(tg.checked)wl.checked=true;ut();await modeSave()};
 q('cmac').onclick=async()=>{const t=(smac.value||'').trim();if(!t){st(q('ms'),'MAC is empty',true);return}const ok=await cp(t);st(q('ms'),ok?'MAC copied':'Copy failed',!ok)};
@@ -80,6 +81,11 @@ uint8_t gApChannel = kDefaultApChannel;
 bool gWhitelistEnabled = true;
 bool gTargetedMode = false;
 std::vector<WhitelistEntry> gWhitelistEntries;
+portMUX_TYPE gSendStatMux = portMUX_INITIALIZER_UNLOCKED;
+uint32_t gSendCbOkCount = 0;
+uint32_t gSendCbFailCount = 0;
+char gLastSendMacText[18] = {0};
+int gLastSendStatus = -1;  // -1 unknown, 0 fail, 1 success
 
 void copyStringToBuf(const String &src, char *dst, size_t dstSize) {
   if (!dst || dstSize == 0) return;
@@ -121,6 +127,24 @@ bool parseBoolString(const String &raw, bool &outValue) {
     return true;
   }
   return false;
+}
+
+bool forceWifiChannel(uint8_t channel) {
+  if (channel < kApChannelMin || channel > kApChannelMax) {
+    Serial.printf("[HOST][ESPNOW] invalid channel: %u\n", static_cast<unsigned int>(channel));
+    return false;
+  }
+  const esp_err_t setRet = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+  if (setRet != ESP_OK) {
+    Serial.printf("[HOST][ESPNOW] esp_wifi_set_channel failed: %d\n", static_cast<int>(setRet));
+    return false;
+  }
+  uint8_t primary = 0;
+  wifi_second_chan_t second = WIFI_SECOND_CHAN_NONE;
+  if (esp_wifi_get_channel(&primary, &second) == ESP_OK) {
+    Serial.printf("[HOST][ESPNOW] channel locked to %u\n", static_cast<unsigned int>(primary));
+  }
+  return true;
 }
 
 String stripIniValue(String value) {
@@ -188,6 +212,27 @@ String jsonEscape(const String &src) {
     }
   }
   return out;
+}
+
+void onEspNowSend(const uint8_t *macAddr, esp_now_send_status_t status) {
+  char macText[18] = {0};
+  if (macAddr) {
+    snprintf(macText, sizeof(macText), "%02X:%02X:%02X:%02X:%02X:%02X",
+             macAddr[0], macAddr[1], macAddr[2], macAddr[3], macAddr[4], macAddr[5]);
+  } else {
+    strncpy(macText, "<NULL>", sizeof(macText) - 1);
+    macText[sizeof(macText) - 1] = '\0';
+  }
+
+  portENTER_CRITICAL(&gSendStatMux);
+  memcpy(gLastSendMacText, macText, sizeof(gLastSendMacText));
+  gLastSendStatus = (status == ESP_NOW_SEND_SUCCESS) ? 1 : 0;
+  if (status == ESP_NOW_SEND_SUCCESS) {
+    ++gSendCbOkCount;
+  } else {
+    ++gSendCbFailCount;
+  }
+  portEXIT_CRITICAL(&gSendStatMux);
 }
 
 bool ensureWhitelistCsvExists() {
@@ -530,13 +575,19 @@ bool initEspNowBroadcaster() {
     Serial.println("[HOST][ESPNOW] init failed");
     return false;
   }
+  if (esp_now_register_send_cb(onEspNowSend) != ESP_OK) {
+    Serial.println("[HOST][ESPNOW] register send callback failed");
+    esp_now_deinit();
+    return false;
+  }
 
   uint8_t broadcastAddr[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
   esp_now_peer_info_t peer = {};
   memcpy(peer.peer_addr, broadcastAddr, sizeof(broadcastAddr));
-  peer.channel = 0;
+  peer.channel = gApChannel;
   peer.encrypt = false;
-  peer.ifidx = WIFI_IF_AP;
+  // Use STA interface as the unified ESPNOW source for both broadcast and targeted send.
+  peer.ifidx = WIFI_IF_STA;
   const esp_err_t addRet = esp_now_add_peer(&peer);
   if (addRet != ESP_OK && addRet != ESP_ERR_ESPNOW_EXIST) {
     Serial.printf("[HOST][ESPNOW] add broadcast peer failed: %d\n", static_cast<int>(addRet));
@@ -551,18 +602,35 @@ bool initEspNowBroadcaster() {
 
 void deinitEspNowBroadcaster() {
   if (!gEspNowReady) return;
+  esp_now_unregister_send_cb();
   esp_now_deinit();
   gEspNowReady = false;
 }
 
 bool ensureEspNowPeer(const uint8_t mac[6], String &errorOut) {
-  if (esp_now_is_peer_exist(mac)) return true;
+  if (esp_now_is_peer_exist(mac)) {
+    esp_now_peer_info_t existing = {};
+    const esp_err_t getRet = esp_now_get_peer(mac, &existing);
+    if (getRet == ESP_OK && existing.ifidx == WIFI_IF_STA) return true;
+
+    // Re-target existing peer to STA interface for stable client STA-MAC unicast.
+    if (getRet == ESP_OK) {
+      existing.channel = gApChannel;
+      existing.encrypt = false;
+      existing.ifidx = WIFI_IF_STA;
+      const esp_err_t modRet = esp_now_mod_peer(&existing);
+      if (modRet == ESP_OK) return true;
+    }
+    esp_now_del_peer(mac);
+  }
 
   esp_now_peer_info_t peer = {};
   memcpy(peer.peer_addr, mac, 6);
-  peer.channel = 0;
+  peer.channel = gApChannel;
   peer.encrypt = false;
-  peer.ifidx = WIFI_IF_AP;
+  // Targeted send should use STA interface to reach client STA MAC
+  // regardless of receiver AP toggle state.
+  peer.ifidx = WIFI_IF_STA;
   const esp_err_t ret = esp_now_add_peer(&peer);
   if (ret != ESP_OK && ret != ESP_ERR_ESPNOW_EXIST) {
     errorOut = "add peer failed";
@@ -590,11 +658,22 @@ bool buildPacketFromText(const String &rawText, EspNowTextPacket &pkt, String &e
 
 bool sendPacketToMac(const uint8_t mac[6], const EspNowTextPacket &pkt, String &errorOut) {
   if (!ensureEspNowPeer(mac, errorOut)) return false;
+  esp_now_peer_info_t info = {};
+  if (esp_now_get_peer(mac, &info) == ESP_OK) {
+    Serial.printf("[HOST][ESPNOW] tx target=%s if=%d ch=%u\n",
+                  formatMacString(mac).c_str(),
+                  static_cast<int>(info.ifidx),
+                  static_cast<unsigned int>(info.channel));
+  }
   const esp_err_t ret = esp_now_send(mac, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
   if (ret != ESP_OK) {
-    errorOut = "esp-now send failed";
+    errorOut = "esp-now send failed(" + String(static_cast<int>(ret)) + ")";
+    Serial.printf("[HOST][ESPNOW] tx fail target=%s err=%d\n",
+                  formatMacString(mac).c_str(),
+                  static_cast<int>(ret));
     return false;
   }
+  Serial.printf("[HOST][ESPNOW] tx queued target=%s\n", formatMacString(mac).c_str());
   return true;
 }
 
@@ -672,7 +751,7 @@ bool sendTextByCurrentMode(const String &rawText, const String &targetsRaw, Stri
     uint8_t broadcastAddr[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
     const esp_err_t ret = esp_now_send(broadcastAddr, reinterpret_cast<const uint8_t *>(&pkt), sizeof(pkt));
     if (ret != ESP_OK) {
-      errorOut = "broadcast send failed";
+      errorOut = "broadcast send failed(" + String(static_cast<int>(ret)) + ")";
       return false;
     }
     resultOut = "broadcast sent to all (whitelist OFF)";
@@ -733,14 +812,31 @@ String targetsJson() {
 }
 
 String statusJson() {
+  const String staMac = WiFi.macAddress();
+  const String apMac = WiFi.softAPmacAddress();
+  uint32_t sendOk = 0;
+  uint32_t sendFail = 0;
+  int lastSend = -1;
+  char lastSendMac[18] = {0};
+  portENTER_CRITICAL(&gSendStatMux);
+  sendOk = gSendCbOkCount;
+  sendFail = gSendCbFailCount;
+  lastSend = gLastSendStatus;
+  memcpy(lastSendMac, gLastSendMacText, sizeof(lastSendMac));
+  portEXIT_CRITICAL(&gSendStatMux);
+
   String out = "{\"ip\":\"";
   out += WiFi.softAPIP().toString();
   out += "\",\"ssid\":\"";
   out += String(gApSsid);
   out += "\",\"mac\":\"";
-  out += WiFi.softAPmacAddress();
+  out += apMac;
   out += "\",\"selfMac\":\"";
-  out += WiFi.softAPmacAddress();
+  out += staMac;
+  out += "\",\"selfStaMac\":\"";
+  out += staMac;
+  out += "\",\"selfApMac\":\"";
+  out += apMac;
   out += "\",\"channel\":";
   out += String(WiFi.channel());
   out += ",\"passwordSet\":";
@@ -751,6 +847,18 @@ String statusJson() {
   out += gTargetedMode ? "true" : "false";
   out += ",\"whitelistCount\":";
   out += String(static_cast<unsigned int>(gWhitelistEntries.size()));
+  out += ",\"sendOkCount\":";
+  out += String(static_cast<unsigned long>(sendOk));
+  out += ",\"sendFailCount\":";
+  out += String(static_cast<unsigned long>(sendFail));
+  out += ",\"lastSendMac\":\"";
+  out += String(lastSendMac);
+  out += "\",\"lastSendOk\":";
+  if (lastSend < 0) {
+    out += "null";
+  } else {
+    out += (lastSend > 0) ? "true" : "false";
+  }
   out += "}";
   return out;
 }
@@ -1006,6 +1114,12 @@ bool hostPortalStart() {
     return false;
   }
 
+  if (!forceWifiChannel(gApChannel)) {
+    WiFi.softAPdisconnect(true);
+    WiFi.mode(WIFI_OFF);
+    return false;
+  }
+
   if (!initEspNowBroadcaster()) {
     WiFi.softAPdisconnect(true);
     WiFi.mode(WIFI_OFF);
@@ -1024,12 +1138,13 @@ bool hostPortalStart() {
   }
 
   gPortalStarted = true;
-  Serial.printf("[HOST] AP started SSID=%s PASS=%s IP=%s CH=%d MAC=%s WL=%d TARGET=%d CSV=%s count=%u\n",
+  Serial.printf("[HOST] AP started SSID=%s PASS=%s IP=%s CH=%d AP_MAC=%s STA_MAC=%s WL=%d TARGET=%d CSV=%s count=%u\n",
                 gApSsid,
                 gApPassword[0] ? gApPassword : "<OPEN>",
                 WiFi.softAPIP().toString().c_str(),
                 WiFi.channel(),
                 WiFi.softAPmacAddress().c_str(),
+                WiFi.macAddress().c_str(),
                 gWhitelistEnabled ? 1 : 0,
                 gTargetedMode ? 1 : 0,
                 kWhitelistCsvPath,

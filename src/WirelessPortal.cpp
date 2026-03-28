@@ -48,6 +48,7 @@ bool gEspNowReady = false;
 uint8_t gHostMacFilter[6] = {0};
 bool gHostMacFilterEnabled = false;
 char gHostMacFilterText[18] = {0};
+bool gInstantRefreshNoKey = false;
 volatile bool gWebTaskRunning = false;
 volatile bool gCsvReloadRequested = false;
 bool gPortalStarted = false;
@@ -214,6 +215,7 @@ void loadApCredentialsFromSettingIni() {
   gApChannel = kDefaultApChannel;
   gEnableAp = true;
   gEnableEspNow = true;
+  gInstantRefreshNoKey = false;
   applyHostMacFilterSetting("", false);
 
   if (!fatMounted) return;
@@ -268,6 +270,11 @@ void loadApCredentialsFromSettingIni() {
       bool parsed = true;
       if (parseBoolString(value, parsed)) {
         gEnableEspNow = parsed;
+      }
+    } else if (key == "instantrefreshnokey" || key == "instantrefresh") {
+      bool parsed = false;
+      if (parseBoolString(value, parsed)) {
+        gInstantRefreshNoKey = parsed;
       }
     }
   }
@@ -375,6 +382,62 @@ bool persistHostMacToSettingIni(const String &hostMacRaw) {
   return written == output.length();
 }
 
+bool persistInstantRefreshModeToSettingIni(bool enabled) {
+  if (!fatMounted) return false;
+
+  String original;
+  if (FFat.exists("/setting.ini")) {
+    fs::File rf = FFat.open("/setting.ini", FILE_READ);
+    if (!rf) return false;
+    original = rf.readString();
+    rf.close();
+  }
+
+  bool foundMode = false;
+  String output;
+  output.reserve(original.length() + 48);
+
+  int start = 0;
+  while (start <= original.length()) {
+    const int end = original.indexOf('\n', start);
+    String line = (end >= 0) ? original.substring(start, end) : original.substring(start);
+
+    String trimmed = line;
+    trimmed.trim();
+    if (trimmed.length() && !trimmed.startsWith("#") && !trimmed.startsWith(";")) {
+      const int eq = trimmed.indexOf('=');
+      if (eq > 0) {
+        String key = trimmed.substring(0, eq);
+        key.trim();
+        key.toLowerCase();
+        if (key == "instantrefreshnokey" || key == "instantrefresh") {
+          line = String("InstantRefreshNoKey = ") + (enabled ? "true;" : "false;");
+          foundMode = true;
+        }
+      }
+    }
+
+    output += line;
+    if (end >= 0) {
+      output += '\n';
+      start = end + 1;
+    } else {
+      break;
+    }
+  }
+
+  if (!foundMode) {
+    if (output.length() && output[output.length() - 1] != '\n') output += '\n';
+    output += String("InstantRefreshNoKey = ") + (enabled ? "true;\n" : "false;\n");
+  }
+
+  fs::File wf = FFat.open("/setting.ini", "w");
+  if (!wf) return false;
+  const size_t written = wf.print(output);
+  wf.close();
+  return written == output.length();
+}
+
 bool persistApConfigToSettingIni(const String &ssidRaw, const String &passwordRaw, uint8_t channel) {
   if (!fatMounted) return false;
 
@@ -470,7 +533,19 @@ void onEspNowRecv(const uint8_t *macAddr, const uint8_t *data, int dataLen) {
   if (!data || dataLen < static_cast<int>(sizeof(EspNowTextPacket))) return;
 
   if (gHostMacFilterEnabled) {
-    if (!macAddr || memcmp(macAddr, gHostMacFilter, 6) != 0) return;
+    if (!macAddr || memcmp(macAddr, gHostMacFilter, 6) != 0) {
+      static uint32_t lastFilterDropLogMs = 0;
+      const uint32_t now = millis();
+      if (now - lastFilterDropLogMs >= 2000U) {
+        lastFilterDropLogMs = now;
+        String srcText = "<NULL>";
+        if (macAddr) srcText = formatMacString(macAddr);
+        Serial.printf("[ESPNOW] drop by HostMAC filter src=%s expect=%s\n",
+                      srcText.c_str(),
+                      gHostMacFilterText);
+      }
+      return;
+    }
   }
 
   const EspNowTextPacket *pkt = reinterpret_cast<const EspNowTextPacket *>(data);
@@ -640,6 +715,8 @@ bool persistAudioGainsToSettingIni() {
 }
 
 String statusJson() {
+  const String staMac = WiFi.macAddress();
+  const String apMac = WiFi.softAPmacAddress();
   const UBaseType_t queued = gMessageQueue ? uxQueueMessagesWaiting(gMessageQueue) : 0;
   const UBaseType_t hostQueued = gHostMessageQueue ? uxQueueMessagesWaiting(gHostMessageQueue) : 0;
   bool pendingReload = false;
@@ -655,6 +732,8 @@ String statusJson() {
   out += String(static_cast<unsigned int>(hostQueued));
   out += ",\"volume\":";
   out += String(masterVolumePercent());
+  out += ",\"instantRefreshNoKey\":";
+  out += gInstantRefreshNoKey ? "true" : "false";
   out += ",\"hostMac\":\"";
   out += gHostMacFilterEnabled ? String(gHostMacFilterText) : "";
   out += "\"";
@@ -669,7 +748,14 @@ String statusJson() {
   out += ",\"enableEspNow\":";
   out += gEnableEspNow ? "true" : "false";
   out += ",\"selfMac\":\"";
-  out += gEnableAp ? WiFi.softAPmacAddress() : WiFi.macAddress();
+  // Keep selfMac stable for ESP-NOW targeting: always use STA MAC.
+  out += staMac;
+  out += "\"";
+  out += ",\"selfStaMac\":\"";
+  out += staMac;
+  out += "\"";
+  out += ",\"selfApMac\":\"";
+  out += apMac;
   out += "\"";
   out += "}";
   return out;
@@ -771,6 +857,44 @@ void registerRoutes() {
     out += String(masterVolumePercent());
     out += ",\"persisted\":";
     out += persist ? "true" : "false";
+    out += "}";
+    gWebServer->send(200, "application/json", out);
+  });
+
+  gWebServer->on("/api/refreshmode", HTTP_GET, []() {
+    String out = "{\"instantRefreshNoKey\":";
+    out += gInstantRefreshNoKey ? "true" : "false";
+    out += "}";
+    gWebServer->send(200, "application/json", out);
+  });
+
+  gWebServer->on("/api/refreshmode", HTTP_POST, []() {
+    String raw = gWebServer->arg("instantRefreshNoKey");
+    if (!raw.length() && gWebServer->hasArg("instantrefreshnokey")) {
+      raw = gWebServer->arg("instantrefreshnokey");
+    }
+    if (!raw.length() && gWebServer->hasArg("instantRefresh")) {
+      raw = gWebServer->arg("instantRefresh");
+    }
+    if (!raw.length() && gWebServer->hasArg("plain")) {
+      raw = gWebServer->arg("plain");
+    }
+    raw.trim();
+
+    bool next = gInstantRefreshNoKey;
+    if (!parseBoolString(raw, next)) {
+      gWebServer->send(400, "text/plain", "invalid instantRefreshNoKey");
+      return;
+    }
+
+    gInstantRefreshNoKey = next;
+    if (!persistInstantRefreshModeToSettingIni(gInstantRefreshNoKey)) {
+      gWebServer->send(500, "text/plain", "mode applied but save /setting.ini failed");
+      return;
+    }
+
+    String out = "{\"instantRefreshNoKey\":";
+    out += gInstantRefreshNoKey ? "true" : "false";
     out += "}";
     gWebServer->send(200, "application/json", out);
   });
@@ -1175,4 +1299,8 @@ bool wirelessPortalHasPendingHostMessage() {
 
 bool wirelessPortalConsumeCsvReloadRequest() {
   return takeCsvReloadRequested();
+}
+
+bool wirelessPortalInstantRefreshNoKeyEnabled() {
+  return gInstantRefreshNoKey;
 }

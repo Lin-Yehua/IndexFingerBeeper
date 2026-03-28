@@ -387,11 +387,15 @@ static void playMessageWithGlitch(const char *text) {
 void processAppLoop() {
   static bool webInterruptActive = false;
   static bool webInterruptKeyLatch = false;
+  const bool instantRefreshNoKey = wirelessPortalInstantRefreshNoKeyEnabled();
 
   if (wirelessPortalConsumeCsvReloadRequest()) {
     if (csv.load(FFat, "/data.csv")) {
       csvCount = 0;
       RUNSTATE = 0;
+      if (instantRefreshNoKey) {
+        firstFlag = true;
+      }
       Serial.println("[WEB] /data.csv reloaded");
     } else {
       Serial.println("[WEB] /data.csv reload failed");
@@ -410,15 +414,24 @@ void processAppLoop() {
   if (!webInterruptActive && wirelessPortalHasPendingMessage()) {
     String queuedMessage;
     if (wirelessPortalPopMessage(queuedMessage)) {
-      webInterruptActive = true;
-      webInterruptKeyLatch = false;
-      Serial.println("[WEB] interrupt started");
+      if (instantRefreshNoKey) {
+        Serial.println("[WEB] interrupt immediate");
+      } else {
+        webInterruptActive = true;
+        webInterruptKeyLatch = false;
+        Serial.println("[WEB] interrupt started");
+      }
       playMessageWithGlitch(queuedMessage.c_str());
       return;
     }
   }
 
   if (webInterruptActive) {
+    if (instantRefreshNoKey) {
+      webInterruptActive = false;
+      webInterruptKeyLatch = false;
+      return;
+    }
     Key_loop();
     const uint8_t key = get_Keycode();
     if (key == 2 && !webInterruptKeyLatch) {
