@@ -49,5 +49,6 @@ extern float gBgGain;
 extern int gWrongProb3;
 extern int gWrongProb5;
 extern bool gEnableReprint;
+extern int gBacklightTimeSec;
 extern bool firstFlag;
 extern uint8_t RUNSTATE;

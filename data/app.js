@@ -5,6 +5,11 @@ const msgStatus = document.getElementById("msgStatus");
 const volumeSlider = document.getElementById("volumeSlider");
 const volumeValue = document.getElementById("volumeValue");
 const volumeStatus = document.getElementById("volumeStatus");
+const wrongProb3Input = document.getElementById("wrongProb3Input");
+const wrongProb5Input = document.getElementById("wrongProb5Input");
+const enableReprintInput = document.getElementById("enableReprintInput");
+const backlightTimeInput = document.getElementById("backlightTimeInput");
+const effectsStatus = document.getElementById("effectsStatus");
 const instantRefreshNoKey = document.getElementById("instantRefreshNoKey");
 const refreshModeStatus = document.getElementById("refreshModeStatus");
 const hostMacInput = document.getElementById("hostMacInput");
@@ -184,6 +189,70 @@ async function loadApConfig() {
   }
 }
 
+async function loadEffects() {
+  try {
+    const resp = await fetch("/api/effects");
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+    wrongProb3Input.value = String(data.wrongProb3 ?? 25);
+    wrongProb5Input.value = String(data.wrongProb5 ?? 12);
+    enableReprintInput.checked = !!data.enableReprint;
+    backlightTimeInput.value = String(data.backlightTime ?? -1);
+
+    setStatus(
+      effectsStatus,
+      `Loaded: P3=${wrongProb3Input.value} P5=${wrongProb5Input.value} Reprint=${enableReprintInput.checked ? "on" : "off"} BacklightTime=${backlightTimeInput.value}`
+    );
+  } catch (err) {
+    setStatus(effectsStatus, `Effects load failed: ${err.message}`, true);
+  }
+}
+
+async function saveEffects() {
+  const wrong3 = Number.parseInt((wrongProb3Input.value || "").trim(), 10);
+  const wrong5 = Number.parseInt((wrongProb5Input.value || "").trim(), 10);
+  const backlightTime = Number.parseInt((backlightTimeInput.value || "").trim(), 10);
+
+  if (!Number.isFinite(wrong3) || wrong3 < 0 || wrong3 > 100) {
+    setStatus(effectsStatus, "P3 must be 0-100", true);
+    return;
+  }
+  if (!Number.isFinite(wrong5) || wrong5 < 0 || wrong5 > 100) {
+    setStatus(effectsStatus, "P5 must be 0-100", true);
+    return;
+  }
+  if (!Number.isFinite(backlightTime)) {
+    setStatus(effectsStatus, "BacklightTime must be integer", true);
+    return;
+  }
+
+  try {
+    const body = new FormData();
+    body.append("wrongProb3", String(wrong3));
+    body.append("wrongProb5", String(wrong5));
+    body.append("enableReprint", enableReprintInput.checked ? "1" : "0");
+    body.append("backlightTime", String(backlightTime));
+
+    const resp = await fetch("/api/effects", { method: "POST", body });
+    const raw = await resp.text();
+    if (!resp.ok) throw new Error(raw || `HTTP ${resp.status}`);
+    const data = JSON.parse(raw);
+
+    wrongProb3Input.value = String(data.wrongProb3);
+    wrongProb5Input.value = String(data.wrongProb5);
+    enableReprintInput.checked = !!data.enableReprint;
+    backlightTimeInput.value = String(data.backlightTime);
+
+    setStatus(
+      effectsStatus,
+      `Saved: P3=${data.wrongProb3} P5=${data.wrongProb5} Reprint=${data.enableReprint ? "on" : "off"} BacklightTime=${data.backlightTime}`
+    );
+  } catch (err) {
+    setStatus(effectsStatus, `Effects save failed: ${err.message}`, true);
+  }
+}
+
 async function saveApConfig() {
   try {
     const body = new FormData();
@@ -270,6 +339,7 @@ volumeSlider.addEventListener("change", () => {
 });
 document.getElementById("btnSaveHostMac").addEventListener("click", saveHostMac);
 document.getElementById("btnSaveApConfig").addEventListener("click", saveApConfig);
+document.getElementById("btnSaveEffects").addEventListener("click", saveEffects);
 document.getElementById("btnCopySelfMac").addEventListener("click", async () => {
   const mac = (selfMacInput.value || "").trim();
   if (!mac) {
@@ -286,4 +356,5 @@ loadVolume();
 loadRefreshMode();
 loadHostMac();
 loadApConfig();
+loadEffects();
 refreshStatus();

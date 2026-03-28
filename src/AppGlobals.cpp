@@ -37,5 +37,6 @@ float gBgGain = 0.2f;
 int gWrongProb3 = 25;
 int gWrongProb5 = 12;
 bool gEnableReprint = true;
+int gBacklightTimeSec = -1;
 bool firstFlag = false;
 uint8_t RUNSTATE = 0;

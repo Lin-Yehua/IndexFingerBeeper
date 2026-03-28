@@ -45,7 +45,21 @@
     </section>
 
     <section class="card">
-      <h2>4) Host MAC (ESP-NOW source filter)</h2>
+      <h2>4) Glitch / Backlight</h2>
+      <input id="wrongProb3Input" type="number" min="0" max="100" step="1" placeholder="TestWrongIndexPersent_3Area (0-100)">
+      <div class="field"></div>
+      <input id="wrongProb5Input" type="number" min="0" max="100" step="1" placeholder="TestWrongIndexPersent_5Area (0-100)">
+      <div class="field"></div>
+      <label class="status"><input id="enableReprintInput" type="checkbox"> EnableReprint</label>
+      <input id="backlightTimeInput" type="number" step="1" placeholder="BacklightTime seconds (negative = never dim/off)">
+      <div class="row">
+        <button id="btnSaveEffects" type="button">Save Effects</button>
+      </div>
+      <p id="effectsStatus" class="status"></p>
+    </section>
+
+    <section class="card">
+      <h2>5) Host MAC (ESP-NOW source filter)</h2>
       <input id="hostMacInput" type="text" placeholder="AA:BB:CC:DD:EE:FF (empty = accept all)">
       <div class="row">
         <button id="btnSaveHostMac" type="button">Save Host MAC</button>
@@ -54,7 +68,7 @@
     </section>
 
     <section class="card">
-      <h2>5) AP / ESP-NOW Channel</h2>
+      <h2>6) AP / ESP-NOW Channel</h2>
       <input id="apSsidInput" type="text" maxlength="32" placeholder="AP SSID">
       <div class="field"></div>
       <input id="apPasswordInput" type="text" maxlength="63" placeholder="AP Password (empty = open AP)">
@@ -68,7 +82,7 @@
     </section>
 
     <section class="card">
-      <h2>6) Device MAC (STA target)</h2>
+      <h2>7) Device MAC (STA target)</h2>
       <input id="selfMacInput" type="text" readonly>
       <div class="row">
         <button id="btnCopySelfMac" type="button" class="ghost">Copy MAC</button>

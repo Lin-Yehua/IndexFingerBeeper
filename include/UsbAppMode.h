@@ -20,3 +20,6 @@ bool enterAppMode();
 
 bool initProjectResources();
 void processAppLoop();
+
+void notifyBacklightActivity();
+void setBacklightTimeSeconds(int seconds);

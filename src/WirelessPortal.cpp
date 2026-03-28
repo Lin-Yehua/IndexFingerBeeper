@@ -12,6 +12,7 @@
 
 #include "AppGlobals.h"
 #include "EspNowMessage.h"
+#include "UsbAppMode.h"
 
 namespace {
 
@@ -102,6 +103,25 @@ bool parseBoolString(const String &raw, bool &outValue) {
     return true;
   }
   return false;
+}
+
+bool parseIntString(const String &raw, int &outValue) {
+  String v = raw;
+  v.trim();
+  if (!v.length()) return false;
+
+  int start = 0;
+  if (v[0] == '+' || v[0] == '-') {
+    if (v.length() == 1) return false;
+    start = 1;
+  }
+
+  for (int i = start; i < v.length(); ++i) {
+    if (!isDigit(v[i])) return false;
+  }
+
+  outValue = v.toInt();
+  return true;
 }
 
 bool forceStaChannel(uint8_t channel) {
@@ -714,6 +734,92 @@ bool persistAudioGainsToSettingIni() {
   return written == output.length();
 }
 
+bool persistEffectSettingsToSettingIni(int wrongProb3,
+                                       int wrongProb5,
+                                       bool enableReprint,
+                                       int backlightTimeSec) {
+  if (!fatMounted) return false;
+
+  wrongProb3 = constrain(wrongProb3, 0, 100);
+  wrongProb5 = constrain(wrongProb5, 0, 100);
+
+  String original;
+  if (FFat.exists("/setting.ini")) {
+    fs::File rf = FFat.open("/setting.ini", FILE_READ);
+    if (!rf) return false;
+    original = rf.readString();
+    rf.close();
+  }
+
+  bool foundWrong3 = false;
+  bool foundWrong5 = false;
+  bool foundReprint = false;
+  bool foundBacklight = false;
+  String output;
+  output.reserve(original.length() + 128);
+
+  int start = 0;
+  while (start <= original.length()) {
+    const int end = original.indexOf('\n', start);
+    String line = (end >= 0) ? original.substring(start, end) : original.substring(start);
+
+    String trimmed = line;
+    trimmed.trim();
+    if (trimmed.length() && !trimmed.startsWith("#") && !trimmed.startsWith(";")) {
+      const int eq = trimmed.indexOf('=');
+      if (eq > 0) {
+        String key = trimmed.substring(0, eq);
+        key.trim();
+        key.toLowerCase();
+        if (key == "testwrongindexpersent_3area") {
+          line = "TestWrongIndexPersent_3Area = " + String(wrongProb3) + ";";
+          foundWrong3 = true;
+        } else if (key == "testwrongindexpersent_5area") {
+          line = "TestWrongIndexPersent_5Area = " + String(wrongProb5) + ";";
+          foundWrong5 = true;
+        } else if (key == "enablereprint") {
+          line = String("EnableReprint = ") + (enableReprint ? "true;" : "false;");
+          foundReprint = true;
+        } else if (key == "backlighttime") {
+          line = "BacklightTime = " + String(backlightTimeSec) + ";";
+          foundBacklight = true;
+        }
+      }
+    }
+
+    output += line;
+    if (end >= 0) {
+      output += '\n';
+      start = end + 1;
+    } else {
+      break;
+    }
+  }
+
+  if (!foundWrong3) {
+    if (output.length() && output[output.length() - 1] != '\n') output += '\n';
+    output += "TestWrongIndexPersent_3Area = " + String(wrongProb3) + ";\n";
+  }
+  if (!foundWrong5) {
+    if (output.length() && output[output.length() - 1] != '\n') output += '\n';
+    output += "TestWrongIndexPersent_5Area = " + String(wrongProb5) + ";\n";
+  }
+  if (!foundReprint) {
+    if (output.length() && output[output.length() - 1] != '\n') output += '\n';
+    output += String("EnableReprint = ") + (enableReprint ? "true;\n" : "false;\n");
+  }
+  if (!foundBacklight) {
+    if (output.length() && output[output.length() - 1] != '\n') output += '\n';
+    output += "BacklightTime = " + String(backlightTimeSec) + ";\n";
+  }
+
+  fs::File wf = FFat.open("/setting.ini", "w");
+  if (!wf) return false;
+  const size_t written = wf.print(output);
+  wf.close();
+  return written == output.length();
+}
+
 String statusJson() {
   const String staMac = WiFi.macAddress();
   const String apMac = WiFi.softAPmacAddress();
@@ -747,6 +853,14 @@ String statusJson() {
   out += gEnableAp ? "true" : "false";
   out += ",\"enableEspNow\":";
   out += gEnableEspNow ? "true" : "false";
+  out += ",\"wrongProb3\":";
+  out += String(gWrongProb3);
+  out += ",\"wrongProb5\":";
+  out += String(gWrongProb5);
+  out += ",\"enableReprint\":";
+  out += gEnableReprint ? "true" : "false";
+  out += ",\"backlightTime\":";
+  out += String(gBacklightTimeSec);
   out += ",\"selfMac\":\"";
   // Keep selfMac stable for ESP-NOW targeting: always use STA MAC.
   out += staMac;
@@ -895,6 +1009,113 @@ void registerRoutes() {
 
     String out = "{\"instantRefreshNoKey\":";
     out += gInstantRefreshNoKey ? "true" : "false";
+    out += "}";
+    gWebServer->send(200, "application/json", out);
+  });
+
+  gWebServer->on("/api/effects", HTTP_GET, []() {
+    String out = "{\"wrongProb3\":";
+    out += String(gWrongProb3);
+    out += ",\"wrongProb5\":";
+    out += String(gWrongProb5);
+    out += ",\"enableReprint\":";
+    out += gEnableReprint ? "true" : "false";
+    out += ",\"backlightTime\":";
+    out += String(gBacklightTimeSec);
+    out += "}";
+    gWebServer->send(200, "application/json", out);
+  });
+
+  gWebServer->on("/api/effects", HTTP_POST, []() {
+    int nextWrong3 = gWrongProb3;
+    int nextWrong5 = gWrongProb5;
+    bool nextEnableReprint = gEnableReprint;
+    int nextBacklightTime = gBacklightTimeSec;
+    bool hasAny = false;
+
+    String wrong3Raw = gWebServer->arg("wrongProb3");
+    if (!wrong3Raw.length() && gWebServer->hasArg("TestWrongIndexPersent_3Area")) {
+      wrong3Raw = gWebServer->arg("TestWrongIndexPersent_3Area");
+    }
+    wrong3Raw.trim();
+    if (wrong3Raw.length()) {
+      int parsed = 0;
+      if (!parseIntString(wrong3Raw, parsed) || parsed < 0 || parsed > 100) {
+        gWebServer->send(400, "text/plain", "wrongProb3 must be 0-100");
+        return;
+      }
+      nextWrong3 = parsed;
+      hasAny = true;
+    }
+
+    String wrong5Raw = gWebServer->arg("wrongProb5");
+    if (!wrong5Raw.length() && gWebServer->hasArg("TestWrongIndexPersent_5Area")) {
+      wrong5Raw = gWebServer->arg("TestWrongIndexPersent_5Area");
+    }
+    wrong5Raw.trim();
+    if (wrong5Raw.length()) {
+      int parsed = 0;
+      if (!parseIntString(wrong5Raw, parsed) || parsed < 0 || parsed > 100) {
+        gWebServer->send(400, "text/plain", "wrongProb5 must be 0-100");
+        return;
+      }
+      nextWrong5 = parsed;
+      hasAny = true;
+    }
+
+    String reprintRaw = gWebServer->arg("enableReprint");
+    if (!reprintRaw.length() && gWebServer->hasArg("EnableReprint")) {
+      reprintRaw = gWebServer->arg("EnableReprint");
+    }
+    reprintRaw.trim();
+    if (reprintRaw.length()) {
+      bool parsed = false;
+      if (!parseBoolString(reprintRaw, parsed)) {
+        gWebServer->send(400, "text/plain", "invalid enableReprint");
+        return;
+      }
+      nextEnableReprint = parsed;
+      hasAny = true;
+    }
+
+    String backlightRaw = gWebServer->arg("backlightTime");
+    if (!backlightRaw.length() && gWebServer->hasArg("BacklightTime")) {
+      backlightRaw = gWebServer->arg("BacklightTime");
+    }
+    backlightRaw.trim();
+    if (backlightRaw.length()) {
+      int parsed = 0;
+      if (!parseIntString(backlightRaw, parsed)) {
+        gWebServer->send(400, "text/plain", "invalid backlightTime");
+        return;
+      }
+      nextBacklightTime = parsed;
+      hasAny = true;
+    }
+
+    if (!hasAny) {
+      gWebServer->send(400, "text/plain", "no effect settings provided");
+      return;
+    }
+
+    gWrongProb3 = nextWrong3;
+    gWrongProb5 = nextWrong5;
+    gEnableReprint = nextEnableReprint;
+    setBacklightTimeSeconds(nextBacklightTime);
+
+    if (!persistEffectSettingsToSettingIni(gWrongProb3, gWrongProb5, gEnableReprint, gBacklightTimeSec)) {
+      gWebServer->send(500, "text/plain", "settings applied but save /setting.ini failed");
+      return;
+    }
+
+    String out = "{\"wrongProb3\":";
+    out += String(gWrongProb3);
+    out += ",\"wrongProb5\":";
+    out += String(gWrongProb5);
+    out += ",\"enableReprint\":";
+    out += gEnableReprint ? "true" : "false";
+    out += ",\"backlightTime\":";
+    out += String(gBacklightTimeSec);
     out += "}";
     gWebServer->send(200, "application/json", out);
   });

@@ -13,6 +13,102 @@
 #include "Index_B.h"
 #include "Key_Drv.h"
 
+namespace {
+
+constexpr uint8_t kBacklightDutyBright = 255;
+constexpr uint8_t kBacklightDutyDim = 128;
+constexpr uint8_t kBacklightDutyOff = 0;
+constexpr uint32_t kBacklightDimToOffMs = 20000UL;
+constexpr uint32_t kBacklightTaskTickMs = 100UL;
+
+enum BacklightState : uint8_t {
+  kBacklightBright = 0,
+  kBacklightDim = 1,
+  kBacklightOff = 2,
+};
+
+TaskHandle_t gBacklightTaskHandle = nullptr;
+portMUX_TYPE gBacklightMux = portMUX_INITIALIZER_UNLOCKED;
+uint32_t gBacklightLastActivityMs = 0;
+BacklightState gBacklightState = kBacklightBright;
+
+void applyBacklightState(BacklightState state) {
+  switch (state) {
+    case kBacklightBright:
+      ledcWrite(0, kBacklightDutyBright);
+      break;
+    case kBacklightDim:
+      ledcWrite(0, kBacklightDutyDim);
+      break;
+    case kBacklightOff:
+      ledcWrite(0, kBacklightDutyOff);
+      break;
+  }
+}
+
+bool wakeBacklightByKeyIfNeeded() {
+  bool wakeOnly = false;
+  portENTER_CRITICAL(&gBacklightMux);
+  gBacklightLastActivityMs = millis();
+  if (gBacklightState != kBacklightBright) {
+    gBacklightState = kBacklightBright;
+    wakeOnly = true;
+  }
+  portEXIT_CRITICAL(&gBacklightMux);
+  if (wakeOnly) {
+    applyBacklightState(kBacklightBright);
+  }
+  return wakeOnly;
+}
+
+void backlightTask(void *param) {
+  (void)param;
+  while (true) {
+    int backlightTimeSec = -1;
+    uint32_t lastActivity = 0;
+    BacklightState stateNow = kBacklightBright;
+    const uint32_t nowMs = millis();
+
+    portENTER_CRITICAL(&gBacklightMux);
+    backlightTimeSec = gBacklightTimeSec;
+    lastActivity = gBacklightLastActivityMs;
+    stateNow = gBacklightState;
+    portEXIT_CRITICAL(&gBacklightMux);
+
+    BacklightState desired = kBacklightBright;
+    if (backlightTimeSec >= 0) {
+      const uint32_t dimMs = static_cast<uint32_t>(backlightTimeSec) * 1000UL;
+      const uint32_t elapsedMs = nowMs - lastActivity;
+      if (elapsedMs >= dimMs + kBacklightDimToOffMs) {
+        desired = kBacklightOff;
+      } else if (elapsedMs >= dimMs) {
+        desired = kBacklightDim;
+      }
+    }
+
+    if (desired != stateNow) {
+      portENTER_CRITICAL(&gBacklightMux);
+      gBacklightState = desired;
+      portEXIT_CRITICAL(&gBacklightMux);
+      applyBacklightState(desired);
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(kBacklightTaskTickMs));
+  }
+}
+
+void ensureBacklightTaskStarted() {
+  if (gBacklightTaskHandle) return;
+  portENTER_CRITICAL(&gBacklightMux);
+  gBacklightLastActivityMs = millis();
+  gBacklightState = kBacklightBright;
+  portEXIT_CRITICAL(&gBacklightMux);
+  applyBacklightState(kBacklightBright);
+  xTaskCreatePinnedToCore(backlightTask, "BacklightTask", 4096, nullptr, 1, &gBacklightTaskHandle, 1);
+}
+
+}  // namespace
+
 static bool wlWriteRmw(size_t addr, const uint8_t *src, size_t len) {
   if (wlHandle == WL_INVALID_HANDLE) return false;
 
@@ -78,6 +174,24 @@ void showUsbModeScreen() {
   typeLine(18, 20, line1, 10);
   typeLine(18, 60, line2, 10);
   typeLine(18, 100, line3, 10);
+}
+
+void notifyBacklightActivity() {
+  portENTER_CRITICAL(&gBacklightMux);
+  gBacklightLastActivityMs = millis();
+  const bool wasNotBright = (gBacklightState != kBacklightBright);
+  gBacklightState = kBacklightBright;
+  portEXIT_CRITICAL(&gBacklightMux);
+  if (wasNotBright) {
+    applyBacklightState(kBacklightBright);
+  }
+}
+
+void setBacklightTimeSeconds(int seconds) {
+  portENTER_CRITICAL(&gBacklightMux);
+  gBacklightTimeSec = seconds;
+  portEXIT_CRITICAL(&gBacklightMux);
+  notifyBacklightActivity();
 }
 
 int32_t onRead(uint32_t lba, uint32_t offset, void *buffer, uint32_t bufsize) {
@@ -147,12 +261,14 @@ void applyAudioGainsFromSettingIni() {
   static constexpr int kDefaultWrongProb3 = 25;
   static constexpr int kDefaultWrongProb5 = 12;
   static constexpr bool kDefaultEnableReprint = true;
+  static constexpr int kDefaultBacklightTimeSec = -1;
 
   gInsertGain = kDefaultInsertGain;
   gBgGain = kDefaultBgGain;
   gWrongProb3 = kDefaultWrongProb3;
   gWrongProb5 = kDefaultWrongProb5;
   gEnableReprint = kDefaultEnableReprint;
+  gBacklightTimeSec = kDefaultBacklightTimeSec;
 
   fs::File f = FFat.open("/setting.ini", FILE_READ);
   if (!f) {
@@ -165,6 +281,7 @@ void applyAudioGainsFromSettingIni() {
   bool gotWrong3 = false;
   bool gotWrong5 = false;
   bool gotReprint = false;
+  bool gotBacklightTime = false;
   while (f.available()) {
     String line = f.readStringUntil('\n');
     line.trim();
@@ -202,6 +319,9 @@ void applyAudioGainsFromSettingIni() {
     } else if (key == "enablereprint") {
       gEnableReprint = (value == "1" || value == "true" || value == "on" || value == "yes");
       gotReprint = true;
+    } else if (key == "backlighttime") {
+      gBacklightTimeSec = value.toInt();
+      gotBacklightTime = true;
     }
   }
   f.close();
@@ -211,8 +331,13 @@ void applyAudioGainsFromSettingIni() {
   if (!gotWrong3) Serial.printf("[APP] TestWrongIndexPersent_3Area missing, default=%d\n", gWrongProb3);
   if (!gotWrong5) Serial.printf("[APP] TestWrongIndexPersent_5Area missing, default=%d\n", gWrongProb5);
   if (!gotReprint) Serial.printf("[APP] EnableReprint missing, default=%d\n", gEnableReprint ? 1 : 0);
+  if (!gotBacklightTime) Serial.printf("[APP] BacklightTime missing, default=%d\n", gBacklightTimeSec);
   Serial.printf("[APP] gains: insert=%.3f bg=%.3f\n", gInsertGain, gBgGain);
-  Serial.printf("[APP] glitch: p3=%d p5=%d reprint=%d\n", gWrongProb3, gWrongProb5, gEnableReprint ? 1 : 0);
+  Serial.printf("[APP] glitch: p3=%d p5=%d reprint=%d backlightTime=%d\n",
+                gWrongProb3,
+                gWrongProb5,
+                gEnableReprint ? 1 : 0,
+                gBacklightTimeSec);
 }
 
 void unmountFat() {
@@ -363,6 +488,9 @@ bool initProjectResources() {
 
   delay(8000);
 
+  ensureBacklightTaskStarted();
+  setBacklightTimeSeconds(gBacklightTimeSec);
+
   mixer.setInsertGain(gInsertGain);
   mixer.setBgGain(gBgGain);
   firstFlag = true;
@@ -374,6 +502,7 @@ bool initProjectResources() {
 static void playMessageWithGlitch(const char *text) {
   if (!text || !text[0]) return;
 
+  notifyBacklightActivity();
   mixer.playBG("/BG.wav");
   mixer.playInsert("/BGstart.wav");
   Text.fillRect(0, 0, tft.width(), 100, TFT_BLACK);
@@ -390,6 +519,7 @@ void processAppLoop() {
   const bool instantRefreshNoKey = wirelessPortalInstantRefreshNoKeyEnabled();
 
   if (wirelessPortalConsumeCsvReloadRequest()) {
+    notifyBacklightActivity();
     if (csv.load(FFat, "/data.csv")) {
       csvCount = 0;
       RUNSTATE = 0;
@@ -436,6 +566,9 @@ void processAppLoop() {
     const uint8_t key = get_Keycode();
     if (key == 2 && !webInterruptKeyLatch) {
       webInterruptKeyLatch = true;
+      if (wakeBacklightByKeyIfNeeded()) {
+        return;
+      }
       String queuedMessage;
       if (wirelessPortalPopMessage(queuedMessage)) {
         playMessageWithGlitch(queuedMessage.c_str());
@@ -473,6 +606,9 @@ void processAppLoop() {
   if (RUNSTATE == 1) {
     Key_loop();
     uint8_t key = get_Keycode();
+    if (key == 2 && wakeBacklightByKeyIfNeeded()) {
+      return;
+    }
 
     if (key == 2 || firstFlag) {
       if (firstFlag) {
