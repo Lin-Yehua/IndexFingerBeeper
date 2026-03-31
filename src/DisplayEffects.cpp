@@ -19,9 +19,9 @@ void showGlitchEffectUTF8(const char *text) {
   static constexpr int kLineUnitCap = 32;  // 中文=2, ASCII=1
   static constexpr int kLineH = 18;
   static constexpr int kSpriteW = 320;
-  static constexpr int kSpriteH = 100;
+  static constexpr int kSpriteH = 120;
   static constexpr int kSpriteScreenY = 100;
-  static constexpr int kGobalYmiddle = 150;  // 显示区域中心（屏幕绝对坐标）
+  static constexpr int kGobalYmiddle = 160;  // 显示区域中心（屏幕绝对坐标）
   static constexpr int kCenterX = 160;
   static constexpr int kLogoX = 160 - 60;
   static constexpr int kLogoY = 50 - 60;

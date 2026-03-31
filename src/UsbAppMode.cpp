@@ -470,7 +470,7 @@ bool initProjectResources() {
     return false;
   }
 
-  Text.createSprite(320, 100);
+  Text.createSprite(320, 120);
   Text.loadFont("Oxta14", LittleFS);
   Text.setTextDatum(MC_DATUM);
   Text.setTextColor(0xff36, 0x0000);
