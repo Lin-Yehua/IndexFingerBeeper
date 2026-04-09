@@ -124,6 +124,24 @@ bool parseIntString(const String &raw, int &outValue) {
   return true;
 }
 
+bool parseFloatString(const String &raw, float &outValue) {
+  String v = raw;
+  v.trim();
+  if (!v.length()) return false;
+
+  char *endPtr = nullptr;
+  const float parsed = strtof(v.c_str(), &endPtr);
+  if (endPtr == v.c_str()) return false;
+  while (*endPtr == ' ' || *endPtr == '\t' || *endPtr == '\r' || *endPtr == '\n') {
+    ++endPtr;
+  }
+  if (*endPtr != '\0') return false;
+  if (parsed != parsed) return false;
+
+  outValue = parsed;
+  return true;
+}
+
 bool forceStaChannel(uint8_t channel) {
   if (channel < kApChannelMin || channel > kApChannelMax) {
     Serial.printf("[ESPNOW] invalid channel: %u\n", static_cast<unsigned int>(channel));
@@ -144,17 +162,32 @@ bool forceStaChannel(uint8_t channel) {
   return true;
 }
 
-int masterVolumePercent() {
-  const float avg = clampGain((gInsertGain + gBgGain) * 0.5f);
-  return static_cast<int>(avg * 100.0f + 0.5f);
+int gainToPercent(float gain) {
+  const float clamped = clampGain(gain);
+  return static_cast<int>(clamped * 100.0f + 0.5f);
 }
 
-void applyMasterVolumePercent(int percent) {
+int insertVolumePercent() {
+  return gainToPercent(gInsertGain);
+}
+
+int bgVolumePercent() {
+  return gainToPercent(gBgGain);
+}
+
+int masterVolumePercent() {
+  return gainToPercent((gInsertGain + gBgGain) * 0.5f);
+}
+
+float percentToGain(int percent) {
   if (percent < 0) percent = 0;
   if (percent > 100) percent = 100;
-  const float gain = static_cast<float>(percent) / 100.0f;
-  gInsertGain = gain;
-  gBgGain = gain;
+  return static_cast<float>(percent) / 100.0f;
+}
+
+void applyVolumePercents(int insertPercent, int bgPercent) {
+  gInsertGain = percentToGain(insertPercent);
+  gBgGain = percentToGain(bgPercent);
   mixer.setInsertGain(gInsertGain);
   mixer.setBgGain(gBgGain);
 }
@@ -737,11 +770,13 @@ bool persistAudioGainsToSettingIni() {
 bool persistEffectSettingsToSettingIni(int wrongProb3,
                                        int wrongProb5,
                                        bool enableReprint,
+                                       float backlightLevel,
                                        int backlightTimeSec) {
   if (!fatMounted) return false;
 
   wrongProb3 = constrain(wrongProb3, 0, 100);
   wrongProb5 = constrain(wrongProb5, 0, 100);
+  backlightLevel = clampGain(backlightLevel);
 
   String original;
   if (FFat.exists("/setting.ini")) {
@@ -755,8 +790,9 @@ bool persistEffectSettingsToSettingIni(int wrongProb3,
   bool foundWrong5 = false;
   bool foundReprint = false;
   bool foundBacklight = false;
+  bool foundBacklightTime = false;
   String output;
-  output.reserve(original.length() + 128);
+  output.reserve(original.length() + 160);
 
   int start = 0;
   while (start <= original.length()) {
@@ -780,9 +816,12 @@ bool persistEffectSettingsToSettingIni(int wrongProb3,
         } else if (key == "enablereprint") {
           line = String("EnableReprint = ") + (enableReprint ? "true;" : "false;");
           foundReprint = true;
+        } else if (key == "backlight") {
+          line = "BackLight = " + String(backlightLevel, 3) + ";";
+          foundBacklight = true;
         } else if (key == "backlighttime") {
           line = "BacklightTime = " + String(backlightTimeSec) + ";";
-          foundBacklight = true;
+          foundBacklightTime = true;
         }
       }
     }
@@ -809,6 +848,10 @@ bool persistEffectSettingsToSettingIni(int wrongProb3,
     output += String("EnableReprint = ") + (enableReprint ? "true;\n" : "false;\n");
   }
   if (!foundBacklight) {
+    if (output.length() && output[output.length() - 1] != '\n') output += '\n';
+    output += "BackLight = " + String(backlightLevel, 3) + ";\n";
+  }
+  if (!foundBacklightTime) {
     if (output.length() && output[output.length() - 1] != '\n') output += '\n';
     output += "BacklightTime = " + String(backlightTimeSec) + ";\n";
   }
@@ -838,6 +881,10 @@ String statusJson() {
   out += String(static_cast<unsigned int>(hostQueued));
   out += ",\"volume\":";
   out += String(masterVolumePercent());
+  out += ",\"insertVolume\":";
+  out += String(insertVolumePercent());
+  out += ",\"bgVolume\":";
+  out += String(bgVolumePercent());
   out += ",\"instantRefreshNoKey\":";
   out += gInstantRefreshNoKey ? "true" : "false";
   out += ",\"hostMac\":\"";
@@ -859,6 +906,8 @@ String statusJson() {
   out += String(gWrongProb5);
   out += ",\"enableReprint\":";
   out += gEnableReprint ? "true" : "false";
+  out += ",\"backlight\":";
+  out += String(clampGain(gBacklightLevel), 3);
   out += ",\"backlightTime\":";
   out += String(gBacklightTimeSec);
   out += ",\"selfMac\":\"";
@@ -937,21 +986,31 @@ void registerRoutes() {
   });
 
   gWebServer->on("/api/volume", HTTP_GET, []() {
-    String out = "{\"volume\":";
+    String out = "{\"insertVolume\":";
+    out += String(insertVolumePercent());
+    out += ",\"bgVolume\":";
+    out += String(bgVolumePercent());
+    out += ",\"volume\":";
     out += String(masterVolumePercent());
     out += "}";
     gWebServer->send(200, "application/json", out);
   });
 
   gWebServer->on("/api/volume", HTTP_POST, []() {
+    String insertRaw = gWebServer->arg("insertVolume");
+    if (!insertRaw.length() && gWebServer->hasArg("insert")) {
+      insertRaw = gWebServer->arg("insert");
+    }
+
+    String bgRaw = gWebServer->arg("bgVolume");
+    if (!bgRaw.length() && gWebServer->hasArg("backgroundVolume")) {
+      bgRaw = gWebServer->arg("backgroundVolume");
+    }
+
     String value = gWebServer->arg("volume");
     String persistArg = gWebServer->arg("persist");
-    if (!value.length() && gWebServer->hasArg("plain")) {
+    if (!value.length() && !insertRaw.length() && !bgRaw.length() && gWebServer->hasArg("plain")) {
       value = gWebServer->arg("plain");
-    }
-    if (!value.length()) {
-      gWebServer->send(400, "text/plain", "volume is empty");
-      return;
     }
 
     bool persist = true;
@@ -961,13 +1020,60 @@ void registerRoutes() {
       persist = false;
     }
 
-    applyMasterVolumePercent(value.toInt());
+    bool hasAny = false;
+    int nextInsert = insertVolumePercent();
+    int nextBg = bgVolumePercent();
+
+    insertRaw.trim();
+    if (insertRaw.length()) {
+      int parsed = 0;
+      if (!parseIntString(insertRaw, parsed) || parsed < 0 || parsed > 100) {
+        gWebServer->send(400, "text/plain", "insertVolume must be 0-100");
+        return;
+      }
+      nextInsert = parsed;
+      hasAny = true;
+    }
+
+    bgRaw.trim();
+    if (bgRaw.length()) {
+      int parsed = 0;
+      if (!parseIntString(bgRaw, parsed) || parsed < 0 || parsed > 100) {
+        gWebServer->send(400, "text/plain", "bgVolume must be 0-100");
+        return;
+      }
+      nextBg = parsed;
+      hasAny = true;
+    }
+
+    value.trim();
+    if (value.length()) {
+      int parsed = 0;
+      if (!parseIntString(value, parsed) || parsed < 0 || parsed > 100) {
+        gWebServer->send(400, "text/plain", "volume must be 0-100");
+        return;
+      }
+      if (!insertRaw.length()) nextInsert = parsed;
+      if (!bgRaw.length()) nextBg = parsed;
+      hasAny = true;
+    }
+
+    if (!hasAny) {
+      gWebServer->send(400, "text/plain", "volume is empty");
+      return;
+    }
+
+    applyVolumePercents(nextInsert, nextBg);
     if (persist && !persistAudioGainsToSettingIni()) {
       gWebServer->send(500, "text/plain", "volume applied but save /setting.ini failed");
       return;
     }
 
-    String out = "{\"volume\":";
+    String out = "{\"insertVolume\":";
+    out += String(insertVolumePercent());
+    out += ",\"bgVolume\":";
+    out += String(bgVolumePercent());
+    out += ",\"volume\":";
     out += String(masterVolumePercent());
     out += ",\"persisted\":";
     out += persist ? "true" : "false";
@@ -1020,6 +1126,8 @@ void registerRoutes() {
     out += String(gWrongProb5);
     out += ",\"enableReprint\":";
     out += gEnableReprint ? "true" : "false";
+    out += ",\"backlight\":";
+    out += String(clampGain(gBacklightLevel), 3);
     out += ",\"backlightTime\":";
     out += String(gBacklightTimeSec);
     out += "}";
@@ -1030,6 +1138,7 @@ void registerRoutes() {
     int nextWrong3 = gWrongProb3;
     int nextWrong5 = gWrongProb5;
     bool nextEnableReprint = gEnableReprint;
+    float nextBacklightLevel = gBacklightLevel;
     int nextBacklightTime = gBacklightTimeSec;
     bool hasAny = false;
 
@@ -1093,6 +1202,21 @@ void registerRoutes() {
       hasAny = true;
     }
 
+    String backlightLevelRaw = gWebServer->arg("backlight");
+    if (!backlightLevelRaw.length() && gWebServer->hasArg("BackLight")) {
+      backlightLevelRaw = gWebServer->arg("BackLight");
+    }
+    backlightLevelRaw.trim();
+    if (backlightLevelRaw.length()) {
+      float parsed = 0.0f;
+      if (!parseFloatString(backlightLevelRaw, parsed) || parsed < 0.0f || parsed > 1.0f) {
+        gWebServer->send(400, "text/plain", "backlight must be 0.0-1.0");
+        return;
+      }
+      nextBacklightLevel = parsed;
+      hasAny = true;
+    }
+
     if (!hasAny) {
       gWebServer->send(400, "text/plain", "no effect settings provided");
       return;
@@ -1101,9 +1225,14 @@ void registerRoutes() {
     gWrongProb3 = nextWrong3;
     gWrongProb5 = nextWrong5;
     gEnableReprint = nextEnableReprint;
+    setBacklightLevel(nextBacklightLevel);
     setBacklightTimeSeconds(nextBacklightTime);
 
-    if (!persistEffectSettingsToSettingIni(gWrongProb3, gWrongProb5, gEnableReprint, gBacklightTimeSec)) {
+    if (!persistEffectSettingsToSettingIni(gWrongProb3,
+                                           gWrongProb5,
+                                           gEnableReprint,
+                                           gBacklightLevel,
+                                           gBacklightTimeSec)) {
       gWebServer->send(500, "text/plain", "settings applied but save /setting.ini failed");
       return;
     }
@@ -1114,6 +1243,8 @@ void registerRoutes() {
     out += String(gWrongProb5);
     out += ",\"enableReprint\":";
     out += gEnableReprint ? "true" : "false";
+    out += ",\"backlight\":";
+    out += String(clampGain(gBacklightLevel), 3);
     out += ",\"backlightTime\":";
     out += String(gBacklightTimeSec);
     out += "}";

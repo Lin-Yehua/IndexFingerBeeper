@@ -23,3 +23,4 @@ void processAppLoop();
 
 void notifyBacklightActivity();
 void setBacklightTimeSeconds(int seconds);
+void setBacklightLevel(float level);

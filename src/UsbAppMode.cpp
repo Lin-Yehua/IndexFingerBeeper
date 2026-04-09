@@ -15,8 +15,6 @@
 
 namespace {
 
-constexpr uint8_t kBacklightDutyBright = 255;
-constexpr uint8_t kBacklightDutyDim = 128;
 constexpr uint8_t kBacklightDutyOff = 0;
 constexpr uint32_t kBacklightDimToOffMs = 20000UL;
 constexpr uint32_t kBacklightTaskTickMs = 100UL;
@@ -32,13 +30,37 @@ portMUX_TYPE gBacklightMux = portMUX_INITIALIZER_UNLOCKED;
 uint32_t gBacklightLastActivityMs = 0;
 BacklightState gBacklightState = kBacklightBright;
 
+float clampUnitFloat(float value) {
+  if (value != value) return 1.0f;  // NaN fallback
+  if (value < 0.0f) return 0.0f;
+  if (value > 1.0f) return 1.0f;
+  return value;
+}
+
+uint8_t backlightDutyBrightFromLevel(float level) {
+  const float clamped = clampUnitFloat(level);
+  const int duty = static_cast<int>(clamped * 255.0f + 0.5f);
+  if (duty < 0) return 0;
+  if (duty > 255) return 255;
+  return static_cast<uint8_t>(duty);
+}
+
+uint8_t backlightDutyDimFromBright(uint8_t brightDuty) {
+  if (brightDuty == 0) return 0;
+  uint8_t dimDuty = static_cast<uint8_t>(brightDuty / 2);
+  if (dimDuty == 0) dimDuty = 1;
+  return dimDuty;
+}
+
 void applyBacklightState(BacklightState state) {
+  const uint8_t brightDuty = backlightDutyBrightFromLevel(gBacklightLevel);
+  const uint8_t dimDuty = backlightDutyDimFromBright(brightDuty);
   switch (state) {
     case kBacklightBright:
-      ledcWrite(0, kBacklightDutyBright);
+      ledcWrite(0, brightDuty);
       break;
     case kBacklightDim:
-      ledcWrite(0, kBacklightDutyDim);
+      ledcWrite(0, dimDuty);
       break;
     case kBacklightOff:
       ledcWrite(0, kBacklightDutyOff);
@@ -154,7 +176,7 @@ void showUsbModeScreen() {
   spriteBoot.setTextColor(0xff36, TFT_BLACK);
   spriteBoot.setTextSize(2);
   delay(300);
-  ledcWrite(0, 255);
+  ledcWrite(0, backlightDutyBrightFromLevel(gBacklightLevel));
 
   const char *line1 = "USB MODE";
   const char *line2 = "Mass Storage Connected";
@@ -192,6 +214,17 @@ void setBacklightTimeSeconds(int seconds) {
   gBacklightTimeSec = seconds;
   portEXIT_CRITICAL(&gBacklightMux);
   notifyBacklightActivity();
+}
+
+void setBacklightLevel(float level) {
+  gBacklightLevel = clampUnitFloat(level);
+
+  BacklightState stateNow = kBacklightBright;
+  portENTER_CRITICAL(&gBacklightMux);
+  stateNow = gBacklightState;
+  portEXIT_CRITICAL(&gBacklightMux);
+
+  applyBacklightState(stateNow);
 }
 
 int32_t onRead(uint32_t lba, uint32_t offset, void *buffer, uint32_t bufsize) {
@@ -261,10 +294,12 @@ void applyAudioGainsFromSettingIni() {
   static constexpr int kDefaultWrongProb3 = 25;
   static constexpr int kDefaultWrongProb5 = 12;
   static constexpr bool kDefaultEnableReprint = true;
+  static constexpr float kDefaultBacklightLevel = 1.0f;
   static constexpr int kDefaultBacklightTimeSec = -1;
 
   gInsertGain = kDefaultInsertGain;
   gBgGain = kDefaultBgGain;
+  gBacklightLevel = kDefaultBacklightLevel;
   gWrongProb3 = kDefaultWrongProb3;
   gWrongProb5 = kDefaultWrongProb5;
   gEnableReprint = kDefaultEnableReprint;
@@ -281,6 +316,7 @@ void applyAudioGainsFromSettingIni() {
   bool gotWrong3 = false;
   bool gotWrong5 = false;
   bool gotReprint = false;
+  bool gotBacklight = false;
   bool gotBacklightTime = false;
   while (f.available()) {
     String line = f.readStringUntil('\n');
@@ -310,6 +346,9 @@ void applyAudioGainsFromSettingIni() {
     } else if (key == "backgroundgain") {
       gBgGain = parsed;
       gotBg = true;
+    } else if (key == "backlight") {
+      gBacklightLevel = clampUnitFloat(parsed);
+      gotBacklight = true;
     } else if (key == "testwrongindexpersent_3area") {
       gWrongProb3 = constrain(value.toInt(), 0, 100);
       gotWrong3 = true;
@@ -331,8 +370,12 @@ void applyAudioGainsFromSettingIni() {
   if (!gotWrong3) Serial.printf("[APP] TestWrongIndexPersent_3Area missing, default=%d\n", gWrongProb3);
   if (!gotWrong5) Serial.printf("[APP] TestWrongIndexPersent_5Area missing, default=%d\n", gWrongProb5);
   if (!gotReprint) Serial.printf("[APP] EnableReprint missing, default=%d\n", gEnableReprint ? 1 : 0);
+  if (!gotBacklight) Serial.printf("[APP] BackLight missing, default=%.3f\n", gBacklightLevel);
   if (!gotBacklightTime) Serial.printf("[APP] BacklightTime missing, default=%d\n", gBacklightTimeSec);
-  Serial.printf("[APP] gains: insert=%.3f bg=%.3f\n", gInsertGain, gBgGain);
+  Serial.printf("[APP] gains: insert=%.3f bg=%.3f backlight=%.3f\n",
+                gInsertGain,
+                gBgGain,
+                gBacklightLevel);
   Serial.printf("[APP] glitch: p3=%d p5=%d reprint=%d backlightTime=%d\n",
                 gWrongProb3,
                 gWrongProb5,
@@ -489,6 +532,7 @@ bool initProjectResources() {
   delay(8000);
 
   ensureBacklightTaskStarted();
+  setBacklightLevel(gBacklightLevel);
   setBacklightTimeSeconds(gBacklightTimeSec);
 
   mixer.setInsertGain(gInsertGain);

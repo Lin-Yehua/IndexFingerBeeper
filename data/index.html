@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -10,12 +10,12 @@
   <main class="page">
     <header class="hero">
       <h1>遵从指令意志</h1>
-      <p>编辑 <code>/data.csv</code>, 或者向该设备发送指令</p>
+      <p>编辑 <code>/data.csv</code>，或向设备推送实时指令。</p>
     </header>
 
     <section class="card">
-      <h2>编辑常规指令</h2>
-      <p>文本需要被英文"引号"括起来</p>
+      <h2>CSV 文本编辑</h2>
+      <p>文本如果包含逗号或特殊字符，请使用英文双引号包裹。</p>
       <div class="row">
         <button id="btnLoadCsv" type="button">Load</button>
         <button id="btnSaveCsv" type="button">Save</button>
@@ -26,12 +26,11 @@
 
     <section class="card">
       <h2>实时推送指令</h2>
-      <p>指令会缓存在哔哔机里面，按一下按钮才会显示下一条</p>
-      <p>如果需要立即显示，请勾选“立即显示”复选框</p>
+      <p>消息会进入队列；勾选“立即显示”后，消息会尽快插播。</p>
       <textarea id="msgBox" maxlength="240" placeholder="Text to display on screen"></textarea>
       <div class="row">
         <button id="btnSendMsg" type="button">发送</button>
-        <button id="btnClearMsg" type="button" class="ghost">清除</button>
+        <button id="btnClearMsg" type="button" class="ghost">清空</button>
       </div>
       <label class="status"><input id="instantRefreshNoKey" type="checkbox"> 立即显示</label>
       <p id="refreshModeStatus" class="status"></p>
@@ -40,36 +39,41 @@
 
     <section class="card">
       <h2>音量控制</h2>
+      <p class="status">背景音量（BG）与插入音量（Insert）独立控制。</p>
       <div class="slider-row">
-        <input id="volumeSlider" type="range" min="0" max="100" step="1" value="20">
-        <span id="volumeValue" class="badge">20%</span>
+        <span>背景</span>
+        <input id="bgVolumeSlider" type="range" min="0" max="100" step="1" value="20">
+        <span id="bgVolumeValue" class="badge">20%</span>
+      </div>
+      <div class="field"></div>
+      <div class="slider-row">
+        <span>插入</span>
+        <input id="insertVolumeSlider" type="range" min="0" max="100" step="1" value="20">
+        <span id="insertVolumeValue" class="badge">20%</span>
       </div>
       <p id="volumeStatus" class="status"></p>
     </section>
 
     <section class="card">
-      <h2>乱码参数设置</h2>
-      <input id="wrongProb3Input" type="number" min="0" max="100" step="1" placeholder="最后3个字的错误概率 (0-100)">
+      <h2>显示与特效设置</h2>
+      <input id="wrongProb3Input" type="number" min="0" max="100" step="1" placeholder="最后 3 个字符错误概率 (0-100)">
       <div class="field"></div>
-      <input id="wrongProb5Input" type="number" min="0" max="100" step="1" placeholder="最后5个字的错误概率 (0-100)">
+      <input id="wrongProb5Input" type="number" min="0" max="100" step="1" placeholder="最后 5 个字符错误概率 (0-100)">
       <div class="field"></div>
       <label class="status"><input id="enableReprintInput" type="checkbox"> 允许文本回滚</label>
+      <div class="field"></div>
+      <input id="backlightInput" type="number" min="0" max="1" step="0.01" placeholder="亮度 BackLight (0.00-1.00)">
+      <div class="field"></div>
+      <input id="backlightTimeInput" type="number" step="1" placeholder="息屏时间（秒），-1 表示从不息屏">
       <div class="row">
-        <button id="btnSaveEffects" type="button">保存</button>
+        <button id="btnSaveEffects" type="button">保存设置</button>
       </div>
       <p id="effectsStatus" class="status"></p>
     </section>
+
     <section class="card">
-      <h2>背光时间设置</h2>
-      <input id="backlightTimeInput" type="number" step="1" placeholder="息屏时间（秒），-1为从不息屏">
-      <div class="row">
-        <button id="btnSaveEffects" type="button">保存</button>
-      </div>
-      <p id="effectsStatus" class="status"></p>
-    </section>
-    <section class="card">
-      <h2>主机MAC地址(用于指定主机，留空不过滤)</h2>
-      <input id="hostMacInput" type="text" placeholder="AA:BB:CC:DD:EE:FF (留空接收全部)">
+      <h2>Host MAC 过滤（留空表示不过滤）</h2>
+      <input id="hostMacInput" type="text" placeholder="AA:BB:CC:DD:EE:FF（留空接收全部）">
       <div class="row">
         <button id="btnSaveHostMac" type="button">Save Host MAC</button>
       </div>
@@ -77,12 +81,12 @@
     </section>
 
     <section class="card">
-      <h2>6) 无线设置</h2>
-      <input id="apSsidInput" type="text" maxlength="32" placeholder="热点名字">
+      <h2>无线设置</h2>
+      <input id="apSsidInput" type="text" maxlength="32" placeholder="热点名称 (SSID)">
       <div class="field"></div>
-      <input id="apPasswordInput" type="text" maxlength="63" placeholder="热点密码 (留空为无密码)">
+      <input id="apPasswordInput" type="text" maxlength="63" placeholder="热点密码（留空为无密码）">
       <div class="field"></div>
-      <input id="apChannelInput" type="number" min="1" max="13" step="1" placeholder="ESP-NOW协议通道（1-13）">
+      <input id="apChannelInput" type="number" min="1" max="13" step="1" placeholder="ESP-NOW 频道（1-13）">
       <div class="row">
         <button id="btnSaveApConfig" type="button">保存无线设置</button>
       </div>
@@ -91,7 +95,7 @@
     </section>
 
     <section class="card">
-      <h2>7) Device MAC</h2>
+      <h2>设备 MAC</h2>
       <input id="selfMacInput" type="text" readonly>
       <div class="row">
         <button id="btnCopySelfMac" type="button" class="ghost">Copy MAC</button>

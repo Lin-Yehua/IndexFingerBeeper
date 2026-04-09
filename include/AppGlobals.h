@@ -46,6 +46,7 @@ extern int csvCount;
 extern int csvArray[kCsvArrayCapacity];
 extern float gInsertGain;
 extern float gBgGain;
+extern float gBacklightLevel;
 extern int gWrongProb3;
 extern int gWrongProb5;
 extern bool gEnableReprint;

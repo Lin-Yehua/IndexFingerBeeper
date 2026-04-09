@@ -34,6 +34,7 @@ int csvCount = 0;
 int csvArray[kCsvArrayCapacity] = {0};
 float gInsertGain = 0.2f;
 float gBgGain = 0.2f;
+float gBacklightLevel = 1.0f;
 int gWrongProb3 = 25;
 int gWrongProb5 = 12;
 bool gEnableReprint = true;

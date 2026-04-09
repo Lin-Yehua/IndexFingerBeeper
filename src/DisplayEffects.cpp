@@ -9,6 +9,19 @@
 #include "Hanchi_Index.h"
 #include "Key_Drv.h"
 
+namespace {
+uint8_t scaledBacklightDuty(uint8_t rawDuty) {
+  float level = gBacklightLevel;
+  if (level != level) level = 1.0f;  // NaN fallback
+  if (level < 0.0f) level = 0.0f;
+  if (level > 1.0f) level = 1.0f;
+  const int duty = static_cast<int>(static_cast<float>(rawDuty) * level + 0.5f);
+  if (duty < 0) return 0;
+  if (duty > 255) return 255;
+  return static_cast<uint8_t>(duty);
+}
+}
+
 void showGlitchEffectUTF8(const char *text) {
   if (!text) return;
 
@@ -475,7 +488,7 @@ void task_LogoFadeInAndMove(void *pvParameters) {
   (void)pvParameters;
   tft.pushImage(160 - 45, 150 - 45, 90, 90, (uint16_t *)Logo_Moon_B);
   for (uint8_t N = 0; N < 48; N++) {
-    ledcWrite(0, N * 5);
+    ledcWrite(0, scaledBacklightDuty(static_cast<uint8_t>(N * 5)));
     delay(30);
   }
   delay(500);
@@ -496,12 +509,12 @@ void task_LogoFadeInAndMove(void *pvParameters) {
   }
   delay(2000);
   for (uint8_t N = 0; N < 48; N++) {
-    ledcWrite(0, (48 - (N + 1)) * 5);
+    ledcWrite(0, scaledBacklightDuty(static_cast<uint8_t>((48 - (N + 1)) * 5)));
     delay(30);
   }
   tft.fillRect(0, 50, 320, 140, 0x0000);
   delay(50);
-  ledcWrite(0, 255);
+  ledcWrite(0, scaledBacklightDuty(255));
   tft.pushImage(160 - 60, 150 - 60, 120, 120, (uint16_t *)Index_B);
   vTaskDelete(NULL);
 }
