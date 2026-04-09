@@ -195,10 +195,47 @@ bool enterAppMode() {
 
 }  // namespace
 
+void TaskPowerLED(void *pvParameters)
+{
+  digitalWrite(10,LOW);
+  delay(2000);
+  digitalWrite(10,HIGH);
+
+  while (true)
+  {
+    delay(5000);
+    digitalWrite(10,LOW);
+    delay(80);
+    digitalWrite(10,HIGH);
+  }
+  
+}
+void LED_Blitz( uint8_t Index, uint8_t time_ms)
+{
+  for (uint8_t i = 0; i < Index; i++)
+  {
+    digitalWrite(10,LOW);
+    delay(80);
+    digitalWrite(10,HIGH);
+    delay(time_ms);
+  }
+}
 void setup() {
   Serial.begin(115200);
   delay(300);
   Serial.println("\n[HOST] ESP-NOW broadcaster boot");
+
+  pinMode(10,OUTPUT);
+  
+
+  xTaskCreate(
+        TaskPowerLED,      
+        "LED",              
+        4096,                        
+        NULL,                        
+        1,                           
+        NULL                         
+    );
 
   gMsc.vendorID("ESP32");
   gMsc.productID("S3_FAT_MSC");
@@ -221,6 +258,8 @@ void setup() {
   USB.onEvent(onUsbEvent);
   USB.begin();
   Serial.println("[HOST][BOOT] USB initialized");
+  
+  LED_Blitz(3,160);
 
   const uint32_t t0 = millis();
   while (millis() - t0 < 1500) {
@@ -246,11 +285,13 @@ void loop() {
   if (gUsbHostActive != gUsbHostActivePrev) {
     if (gUsbHostActive) {
       Serial.println("[HOST][AUTO] USB plugged -> USB mode");
+      LED_Blitz(4,100);
       hostPortalStop();
       enterUsbMode();
     } else {
       Serial.println("[HOST][AUTO] USB unplugged -> restart");
-      delay(120);
+      LED_Blitz(4,300);
+      //delay(120);
       esp_restart();
     }
     gUsbHostActivePrev = gUsbHostActive;
