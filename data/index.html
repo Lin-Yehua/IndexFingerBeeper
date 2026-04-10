@@ -26,7 +26,7 @@
 
     <section class="card">
       <h2>实时推送指令</h2>
-      <p>消息会进入队列；勾选“立即显示”后，消息会尽快插播。</p>
+      <p>消息会进入队列；勾选“立即显示”后，消息会立刻插播。</p>
       <textarea id="msgBox" maxlength="240" placeholder="Text to display on screen"></textarea>
       <div class="row">
         <button id="btnSendMsg" type="button">发送</button>
@@ -38,12 +38,13 @@
     </section>
 
     <section class="card">
-      <h2>Image Upload (RGB565)</h2>
-      <p class="status">Supported source: PNG/JPG/GIF, file size &lt;= 10MB. Preprocess (crop/resize/RGB565) is done locally in browser, then only RGB565 frame is sent to ESP.</p>
+      <h2>上传图片</h2>
+      <p class="status">支持的类型: PNG/JPG, 大小限制 &lt;= 10MB</p>
+      <p class="status">由于权限限制,请在手机浏览器里打开本网页(地址如下),而不是在自动跳转的页面。否则无法上传文件</p>
       <p id="portalBrowserHint" class="status"></p>
       <input id="portalUrlInput" type="text" readonly>
       <div class="row">
-        <button id="btnCopyPortalUrl" type="button" class="ghost">Copy URL</button>
+        <button id="btnCopyPortalUrl" type="button" class="ghost">复制地址</button>
       </div>
       <input id="imgFileInput" type="file" accept=".png,.jpg,.jpeg,.gif,image/png,image/jpeg,image/gif">
       <div class="field"></div>
@@ -54,13 +55,13 @@
         <input id="imgCenterYInput" type="number" step="1" value="155" placeholder="center Y">
         <input id="imgCropOffsetYInput" type="number" step="1" value="0" placeholder="crop Y offset (cover only)">
       </div>
-      <p class="status">Cover crop if source is larger than target. If source is smaller, keep original size and center it on black.</p>
+      <p class="status">如果无法上传可以先关一下流量，确保使用的是这个WiFi</p>
       <div class="preview-wrap">
         <canvas id="imgPreviewCanvas" width="320" height="140"></canvas>
       </div>
       <div class="row">
-        <button id="btnSendImage" type="button">Send Image</button>
-        <button id="btnClearImage" type="button" class="ghost">Clear</button>
+        <button id="btnSendImage" type="button">上传图片</button>
+        <button id="btnClearImage" type="button" class="ghost">清除</button>
       </div>
       <p id="imgStatus" class="status"></p>
     </section>
