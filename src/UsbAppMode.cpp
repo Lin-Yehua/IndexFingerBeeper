@@ -760,7 +760,10 @@ void processAppLoop() {
       const uint8_t key = get_Keycode();
       if (key == 2 && !imageInterruptKeyLatch) {
         imageInterruptKeyLatch = true;
-        (void)wakeBacklightByKeyIfNeeded();
+        if (wakeBacklightByKeyIfNeeded()) {
+          // Backlight wake is always effective and does not end image interrupt.
+          return;
+        }
         imageInterruptActive = false;
         imageInterruptKeyLatch = false;
         if (imagePreemptedWebInterrupt) {
