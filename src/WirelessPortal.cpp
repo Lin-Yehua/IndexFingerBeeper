@@ -9,6 +9,7 @@
 #include <DNSServer.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
+#include <freertos/semphr.h>
 
 #include "AppGlobals.h"
 #include "EspNowMessage.h"
@@ -27,18 +28,109 @@ constexpr uint16_t kHttpPort = 80;
 constexpr uint16_t kDnsPort = 53;
 constexpr BaseType_t kWebTaskCore = 0;
 constexpr UBaseType_t kWebTaskPriority = 1;
-constexpr uint32_t kWebTaskStack = 8192;
+constexpr uint32_t kWebTaskStack = 12288;
 constexpr size_t kTextMaxLen = 240;
 constexpr size_t kQueueDepth = 128;
+constexpr size_t kImageUploadByteLimit = 1024 * 1024;
+constexpr uint16_t kImageMaxWidth = 320;
+constexpr uint16_t kImageMaxHeight = 240;
+constexpr uint16_t kImageDefaultWidth = 320;
+constexpr uint16_t kImageDefaultHeight = 140;
+constexpr int16_t kImageDefaultCenterX = 160;
+constexpr int16_t kImageDefaultCenterY = 155;
 
 struct WebQueuedMessage {
   char text[kTextMaxLen + 1];
 };
 
+struct PendingImageFrame {
+  uint16_t *pixels = nullptr;
+  size_t pixelCapacity = 0;
+  size_t pixelCount = 0;
+  uint16_t width = 0;
+  uint16_t height = 0;
+  int16_t centerX = kImageDefaultCenterX;
+  int16_t centerY = kImageDefaultCenterY;
+  bool ready = false;
+};
+
+struct ImageUploadState {
+  uint8_t *bytes = nullptr;
+  size_t size = 0;
+  size_t capacity = 0;
+  bool failed = false;
+  char error[96] = {0};
+};
+
+class PortalWebServer final : public WebServer {
+ public:
+  explicit PortalWebServer(uint16_t port)
+      : WebServer(port) {}
+
+  void handleClient() override {
+    if (_currentStatus == HC_NONE) {
+      _currentClient = _server.available();
+      if (!_currentClient) {
+        if (_nullDelay) {
+          delay(1);
+        }
+        return;
+      }
+
+      _currentStatus = HC_WAIT_READ;
+      _statusChange = millis();
+    }
+
+    bool keepCurrentClient = false;
+    bool callYield = false;
+
+    if (_currentClient.connected()) {
+      switch (_currentStatus) {
+        case HC_NONE:
+          break;
+        case HC_WAIT_READ:
+          if (_currentClient.available()) {
+            // Avoid long busy-loop parsing on captive-portal half-requests.
+            static_cast<Stream &>(_currentClient).setTimeout(120);
+            if (_parseRequest(_currentClient)) {
+              _currentClient.setTimeout(HTTP_MAX_SEND_WAIT / 1000);
+              _contentLength = CONTENT_LENGTH_NOT_SET;
+              _handleRequest();
+            }
+          } else {
+            if (millis() - _statusChange <= HTTP_MAX_DATA_WAIT) {
+              keepCurrentClient = true;
+            }
+            callYield = true;
+          }
+          break;
+        case HC_WAIT_CLOSE:
+          if (millis() - _statusChange <= HTTP_MAX_CLOSE_WAIT) {
+            keepCurrentClient = true;
+            callYield = true;
+          }
+          break;
+      }
+    }
+
+    if (!keepCurrentClient) {
+      _currentClient = WiFiClient();
+      _currentStatus = HC_NONE;
+      _currentUpload.reset();
+      _currentRaw.reset();
+    }
+
+    if (callYield) {
+      yield();
+    }
+  }
+};
+
 QueueHandle_t gMessageQueue = nullptr;
 QueueHandle_t gHostMessageQueue = nullptr;
+SemaphoreHandle_t gImageMutex = nullptr;
 TaskHandle_t gWebTaskHandle = nullptr;
-WebServer *gWebServer = nullptr;
+PortalWebServer *gWebServer = nullptr;
 DNSServer *gDnsServer = nullptr;
 char gApSsid[kApSsidMaxLen] = {0};
 char gApPassword[kApPasswordMaxLen] = {0};
@@ -53,6 +145,8 @@ bool gInstantRefreshNoKey = false;
 volatile bool gWebTaskRunning = false;
 volatile bool gCsvReloadRequested = false;
 bool gPortalStarted = false;
+PendingImageFrame gPendingImage;
+ImageUploadState gImageUpload;
 portMUX_TYPE gFlagMux = portMUX_INITIALIZER_UNLOCKED;
 
 void copyStringToBuf(const String &src, char *dst, size_t dstSize) {
@@ -140,6 +234,233 @@ bool parseFloatString(const String &raw, float &outValue) {
 
   outValue = parsed;
   return true;
+}
+
+void resetImageUploadStateLocked() {
+  if (gImageUpload.bytes) {
+    free(gImageUpload.bytes);
+  }
+  gImageUpload.bytes = nullptr;
+  gImageUpload.size = 0;
+  gImageUpload.capacity = 0;
+  gImageUpload.failed = false;
+  gImageUpload.error[0] = '\0';
+}
+
+void setImageUploadErrorLocked(const char *msg) {
+  gImageUpload.failed = true;
+  if (!msg) msg = "upload failed";
+  snprintf(gImageUpload.error, sizeof(gImageUpload.error), "%s", msg);
+  gImageUpload.error[sizeof(gImageUpload.error) - 1] = '\0';
+}
+
+bool ensureImageUploadCapacityLocked(size_t required) {
+  if (required <= gImageUpload.capacity) return true;
+  size_t nextCap = gImageUpload.capacity ? gImageUpload.capacity : 1024;
+  while (nextCap < required && nextCap < kImageUploadByteLimit) {
+    const size_t doubled = nextCap * 2;
+    if (doubled <= nextCap) break;
+    nextCap = doubled;
+  }
+  if (nextCap < required) nextCap = required;
+  if (nextCap > kImageUploadByteLimit) return false;
+
+  uint8_t *next = static_cast<uint8_t *>(realloc(gImageUpload.bytes, nextCap));
+  if (!next) return false;
+  gImageUpload.bytes = next;
+  gImageUpload.capacity = nextCap;
+  return true;
+}
+
+bool ensurePendingImageCapacityLocked(size_t requiredPixels) {
+  if (requiredPixels == 0) return false;
+  if (requiredPixels <= gPendingImage.pixelCapacity && gPendingImage.pixels) return true;
+
+  uint16_t *next = static_cast<uint16_t *>(
+      realloc(gPendingImage.pixels, requiredPixels * sizeof(uint16_t)));
+  if (!next) return false;
+  gPendingImage.pixels = next;
+  gPendingImage.pixelCapacity = requiredPixels;
+  return true;
+}
+
+bool parseImageArgs(uint16_t &outWidth,
+                    uint16_t &outHeight,
+                    int16_t &outCenterX,
+                    int16_t &outCenterY,
+                    String &errorOut) {
+  outWidth = kImageDefaultWidth;
+  outHeight = kImageDefaultHeight;
+  outCenterX = kImageDefaultCenterX;
+  outCenterY = kImageDefaultCenterY;
+  errorOut = "";
+
+  String widthRaw = gWebServer->arg("width");
+  if (!widthRaw.length() && gWebServer->hasArg("w")) widthRaw = gWebServer->arg("w");
+  widthRaw.trim();
+  if (widthRaw.length()) {
+    int parsed = 0;
+    if (!parseIntString(widthRaw, parsed) || parsed <= 0 || parsed > static_cast<int>(kImageMaxWidth)) {
+      errorOut = "width must be 1-320";
+      return false;
+    }
+    outWidth = static_cast<uint16_t>(parsed);
+  }
+
+  String heightRaw = gWebServer->arg("height");
+  if (!heightRaw.length() && gWebServer->hasArg("h")) heightRaw = gWebServer->arg("h");
+  heightRaw.trim();
+  if (heightRaw.length()) {
+    int parsed = 0;
+    if (!parseIntString(heightRaw, parsed) || parsed <= 0 || parsed > static_cast<int>(kImageMaxHeight)) {
+      errorOut = "height must be 1-240";
+      return false;
+    }
+    outHeight = static_cast<uint16_t>(parsed);
+  }
+
+  String centerXRaw = gWebServer->arg("centerX");
+  if (!centerXRaw.length() && gWebServer->hasArg("cx")) centerXRaw = gWebServer->arg("cx");
+  centerXRaw.trim();
+  if (centerXRaw.length()) {
+    int parsed = 0;
+    if (!parseIntString(centerXRaw, parsed) || parsed < -1024 || parsed > 1024) {
+      errorOut = "centerX must be -1024..1024";
+      return false;
+    }
+    outCenterX = static_cast<int16_t>(parsed);
+  }
+
+  String centerYRaw = gWebServer->arg("centerY");
+  if (!centerYRaw.length() && gWebServer->hasArg("cy")) centerYRaw = gWebServer->arg("cy");
+  centerYRaw.trim();
+  if (centerYRaw.length()) {
+    int parsed = 0;
+    if (!parseIntString(centerYRaw, parsed) || parsed < -1024 || parsed > 1024) {
+      errorOut = "centerY must be -1024..1024";
+      return false;
+    }
+    outCenterY = static_cast<int16_t>(parsed);
+  }
+
+  return true;
+}
+
+void handleImageUpload() {
+  if (!gImageMutex) return;
+
+  HTTPUpload &upload = gWebServer->upload();
+  if (xSemaphoreTake(gImageMutex, pdMS_TO_TICKS(250)) != pdTRUE) {
+    return;
+  }
+
+  if (upload.status == UPLOAD_FILE_START) {
+    resetImageUploadStateLocked();
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (!gImageUpload.failed) {
+      const size_t nextSize = gImageUpload.size + upload.currentSize;
+      if (nextSize > kImageUploadByteLimit) {
+        setImageUploadErrorLocked("image exceeds 1MB");
+      } else if (!ensureImageUploadCapacityLocked(nextSize)) {
+        setImageUploadErrorLocked("no memory for image");
+      } else {
+        memcpy(gImageUpload.bytes + gImageUpload.size, upload.buf, upload.currentSize);
+        gImageUpload.size = nextSize;
+      }
+    }
+  } else if (upload.status == UPLOAD_FILE_ABORTED) {
+    setImageUploadErrorLocked("upload aborted");
+  }
+
+  xSemaphoreGive(gImageMutex);
+}
+
+void handleImageUploadFinalize() {
+  if (!gImageMutex) {
+    gWebServer->send(500, "text/plain", "image mutex not ready");
+    return;
+  }
+
+  uint16_t width = kImageDefaultWidth;
+  uint16_t height = kImageDefaultHeight;
+  int16_t centerX = kImageDefaultCenterX;
+  int16_t centerY = kImageDefaultCenterY;
+  String argError;
+  if (!parseImageArgs(width, height, centerX, centerY, argError)) {
+    if (xSemaphoreTake(gImageMutex, pdMS_TO_TICKS(250)) == pdTRUE) {
+      resetImageUploadStateLocked();
+      xSemaphoreGive(gImageMutex);
+    }
+    gWebServer->send(400, "text/plain", argError);
+    return;
+  }
+
+  if (xSemaphoreTake(gImageMutex, pdMS_TO_TICKS(500)) != pdTRUE) {
+    gWebServer->send(503, "text/plain", "image buffer busy");
+    return;
+  }
+
+  const size_t expectedBytes = static_cast<size_t>(width) * static_cast<size_t>(height) * 2U;
+  if (gImageUpload.failed) {
+    const String err = gImageUpload.error[0] ? String(gImageUpload.error) : String("upload failed");
+    resetImageUploadStateLocked();
+    xSemaphoreGive(gImageMutex);
+    gWebServer->send(400, "text/plain", err);
+    return;
+  }
+
+  if (!gImageUpload.bytes || gImageUpload.size == 0) {
+    resetImageUploadStateLocked();
+    xSemaphoreGive(gImageMutex);
+    gWebServer->send(400, "text/plain", "image body is empty");
+    return;
+  }
+
+  if (gImageUpload.size != expectedBytes) {
+    String err = "invalid RGB565 payload bytes: got ";
+    err += String(static_cast<unsigned int>(gImageUpload.size));
+    err += ", expect ";
+    err += String(static_cast<unsigned int>(expectedBytes));
+    resetImageUploadStateLocked();
+    xSemaphoreGive(gImageMutex);
+    gWebServer->send(400, "text/plain", err);
+    return;
+  }
+
+  const size_t pixelCount = expectedBytes / 2U;
+  if (!ensurePendingImageCapacityLocked(pixelCount)) {
+    resetImageUploadStateLocked();
+    xSemaphoreGive(gImageMutex);
+    gWebServer->send(500, "text/plain", "no memory for pending frame");
+    return;
+  }
+
+  for (size_t i = 0; i < pixelCount; ++i) {
+    const size_t b = i * 2U;
+    gPendingImage.pixels[i] =
+        static_cast<uint16_t>(gImageUpload.bytes[b]) |
+        static_cast<uint16_t>(static_cast<uint16_t>(gImageUpload.bytes[b + 1]) << 8);
+  }
+  gPendingImage.pixelCount = pixelCount;
+  gPendingImage.width = width;
+  gPendingImage.height = height;
+  gPendingImage.centerX = centerX;
+  gPendingImage.centerY = centerY;
+  gPendingImage.ready = true;
+
+  resetImageUploadStateLocked();
+  xSemaphoreGive(gImageMutex);
+
+  String out = "{\"ok\":true,\"width\":";
+  out += String(static_cast<unsigned int>(width));
+  out += ",\"height\":";
+  out += String(static_cast<unsigned int>(height));
+  out += ",\"centerX\":";
+  out += String(centerX);
+  out += ",\"centerY\":";
+  out += String(centerY);
+  out += "}";
+  gWebServer->send(200, "application/json", out);
 }
 
 bool forceStaChannel(uint8_t channel) {
@@ -869,9 +1190,22 @@ String statusJson() {
   const UBaseType_t queued = gMessageQueue ? uxQueueMessagesWaiting(gMessageQueue) : 0;
   const UBaseType_t hostQueued = gHostMessageQueue ? uxQueueMessagesWaiting(gHostMessageQueue) : 0;
   bool pendingReload = false;
+  bool imagePending = false;
+  uint16_t imageWidth = 0;
+  uint16_t imageHeight = 0;
+  int16_t imageCenterX = kImageDefaultCenterX;
+  int16_t imageCenterY = kImageDefaultCenterY;
   portENTER_CRITICAL(&gFlagMux);
   pendingReload = gCsvReloadRequested;
   portEXIT_CRITICAL(&gFlagMux);
+  if (gImageMutex && xSemaphoreTake(gImageMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    imagePending = gPendingImage.ready;
+    imageWidth = gPendingImage.width;
+    imageHeight = gPendingImage.height;
+    imageCenterX = gPendingImage.centerX;
+    imageCenterY = gPendingImage.centerY;
+    xSemaphoreGive(gImageMutex);
+  }
 
   String out = "{\"queue\":";
   out += String(static_cast<unsigned int>(queued));
@@ -910,6 +1244,16 @@ String statusJson() {
   out += String(clampGain(gBacklightLevel), 3);
   out += ",\"backlightTime\":";
   out += String(gBacklightTimeSec);
+  out += ",\"imagePending\":";
+  out += imagePending ? "true" : "false";
+  out += ",\"imageWidth\":";
+  out += String(static_cast<unsigned int>(imageWidth));
+  out += ",\"imageHeight\":";
+  out += String(static_cast<unsigned int>(imageHeight));
+  out += ",\"imageCenterX\":";
+  out += String(imageCenterX);
+  out += ",\"imageCenterY\":";
+  out += String(imageCenterY);
   out += ",\"selfMac\":\"";
   // Keep selfMac stable for ESP-NOW targeting: always use STA MAC.
   out += staMac;
@@ -979,6 +1323,12 @@ void registerRoutes() {
   });
   gWebServer->on("/app.js", HTTP_GET, []() {
     handleStaticFile("/app.js");
+  });
+  gWebServer->on("/favicon.ico", HTTP_GET, []() {
+    gWebServer->send(204, "text/plain", "");
+  });
+  gWebServer->on("/apple-touch-icon.png", HTTP_GET, []() {
+    gWebServer->send(204, "text/plain", "");
   });
 
   gWebServer->on("/api/status", HTTP_GET, []() {
@@ -1398,6 +1748,12 @@ void registerRoutes() {
     gWebServer->send(200, "text/plain", reply);
   });
 
+  gWebServer->on("/api/image", HTTP_POST, []() {
+    handleImageUploadFinalize();
+  }, []() {
+    handleImageUpload();
+  });
+
   auto captiveRedirect = []() {
     redirectToPortal();
   };
@@ -1416,6 +1772,15 @@ void registerRoutes() {
       return;
     }
 
+    // Captive mini-browsers may probe odd private paths; skip filesystem lookup.
+    if (uri.length() > 96 ||
+        uri.startsWith("/mmtls/") ||
+        uri.startsWith("/group/") ||
+        uri.startsWith("/cgi-bin/")) {
+      gWebServer->send(204, "text/plain", "");
+      return;
+    }
+
     if (LittleFS.exists(uri)) {
       handleStaticFile(uri);
       return;
@@ -1427,7 +1792,7 @@ void registerRoutes() {
 
 void webServerTask(void *param) {
   (void)param;
-  gWebServer = new WebServer(kHttpPort);
+  gWebServer = new PortalWebServer(kHttpPort);
   gDnsServer = new DNSServer();
   if (!gWebServer || !gDnsServer) {
     if (gDnsServer) {
@@ -1471,6 +1836,20 @@ void webServerTask(void *param) {
 
 bool wirelessPortalStart() {
   if (gPortalStarted) return true;
+
+  if (!gImageMutex) {
+    gImageMutex = xSemaphoreCreateMutex();
+    if (!gImageMutex) {
+      Serial.println("[WEB] image mutex create failed");
+      return false;
+    }
+  }
+
+  if (xSemaphoreTake(gImageMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    resetImageUploadStateLocked();
+    gPendingImage.ready = false;
+    xSemaphoreGive(gImageMutex);
+  }
 
   loadApCredentialsFromSettingIni();
   if (!gEnableAp && !gEnableEspNow) {
@@ -1609,6 +1988,22 @@ void wirelessPortalStop() {
     while (xQueueReceive(gHostMessageQueue, &drop, 0) == pdTRUE) {}
   }
 
+  if (gImageMutex && xSemaphoreTake(gImageMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+    resetImageUploadStateLocked();
+    if (gPendingImage.pixels) {
+      free(gPendingImage.pixels);
+    }
+    gPendingImage.pixels = nullptr;
+    gPendingImage.pixelCapacity = 0;
+    gPendingImage.pixelCount = 0;
+    gPendingImage.width = 0;
+    gPendingImage.height = 0;
+    gPendingImage.centerX = kImageDefaultCenterX;
+    gPendingImage.centerY = kImageDefaultCenterY;
+    gPendingImage.ready = false;
+    xSemaphoreGive(gImageMutex);
+  }
+
   portENTER_CRITICAL(&gFlagMux);
   gCsvReloadRequested = false;
   portEXIT_CRITICAL(&gFlagMux);
@@ -1655,4 +2050,41 @@ bool wirelessPortalConsumeCsvReloadRequest() {
 
 bool wirelessPortalInstantRefreshNoKeyEnabled() {
   return gInstantRefreshNoKey;
+}
+
+bool wirelessPortalTakePendingImage(uint16_t *outPixels,
+                                    size_t outCapacityPixels,
+                                    uint16_t &outWidth,
+                                    uint16_t &outHeight,
+                                    int16_t &outCenterX,
+                                    int16_t &outCenterY,
+                                    size_t &outPixelCount) {
+  outWidth = 0;
+  outHeight = 0;
+  outCenterX = kImageDefaultCenterX;
+  outCenterY = kImageDefaultCenterY;
+  outPixelCount = 0;
+
+  if (!outPixels || outCapacityPixels == 0 || !gImageMutex) return false;
+  if (xSemaphoreTake(gImageMutex, pdMS_TO_TICKS(200)) != pdTRUE) return false;
+
+  if (!gPendingImage.ready || !gPendingImage.pixels || gPendingImage.pixelCount == 0) {
+    xSemaphoreGive(gImageMutex);
+    return false;
+  }
+  if (gPendingImage.pixelCount > outCapacityPixels) {
+    xSemaphoreGive(gImageMutex);
+    return false;
+  }
+
+  memcpy(outPixels, gPendingImage.pixels, gPendingImage.pixelCount * sizeof(uint16_t));
+  outWidth = gPendingImage.width;
+  outHeight = gPendingImage.height;
+  outCenterX = gPendingImage.centerX;
+  outCenterY = gPendingImage.centerY;
+  outPixelCount = gPendingImage.pixelCount;
+  gPendingImage.ready = false;
+
+  xSemaphoreGive(gImageMutex);
+  return true;
 }

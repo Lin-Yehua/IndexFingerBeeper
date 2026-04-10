@@ -38,6 +38,33 @@
     </section>
 
     <section class="card">
+      <h2>Image Upload (RGB565)</h2>
+      <p class="status">Supported source: PNG/JPG/GIF, file size &lt;= 1MB. 1080p source is OK, browser will preprocess to RGB565.</p>
+      <p id="portalBrowserHint" class="status"></p>
+      <input id="portalUrlInput" type="text" readonly>
+      <div class="row">
+        <button id="btnCopyPortalUrl" type="button" class="ghost">Copy URL</button>
+      </div>
+      <input id="imgFileInput" type="file" accept=".png,.jpg,.jpeg,.gif,image/png,image/jpeg,image/gif">
+      <div class="field"></div>
+      <div class="image-grid">
+        <input id="imgTargetWidthInput" type="number" min="1" max="320" step="1" value="320" placeholder="target width (1-320)">
+        <input id="imgTargetHeightInput" type="number" min="1" max="240" step="1" value="140" placeholder="target height (1-240)">
+        <input id="imgCenterXInput" type="number" step="1" value="160" placeholder="center X">
+        <input id="imgCenterYInput" type="number" step="1" value="155" placeholder="center Y">
+      </div>
+      <p class="status">Cover crop if source is larger than target. If source is smaller, keep original size and center it on black.</p>
+      <div class="preview-wrap">
+        <canvas id="imgPreviewCanvas" width="320" height="140"></canvas>
+      </div>
+      <div class="row">
+        <button id="btnSendImage" type="button">Send Image</button>
+        <button id="btnClearImage" type="button" class="ghost">Clear</button>
+      </div>
+      <p id="imgStatus" class="status"></p>
+    </section>
+
+    <section class="card">
       <h2>音量控制</h2>
       <p class="status">背景音量（BG）与插入音量（Insert）独立控制。</p>
       <div class="slider-row">
