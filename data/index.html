@@ -39,7 +39,7 @@
 
     <section class="card">
       <h2>Image Upload (RGB565)</h2>
-      <p class="status">Supported source: PNG/JPG/GIF, file size &lt;= 1MB. 1080p source is OK, browser will preprocess to RGB565.</p>
+      <p class="status">Supported source: PNG/JPG/GIF, file size &lt;= 10MB. Preprocess (crop/resize/RGB565) is done locally in browser, then only RGB565 frame is sent to ESP.</p>
       <p id="portalBrowserHint" class="status"></p>
       <input id="portalUrlInput" type="text" readonly>
       <div class="row">
@@ -52,6 +52,7 @@
         <input id="imgTargetHeightInput" type="number" min="1" max="240" step="1" value="140" placeholder="target height (1-240)">
         <input id="imgCenterXInput" type="number" step="1" value="160" placeholder="center X">
         <input id="imgCenterYInput" type="number" step="1" value="155" placeholder="center Y">
+        <input id="imgCropOffsetYInput" type="number" step="1" value="0" placeholder="crop Y offset (cover only)">
       </div>
       <p class="status">Cover crop if source is larger than target. If source is smaller, keep original size and center it on black.</p>
       <div class="preview-wrap">

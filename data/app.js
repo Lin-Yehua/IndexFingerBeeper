@@ -28,6 +28,7 @@ const imgTargetWidthInput = document.getElementById("imgTargetWidthInput");
 const imgTargetHeightInput = document.getElementById("imgTargetHeightInput");
 const imgCenterXInput = document.getElementById("imgCenterXInput");
 const imgCenterYInput = document.getElementById("imgCenterYInput");
+const imgCropOffsetYInput = document.getElementById("imgCropOffsetYInput");
 const imgPreviewCanvas = document.getElementById("imgPreviewCanvas");
 const imgStatus = document.getElementById("imgStatus");
 const portalBrowserHint = document.getElementById("portalBrowserHint");
@@ -35,7 +36,7 @@ const portalUrlInput = document.getElementById("portalUrlInput");
 const btnCopyPortalUrl = document.getElementById("btnCopyPortalUrl");
 
 let volumePushTimer = null;
-const IMAGE_FILE_MAX_BYTES = 1024 * 1024;
+const IMAGE_FILE_MAX_BYTES = 10 * 1024 * 1024;
 let preparedImageBuffer = null;
 let selectedImageFile = null;
 
@@ -166,12 +167,13 @@ async function prepareImageBufferFromSelectedFile() {
   }
   if (file.size > IMAGE_FILE_MAX_BYTES) {
     preparedImageBuffer = null;
-    setStatus(imgStatus, "Image file must be <= 1MB", true);
+    setStatus(imgStatus, "Image file must be <= 10MB", true);
     return;
   }
 
   const targetW = parseIntInputWithFallback(imgTargetWidthInput, 320, 1, 320);
   const targetH = parseIntInputWithFallback(imgTargetHeightInput, 140, 1, 240);
+  const cropOffsetY = parseIntInputWithFallback(imgCropOffsetYInput, 0, -2000, 2000);
 
   try {
     const img = await loadImageFromFile(file);
@@ -189,7 +191,11 @@ async function prepareImageBufferFromSelectedFile() {
       const drawW = img.width * scale;
       const drawH = img.height * scale;
       const drawX = (targetW - drawW) * 0.5;
-      const drawY = (targetH - drawH) * 0.5;
+      const minDrawY = targetH - drawH;
+      const maxDrawY = 0;
+      let drawY = (targetH - drawH) * 0.5 + cropOffsetY;
+      if (drawY < minDrawY) drawY = minDrawY;
+      if (drawY > maxDrawY) drawY = maxDrawY;
       ctx.drawImage(img, drawX, drawY, drawW, drawH);
     } else {
       const drawX = Math.floor((targetW - img.width) * 0.5);
@@ -200,7 +206,7 @@ async function prepareImageBufferFromSelectedFile() {
     preparedImageBuffer = imageDataToRgb565ArrayBuffer(ctx.getImageData(0, 0, targetW, targetH));
     setStatus(
       imgStatus,
-      `Prepared ${targetW}x${targetH} RGB565 (${preparedImageBuffer.byteLength} bytes), source ${img.width}x${img.height}`
+      `Prepared ${targetW}x${targetH} RGB565 (${preparedImageBuffer.byteLength} bytes), source ${img.width}x${img.height}, cropOffsetY=${cropOffsetY}`
     );
   } catch (err) {
     preparedImageBuffer = null;
@@ -603,6 +609,7 @@ imgFileInput.addEventListener("change", async (ev) => {
 });
 imgTargetWidthInput.addEventListener("change", prepareImageBufferFromSelectedFile);
 imgTargetHeightInput.addEventListener("change", prepareImageBufferFromSelectedFile);
+imgCropOffsetYInput.addEventListener("change", prepareImageBufferFromSelectedFile);
 document.getElementById("btnCopySelfMac").addEventListener("click", async () => {
   const mac = (selfMacInput.value || "").trim();
   if (!mac) {
