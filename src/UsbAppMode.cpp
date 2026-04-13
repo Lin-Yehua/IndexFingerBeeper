@@ -19,6 +19,8 @@ namespace {
 constexpr uint8_t kBacklightDutyOff = 0;
 constexpr uint32_t kBacklightDimToOffMs = 20000UL;
 constexpr uint32_t kBacklightTaskTickMs = 100UL;
+constexpr uint32_t kBootAnimPollMs = 10UL;
+constexpr uint32_t kBootAnimMaxWaitMs = 12000UL;
 
 enum BacklightState : uint8_t {
   kBacklightBright = 0,
@@ -30,6 +32,11 @@ TaskHandle_t gBacklightTaskHandle = nullptr;
 portMUX_TYPE gBacklightMux = portMUX_INITIALIZER_UNLOCKED;
 uint32_t gBacklightLastActivityMs = 0;
 BacklightState gBacklightState = kBacklightBright;
+TaskHandle_t gBootAnimWaiter = nullptr;
+bool gBootAnimRunning = false;
+bool gBootAnimUsbDetected = false;
+bool gSimheiFontPreloaded = false;
+bool gSettingsPreloadedAtBoot = false;
 
 float clampUnitFloat(float value) {
   if (value != value) return 1.0f;  // NaN fallback
@@ -197,6 +204,124 @@ void showUsbModeScreen() {
   typeLine(18, 20, line1, 10);
   typeLine(18, 60, line2, 10);
   typeLine(18, 100, line3, 10);
+}
+
+static void preloadSettingIniForBootAnimation() {
+  if (gSettingsPreloadedAtBoot) return;
+
+  bool mountedTemp = false;
+  if (!FFat.begin(false, kFatMountPoint, 10, kFatPartitionLabel)) {
+    Serial.println("[BOOT] skip setting.ini preload (FAT not ready)");
+    return;
+  }
+  mountedTemp = true;
+
+  applyAudioGainsFromSettingIni();
+  gSettingsPreloadedAtBoot = true;
+  Serial.printf("[BOOT] setting.ini preloaded, backlight=%.3f\n", gBacklightLevel);
+
+  if (mountedTemp) {
+    FFat.end();
+  }
+}
+
+void runBootAnimationTaskStart() {
+  if (gBootAnimRunning) return;
+
+  ensureDisplayReady();
+  tft.fillScreen(TFT_BLACK);
+
+  // Preload config first so boot animation brightness follows setting.ini BackLight.
+  preloadSettingIniForBootAnimation();
+
+  bool littleFsReady = false;
+  if (LittleFS.begin(false, "/littlefs", 10, kLittleFsPartitionLabel)) {
+    littleFsReady = true;
+  } else {
+    Serial.println("[BOOT] LittleFS mount failed during boot preload");
+  }
+
+  Text.createSprite(320, 120);
+  Text.fillSprite(TFT_BLACK);
+  Text.setTextDatum(MC_DATUM);
+  Text.setTextColor(0xff36, TFT_BLACK);
+
+  bool usedOxta = false;
+  if (littleFsReady && LittleFS.exists("/Oxta14.vlw")) {
+    Text.loadFont("Oxta14", LittleFS);
+    usedOxta = true;
+    Serial.println("[BOOT] Oxta14 preloaded for boot animation");
+  } else {
+    Text.setTextSize(2);
+    if (littleFsReady) {
+      Serial.println("[BOOT] Oxta14.vlw missing, fallback to default font");
+    }
+  }
+
+  Text.drawString("PROJECT MOON", 180, 60);
+  if (usedOxta) {
+    Text.unloadFont();
+  }
+  Text.setTextWrap(true, true);
+
+  
+
+  gBootAnimWaiter = xTaskGetCurrentTaskHandle();
+  gBootAnimUsbDetected = usbHostActive;
+  const BaseType_t taskOk = xTaskCreate(
+      task_LogoFadeInAndMove,
+      "LogoFadeMove",
+      20480,
+      gBootAnimWaiter,
+      1,
+      nullptr);
+  if (taskOk != pdPASS) {
+    Serial.println("[BOOT] animation task create failed");
+    gBootAnimWaiter = nullptr;
+    gBootAnimRunning = false;
+    return;
+  }
+  if (!usbHostActive && littleFsReady && !gSimheiFontPreloaded) {
+    if (LittleFS.exists("/simhei15.vlw")) {
+      Text.loadFont("simhei15", LittleFS);
+      gSimheiFontPreloaded = true;
+      Serial.println("[BOOT] simhei15 preloaded before animation end");
+    } else {
+      Serial.println("[BOOT] simhei15.vlw missing during boot preload");
+    }
+  }
+  gBootAnimRunning = true;
+}
+
+void runBootAnimationTaskWait() {
+  if (!gBootAnimRunning) return;
+
+  bool animDone = false;
+  const uint32_t t0 = millis();
+  while (millis() - t0 < kBootAnimMaxWaitMs) {
+    if (usbHostActive) {
+      gBootAnimUsbDetected = true;
+    }
+    if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(kBootAnimPollMs)) > 0) {
+      animDone = true;
+      break;
+    }
+  }
+
+  if (!animDone) {
+    Serial.println("[BOOT] animation wait timeout");
+  }
+  if (gBootAnimUsbDetected) {
+    Serial.println("[BOOT] USB detected during boot animation");
+  }
+
+  gBootAnimRunning = false;
+  gBootAnimWaiter = nullptr;
+}
+
+void runBootAnimationTaskAndWait() {
+  runBootAnimationTaskStart();
+  runBootAnimationTaskWait();
 }
 
 void notifyBacklightActivity() {
@@ -464,9 +589,8 @@ bool initProjectResources() {
   if (appInitialized) return true;
 
   ensureDisplayReady();
-  tft.fillScreen(TFT_BLACK);
+  //tft.fillScreen(TFT_BLACK);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  delay(500);
 
   pinMode(42, OUTPUT);
   digitalWrite(42, HIGH);
@@ -487,13 +611,13 @@ bool initProjectResources() {
     Serial.println("[APP] note: LittleFS was rebuilt, run uploadfs to restore font/audio files");
   }
 
-  bool missing = false;
-  if (!LittleFS.exists("/simhei15.vlw")) missing = true;
-  if (!LittleFS.exists("/Oxta14.vlw")) missing = true;
-  if (missing) {
+  if (!LittleFS.exists("/simhei15.vlw")) {
     Serial.println("[APP] LittleFS font files missing");
     Serial.println("[APP] run: pio run -t uploadfs -e 4d_systems_esp32s3_gen4_r8n16");
     return false;
+  }
+  if (!LittleFS.exists("/Oxta14.vlw")) {
+    Serial.println("[APP] Oxta14.vlw missing, boot logo text falls back to default font");
   }
 
   WavMixerI2S::I2SPinConfig pins = {.bck = 40, .ws = 39, .dout = 41};
@@ -507,7 +631,11 @@ bool initProjectResources() {
     Serial.println("[APP] mount FAT failed");
     return false;
   }
-  applyAudioGainsFromSettingIni();
+  if (!gSettingsPreloadedAtBoot) {
+    applyAudioGainsFromSettingIni();
+  } else {
+    Serial.printf("[APP] setting.ini already preloaded, backlight=%.3f\n", gBacklightLevel);
+  }
 
   if (!csv.load(FFat, "/data.csv")) {
     Serial.println("[APP] /data.csv load failed from FAT");
@@ -515,22 +643,18 @@ bool initProjectResources() {
   }
 
   Text.createSprite(320, 120);
-  Text.loadFont("Oxta14", LittleFS);
+  Text.fillSprite(TFT_BLACK);
   Text.setTextDatum(MC_DATUM);
-  Text.setTextColor(0xff36, 0x0000);
-  Text.drawString("PROJECT MOON", 180, 60);
-  Text.setTextWrap(true, true);
-  spriteBG.createSprite(320, 120);
-  spriteBG.fillRect(0,0,320,120,0x0000);
-  spriteBG.pushImage(160 -60, 0, 120,120,(uint16_t*)Index_B);
-  xTaskCreate(task_LogoFadeInAndMove, "LogoFadeMove", 20480, NULL, 1, NULL);
-
-  message = csv.getTextById(1);
-  Text.unloadFont();
-  Text.loadFont("simhei15", LittleFS);
   Text.setTextColor(0x07ff, TFT_BLACK);
-
-  delay(8000);
+  Text.setTextWrap(true, true);
+  message = csv.getTextById(1);
+  if (!gSimheiFontPreloaded) {
+    Text.loadFont("simhei15", LittleFS);
+    gSimheiFontPreloaded = true;
+    Serial.println("[APP] simhei15 loaded in app init");
+  } else {
+    Serial.println("[APP] simhei15 already preloaded");
+  }
 
   ensureBacklightTaskStarted();
   setBacklightLevel(gBacklightLevel);

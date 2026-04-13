@@ -485,10 +485,11 @@ void showGlitchEffectUTF8(const char *text) {
 }
 
 void task_LogoFadeInAndMove(void *pvParameters) {
-  (void)pvParameters;
+  TaskHandle_t notifyTask = static_cast<TaskHandle_t>(pvParameters);
   tft.pushImage(160 - 45, 150 - 45, 90, 90, (uint16_t *)Logo_Moon_B);
   for (uint8_t N = 0; N < 48; N++) {
-    ledcWrite(0, scaledBacklightDuty(static_cast<uint8_t>(N * 5)));
+    const uint16_t raw = static_cast<uint16_t>(N + 1) * 255U / 48U;
+    ledcWrite(0, scaledBacklightDuty(static_cast<uint8_t>(raw)));
     delay(30);
   }
   delay(500);
@@ -509,13 +510,20 @@ void task_LogoFadeInAndMove(void *pvParameters) {
   }
   delay(2000);
   for (uint8_t N = 0; N < 48; N++) {
-    ledcWrite(0, scaledBacklightDuty(static_cast<uint8_t>((48 - (N + 1)) * 5)));
+    const uint16_t raw = static_cast<uint16_t>(47 - N) * 255U / 48U;
+    ledcWrite(0, scaledBacklightDuty(static_cast<uint8_t>(raw)));
     delay(30);
   }
-  tft.fillRect(0, 50, 320, 140, 0x0000);
+  ledcWrite(0, 0);
+  
+  tft.fillRect(0, 50, 320, 160, 0x0000);
+  tft.pushImage(160 - 60, 150 - 60, 120, 120, (uint16_t *)Index_B);
   delay(50);
   ledcWrite(0, scaledBacklightDuty(255));
-  tft.pushImage(160 - 60, 150 - 60, 120, 120, (uint16_t *)Index_B);
+  
+  if (notifyTask) {
+    xTaskNotifyGive(notifyTask);
+  }
   vTaskDelete(NULL);
 }
 

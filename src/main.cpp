@@ -7,11 +7,12 @@
 
 void setup() {
   Serial.begin(115200);
-  delay(300);
+  //delay(300);
   Serial.println("\n[BOOT] project + USB MSC + FAT CSV");
   ledcSetup(0, 40000, 8);
   ledcAttachPin(14, 0);
   ledcWrite(0, 0);
+  runBootAnimationTaskStart();
   msc.vendorID("ESP32");
   msc.productID("S3_FAT_MSC");
   msc.productRevision("1.0");
@@ -34,8 +35,10 @@ void setup() {
   USB.begin();
   Serial.println("[BOOT] USB initialized");
 
+  runBootAnimationTaskWait();
+
   const uint32_t t0 = millis();
-  while (millis() - t0 < 1500) {
+  while (millis() - t0 < 300) {
     if (usbHostActive) break;
     delay(10);
   }
