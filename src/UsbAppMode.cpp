@@ -649,6 +649,15 @@ void processAppLoop() {
   static bool imageInterruptActive = false;
   static bool imageInterruptKeyLatch = false;
   static bool imagePreemptedWebInterrupt = false;
+  static uint16_t imageInterruptWidth = 0;
+  static uint16_t imageInterruptHeight = 0;
+  static int16_t imageInterruptCenterX = 160;
+  static int16_t imageInterruptCenterY = 155;
+  static bool immediateInterruptActive = false;
+  static bool immediateInterruptKeyLatch = false;
+  static bool immediatePreemptedWebInterrupt = false;
+  static bool immediatePreemptedImageInterrupt = false;
+  static bool immediatePreemptedImageHadWebInterrupt = false;
   bool syntheticKeyPress = false;
   const bool instantRefreshNoKey = wirelessPortalInstantRefreshNoKeyEnabled();
 
@@ -693,10 +702,89 @@ void processAppLoop() {
       tft.fillScreen(0x0000);
       Serial.println("[WEB] image interrupt preempted by host");
     }
+    if (immediateInterruptActive) {
+      immediateInterruptKeyLatch = false;
+      Serial.println("[ESPNOW] preempt immediate interrupt");
+    }
     if (webInterruptActive) {
       Serial.println("[ESPNOW] preempt web interrupt");
     }
     playMessageWithGlitch(hostBroadcastMessage.c_str());
+    return;
+  }
+
+  String immediateMessage;
+  if (wirelessPortalPopImmediateMessage(immediateMessage)) {
+    if (!immediateInterruptActive) {
+      const bool hadImageInterrupt = imageInterruptActive;
+      const bool hadImagePreemptedWebInterrupt = imagePreemptedWebInterrupt;
+      const bool hadWebInterrupt = webInterruptActive;
+
+      if (hadImageInterrupt) {
+        imageInterruptActive = false;
+        imageInterruptKeyLatch = false;
+        imagePreemptedWebInterrupt = false;
+        tft.fillScreen(0x0000);
+        Serial.println("[WEB] image interrupt preempted by immediate");
+      }
+      if (hadWebInterrupt) {
+        webInterruptActive = false;
+        webInterruptKeyLatch = false;
+        Serial.println("[WEB] web interrupt preempted by immediate");
+      }
+
+      immediateInterruptActive = true;
+      immediateInterruptKeyLatch = false;
+      immediatePreemptedWebInterrupt = (!hadImageInterrupt) && hadWebInterrupt;
+      immediatePreemptedImageInterrupt = hadImageInterrupt;
+      immediatePreemptedImageHadWebInterrupt =
+          hadImageInterrupt && hadImagePreemptedWebInterrupt;
+      Serial.println("[WEB] immediate interrupt started");
+    } else {
+      immediateInterruptKeyLatch = false;
+      Serial.println("[WEB] immediate interrupt updated");
+    }
+    playMessageWithGlitch(immediateMessage.c_str());
+    return;
+  }
+
+  if (immediateInterruptActive) {
+    Key_loop();
+    const uint8_t key = get_Keycode();
+    if (key == 2 && !immediateInterruptKeyLatch) {
+      immediateInterruptKeyLatch = true;
+      if (wakeBacklightByKeyIfNeeded()) {
+        return;
+      }
+      immediateInterruptActive = false;
+      immediateInterruptKeyLatch = false;
+      if (immediatePreemptedImageInterrupt) {
+        imageInterruptActive = true;
+        imageInterruptKeyLatch = false;
+        imagePreemptedWebInterrupt = immediatePreemptedImageHadWebInterrupt;
+        if (imageInterruptWidth > 0 && imageInterruptHeight > 0) {
+          showWebInterruptImage(gWebImageScratch,
+                                imageInterruptWidth,
+                                imageInterruptHeight,
+                                imageInterruptCenterX,
+                                imageInterruptCenterY);
+        }
+        Serial.println("[WEB] immediate interrupt resume image");
+      } else if (immediatePreemptedWebInterrupt) {
+        webInterruptActive = true;
+        webInterruptKeyLatch = false;
+        Serial.println("[WEB] immediate interrupt resume web");
+      } else {
+        Serial.println("[WEB] immediate interrupt finished");
+      }
+      immediatePreemptedWebInterrupt = false;
+      immediatePreemptedImageInterrupt = false;
+      immediatePreemptedImageHadWebInterrupt = false;
+      return;
+    }
+    if (key != 2) {
+      immediateInterruptKeyLatch = false;
+    }
     return;
   }
 
@@ -723,6 +811,10 @@ void processAppLoop() {
       imageInterruptActive = true;
       imageInterruptKeyLatch = false;
       imagePreemptedWebInterrupt = hadWebInterrupt;
+      imageInterruptWidth = imageW;
+      imageInterruptHeight = imageH;
+      imageInterruptCenterX = centerX;
+      imageInterruptCenterY = centerY;
       Serial.printf("[WEB] image interrupt started %ux%u\n",
                     static_cast<unsigned int>(imageW),
                     static_cast<unsigned int>(imageH));
@@ -760,31 +852,23 @@ void processAppLoop() {
   if (!webInterruptActive && wirelessPortalHasPendingMessage()) {
     String queuedMessage;
     if (wirelessPortalPopMessage(queuedMessage)) {
-      if (instantRefreshNoKey) {
-        Serial.println("[WEB] interrupt immediate");
-      } else {
-        webInterruptActive = true;
-        webInterruptKeyLatch = false;
-        Serial.println("[WEB] interrupt started");
-      }
+      webInterruptActive = true;
+      webInterruptKeyLatch = false;
+      Serial.println("[WEB] interrupt started");
       playMessageWithGlitch(queuedMessage.c_str());
       return;
     }
   }
 
   if (webInterruptActive) {
-    if (instantRefreshNoKey) {
-      webInterruptActive = false;
-      webInterruptKeyLatch = false;
+    uint8_t key = 255;
+    if (syntheticKeyPress) {
+      key = 2;
+      syntheticKeyPress = false;
     } else {
-      uint8_t key = 255;
-      if (syntheticKeyPress) {
-        key = 2;
-        syntheticKeyPress = false;
-      } else {
-        Key_loop();
-        key = get_Keycode();
-      }
+      Key_loop();
+      key = get_Keycode();
+    }
     if (key == 2 && !webInterruptKeyLatch) {
       webInterruptKeyLatch = true;
       if (wakeBacklightByKeyIfNeeded()) {
@@ -807,7 +891,6 @@ void processAppLoop() {
     }
     if (key != 2) {
       webInterruptKeyLatch = false;
-    }
     }
     return;
   }

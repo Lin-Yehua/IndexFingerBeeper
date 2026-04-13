@@ -151,6 +151,12 @@ bool gPortalStarted = false;
 PendingImageFrame gPendingImage;
 ImageUploadState gImageUpload;
 portMUX_TYPE gFlagMux = portMUX_INITIALIZER_UNLOCKED;
+struct ImmediateMessageState {
+  char text[kTextMaxLen + 1] = {0};
+  bool pending = false;
+};
+ImmediateMessageState gImmediateMessage;
+portMUX_TYPE gImmediateMessageMux = portMUX_INITIALIZER_UNLOCKED;
 
 void copyStringToBuf(const String &src, char *dst, size_t dstSize) {
   if (!dst || dstSize == 0) return;
@@ -1030,8 +1036,8 @@ bool saveDataCsvText(const String &content) {
   return true;
 }
 
-bool enqueueMessage(const String &textRaw, String &errorOut) {
-  if (!gMessageQueue) {
+bool enqueueMessageToQueue(QueueHandle_t queue, const String &textRaw, String &errorOut) {
+  if (!queue) {
     errorOut = "queue not ready";
     return false;
   }
@@ -1047,11 +1053,43 @@ bool enqueueMessage(const String &textRaw, String &errorOut) {
   WebQueuedMessage msg = {};
   text.toCharArray(msg.text, sizeof(msg.text));
 
-  if (xQueueSend(gMessageQueue, &msg, 0) != pdTRUE) {
+  if (xQueueSend(queue, &msg, 0) != pdTRUE) {
     errorOut = "queue is full";
     return false;
   }
   return true;
+}
+
+bool enqueueRegularMessage(const String &textRaw, String &errorOut) {
+  return enqueueMessageToQueue(gMessageQueue, textRaw, errorOut);
+}
+
+bool enqueueImmediateMessage(const String &textRaw, String &errorOut) {
+  String text = textRaw;
+  text.trim();
+  if (!text.length()) {
+    errorOut = "text is empty";
+    return false;
+  }
+  if (text.length() > kTextMaxLen) text.remove(kTextMaxLen);
+
+  char local[kTextMaxLen + 1] = {0};
+  text.toCharArray(local, sizeof(local));
+
+  portENTER_CRITICAL(&gImmediateMessageMux);
+  memcpy(gImmediateMessage.text, local, sizeof(gImmediateMessage.text));
+  gImmediateMessage.text[sizeof(gImmediateMessage.text) - 1] = '\0';
+  gImmediateMessage.pending = true;
+  portEXIT_CRITICAL(&gImmediateMessageMux);
+  return true;
+}
+
+UBaseType_t immediatePendingCount() {
+  bool pending = false;
+  portENTER_CRITICAL(&gImmediateMessageMux);
+  pending = gImmediateMessage.pending;
+  portEXIT_CRITICAL(&gImmediateMessageMux);
+  return pending ? 1U : 0U;
 }
 
 bool persistAudioGainsToSettingIni() {
@@ -1217,7 +1255,9 @@ bool persistEffectSettingsToSettingIni(int wrongProb3,
 String statusJson() {
   const String staMac = WiFi.macAddress();
   const String apMac = WiFi.softAPmacAddress();
-  const UBaseType_t queued = gMessageQueue ? uxQueueMessagesWaiting(gMessageQueue) : 0;
+  const UBaseType_t regularQueued = gMessageQueue ? uxQueueMessagesWaiting(gMessageQueue) : 0;
+  const UBaseType_t immediateQueued = immediatePendingCount();
+  const UBaseType_t queued = regularQueued + immediateQueued;
   const UBaseType_t hostQueued = gHostMessageQueue ? uxQueueMessagesWaiting(gHostMessageQueue) : 0;
   bool pendingReload = false;
   bool imagePending = false;
@@ -1239,6 +1279,10 @@ String statusJson() {
 
   String out = "{\"queue\":";
   out += String(static_cast<unsigned int>(queued));
+  out += ",\"regularQueue\":";
+  out += String(static_cast<unsigned int>(regularQueued));
+  out += ",\"immediateQueue\":";
+  out += String(static_cast<unsigned int>(immediateQueued));
   out += ",\"csvReloadPending\":";
   out += pendingReload ? "true" : "false";
   out += ",\"hostQueue\":";
@@ -1767,14 +1811,24 @@ void registerRoutes() {
     if (!text.length() && gWebServer->hasArg("plain")) {
       text = gWebServer->arg("plain");
     }
-    if (!enqueueMessage(text, error)) {
+    const bool immediateMode = gInstantRefreshNoKey;
+    const bool ok = immediateMode
+                        ? enqueueImmediateMessage(text, error)
+                        : enqueueRegularMessage(text, error);
+    if (!ok) {
       const int code = (error == "queue is full") ? 503 : 400;
       gWebServer->send(code, "text/plain", error);
       return;
     }
-    const UBaseType_t queued = uxQueueMessagesWaiting(gMessageQueue);
-    String reply = "queued, waiting=";
-    reply += String(static_cast<unsigned int>(queued));
+    const UBaseType_t regularQueued = gMessageQueue ? uxQueueMessagesWaiting(gMessageQueue) : 0;
+    const UBaseType_t immediateQueued = immediatePendingCount();
+    String reply = immediateMode ? "queued(immediate), waiting=" : "queued(regular), waiting=";
+    reply += String(static_cast<unsigned int>(regularQueued + immediateQueued));
+    reply += " (regular=";
+    reply += String(static_cast<unsigned int>(regularQueued));
+    reply += ", immediate=";
+    reply += String(static_cast<unsigned int>(immediateQueued));
+    reply += ")";
     gWebServer->send(200, "text/plain", reply);
   });
 
@@ -1900,7 +1954,7 @@ bool wirelessPortalStart() {
     if (!gMessageQueue) {
       gMessageQueue = xQueueCreate(kQueueDepth, sizeof(WebQueuedMessage));
       if (!gMessageQueue) {
-        Serial.println("[WEB] queue create failed");
+        Serial.println("[WEB] regular queue create failed");
         return false;
       }
     }
@@ -2013,6 +2067,10 @@ void wirelessPortalStop() {
     WebQueuedMessage drop = {};
     while (xQueueReceive(gMessageQueue, &drop, 0) == pdTRUE) {}
   }
+  portENTER_CRITICAL(&gImmediateMessageMux);
+  gImmediateMessage.text[0] = '\0';
+  gImmediateMessage.pending = false;
+  portEXIT_CRITICAL(&gImmediateMessageMux);
   if (gHostMessageQueue) {
     WebQueuedMessage drop = {};
     while (xQueueReceive(gHostMessageQueue, &drop, 0) == pdTRUE) {}
@@ -2056,6 +2114,28 @@ bool wirelessPortalPopMessage(String &outMessage) {
 bool wirelessPortalHasPendingMessage() {
   if (!gMessageQueue) return false;
   return uxQueueMessagesWaiting(gMessageQueue) > 0;
+}
+
+bool wirelessPortalPopImmediateMessage(String &outMessage) {
+  outMessage = "";
+  char local[kTextMaxLen + 1] = {0};
+  bool has = false;
+  portENTER_CRITICAL(&gImmediateMessageMux);
+  if (gImmediateMessage.pending) {
+    memcpy(local, gImmediateMessage.text, sizeof(local));
+    local[sizeof(local) - 1] = '\0';
+    gImmediateMessage.pending = false;
+    has = true;
+  }
+  portEXIT_CRITICAL(&gImmediateMessageMux);
+  if (!has) return false;
+
+  outMessage = local;
+  return outMessage.length() > 0;
+}
+
+bool wirelessPortalHasPendingImmediateMessage() {
+  return immediatePendingCount() > 0;
 }
 
 bool wirelessPortalPopHostMessage(String &outMessage) {
