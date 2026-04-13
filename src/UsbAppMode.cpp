@@ -720,32 +720,25 @@ void processAppLoop() {
         webInterruptKeyLatch = false;
       }
       showWebInterruptImage(gWebImageScratch, imageW, imageH, centerX, centerY);
-      if (instantRefreshNoKey) {
-        imageInterruptActive = false;
-        imageInterruptKeyLatch = false;
-        imagePreemptedWebInterrupt = false;
-        tft.fillScreen(0x0000);
-        if (hadWebInterrupt) {
-          webInterruptActive = true;
-          webInterruptKeyLatch = false;
-        }
-        Serial.printf("[WEB] image shown %ux%u immediate resume\n",
-                      static_cast<unsigned int>(imageW),
-                      static_cast<unsigned int>(imageH));
-      } else {
-        imageInterruptActive = true;
-        imageInterruptKeyLatch = false;
-        imagePreemptedWebInterrupt = hadWebInterrupt;
-        Serial.printf("[WEB] image interrupt started %ux%u\n",
-                      static_cast<unsigned int>(imageW),
-                      static_cast<unsigned int>(imageH));
-        return;
-      }
+      imageInterruptActive = true;
+      imageInterruptKeyLatch = false;
+      imagePreemptedWebInterrupt = hadWebInterrupt;
+      Serial.printf("[WEB] image interrupt started %ux%u\n",
+                    static_cast<unsigned int>(imageW),
+                    static_cast<unsigned int>(imageH));
+      return;
     }
   }
 
   if (imageInterruptActive) {
-    if (instantRefreshNoKey) {
+    Key_loop();
+    const uint8_t key = get_Keycode();
+    if (key == 2 && !imageInterruptKeyLatch) {
+      imageInterruptKeyLatch = true;
+      if (wakeBacklightByKeyIfNeeded()) {
+        // Backlight wake is always effective and does not end image interrupt.
+        return;
+      }
       imageInterruptActive = false;
       imageInterruptKeyLatch = false;
       if (imagePreemptedWebInterrupt) {
@@ -754,32 +747,13 @@ void processAppLoop() {
       }
       imagePreemptedWebInterrupt = false;
       tft.fillScreen(0x0000);
-    }
-    else {
-      Key_loop();
-      const uint8_t key = get_Keycode();
-      if (key == 2 && !imageInterruptKeyLatch) {
-        imageInterruptKeyLatch = true;
-        if (wakeBacklightByKeyIfNeeded()) {
-          // Backlight wake is always effective and does not end image interrupt.
-          return;
-        }
-        imageInterruptActive = false;
+      syntheticKeyPress = true;
+      Serial.println("[WEB] image interrupt finished");
+    } else {
+      if (key != 2) {
         imageInterruptKeyLatch = false;
-        if (imagePreemptedWebInterrupt) {
-          webInterruptActive = true;
-          webInterruptKeyLatch = false;
-        }
-        imagePreemptedWebInterrupt = false;
-        tft.fillScreen(0x0000);
-        syntheticKeyPress = true;
-        Serial.println("[WEB] image interrupt finished");
-      } else {
-        if (key != 2) {
-          imageInterruptKeyLatch = false;
-        }
-        return;
       }
+      return;
     }
   }
 
