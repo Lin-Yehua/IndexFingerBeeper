@@ -644,22 +644,144 @@ static void showWebInterruptImage(const uint16_t *pixels,
 }
 
 void processAppLoop() {
-  static bool webInterruptActive = false;
-  static bool webInterruptKeyLatch = false;
-  static bool imageInterruptActive = false;
-  static bool imageInterruptKeyLatch = false;
-  static bool imagePreemptedWebInterrupt = false;
-  static uint16_t imageInterruptWidth = 0;
-  static uint16_t imageInterruptHeight = 0;
-  static int16_t imageInterruptCenterX = 160;
-  static int16_t imageInterruptCenterY = 155;
-  static bool immediateInterruptActive = false;
-  static bool immediateInterruptKeyLatch = false;
-  static bool immediatePreemptedWebInterrupt = false;
-  static bool immediatePreemptedImageInterrupt = false;
-  static bool immediatePreemptedImageHadWebInterrupt = false;
+  struct InterruptController {
+    bool webActive = false;
+    bool webKeyLatch = false;
+    bool imageActive = false;
+    bool imageKeyLatch = false;
+    bool imagePreemptedWeb = false;
+    uint16_t imageWidth = 0;
+    uint16_t imageHeight = 0;
+    int16_t imageCenterX = 160;
+    int16_t imageCenterY = 155;
+    bool immediateActive = false;
+    bool immediateKeyLatch = false;
+    bool immediatePreemptedWeb = false;
+  };
+
+  enum class ImageResumeTarget : uint8_t {
+    kNone = 0,
+    kWeb = 1,
+  };
+
+  static InterruptController irq;
   bool syntheticKeyPress = false;
   const bool instantRefreshNoKey = wirelessPortalInstantRefreshNoKeyEnabled();
+
+  auto preemptByHost = [&]() {
+    if (irq.imageActive) {
+      irq.imageActive = false;
+      irq.imageKeyLatch = false;
+      if (irq.imagePreemptedWeb) {
+        irq.webActive = true;
+        irq.webKeyLatch = false;
+      }
+      irq.imagePreemptedWeb = false;
+      tft.fillScreen(0x0000);
+      Serial.println("[WEB] image interrupt preempted by host");
+    }
+    if (irq.immediateActive) {
+      irq.immediateKeyLatch = false;
+      Serial.println("[ESPNOW] preempt immediate interrupt");
+    }
+    if (irq.webActive) {
+      Serial.println("[ESPNOW] preempt web interrupt");
+    }
+  };
+
+  auto startImmediateInterrupt = [&]() {
+    if (!irq.immediateActive) {
+      const bool hadImageInterrupt = irq.imageActive;
+      const bool hadImagePreemptedWebInterrupt = irq.imagePreemptedWeb;
+      const bool hadWebInterrupt = irq.webActive;
+
+      if (hadImageInterrupt) {
+        irq.imageActive = false;
+        irq.imageKeyLatch = false;
+        irq.imagePreemptedWeb = false;
+        tft.fillScreen(0x0000);
+        Serial.println("[WEB] image interrupt preempted by immediate");
+      }
+      if (hadWebInterrupt) {
+        irq.webActive = false;
+        irq.webKeyLatch = false;
+        Serial.println("[WEB] web interrupt preempted by immediate");
+      }
+
+      irq.immediateActive = true;
+      irq.immediateKeyLatch = false;
+      // Image and immediate are same-layer interrupts: do not preserve each other.
+      // But keep lower-layer web resume chain when either one had preempted web.
+      irq.immediatePreemptedWeb = hadWebInterrupt || hadImagePreemptedWebInterrupt;
+      Serial.println("[WEB] immediate interrupt started");
+    } else {
+      irq.immediateKeyLatch = false;
+      Serial.println("[WEB] immediate interrupt updated");
+    }
+  };
+
+  auto startImageInterrupt = [&](uint16_t imageW, uint16_t imageH, int16_t centerX, int16_t centerY) {
+    notifyBacklightActivity();
+    const bool hadImmediateInterrupt = irq.immediateActive;
+    const bool hadImmediatePreemptedWeb = irq.immediatePreemptedWeb;
+    const bool hadWebInterrupt = irq.webActive;
+    const bool keepPreemptedWeb = irq.imageActive && irq.imagePreemptedWeb;
+
+    if (hadImmediateInterrupt) {
+      irq.immediateActive = false;
+      irq.immediateKeyLatch = false;
+      Serial.println("[WEB] immediate interrupt preempted by image");
+    }
+    if (hadWebInterrupt) {
+      irq.webActive = false;
+      irq.webKeyLatch = false;
+    }
+
+    showWebInterruptImage(gWebImageScratch, imageW, imageH, centerX, centerY);
+    irq.imageActive = true;
+    irq.imageKeyLatch = false;
+    // Image and immediate are same-layer interrupts: do not preserve each other.
+    irq.imagePreemptedWeb = hadWebInterrupt || hadImmediatePreemptedWeb || keepPreemptedWeb;
+    irq.imageWidth = imageW;
+    irq.imageHeight = imageH;
+    irq.imageCenterX = centerX;
+    irq.imageCenterY = centerY;
+    Serial.printf("[WEB] image interrupt started %ux%u\n",
+                  static_cast<unsigned int>(imageW),
+                  static_cast<unsigned int>(imageH));
+  };
+
+  auto finishImmediateInterrupt = [&]() {
+    irq.immediateActive = false;
+    irq.immediateKeyLatch = false;
+    if (irq.immediatePreemptedWeb) {
+      irq.webActive = true;
+      irq.webKeyLatch = false;
+      Serial.println("[WEB] immediate interrupt resume web");
+    } else {
+      Serial.println("[WEB] immediate interrupt finished");
+    }
+    // Pass-through the same physical keypress so immediate close does not require a second press.
+    syntheticKeyPress = true;
+    irq.immediatePreemptedWeb = false;
+  };
+
+  auto finishImageInterrupt = [&]() -> ImageResumeTarget {
+    irq.imageActive = false;
+    irq.imageKeyLatch = false;
+    ImageResumeTarget resumeTarget = ImageResumeTarget::kNone;
+    if (irq.imagePreemptedWeb) {
+      irq.webActive = true;
+      irq.webKeyLatch = false;
+      resumeTarget = ImageResumeTarget::kWeb;
+    }
+    irq.imagePreemptedWeb = false;
+    // Pass-through the same physical keypress so image close does not require a second press.
+    syntheticKeyPress = true;
+    tft.fillScreen(0x0000);
+    Serial.println("[WEB] image interrupt finished");
+    return resumeTarget;
+  };
 
   {
     const size_t wantedPixels = static_cast<size_t>(kWebImageMaxWidth) * static_cast<size_t>(kWebImageMaxHeight);
@@ -691,103 +813,20 @@ void processAppLoop() {
 
   String hostBroadcastMessage;
   if (wirelessPortalPopHostMessage(hostBroadcastMessage)) {
-    if (imageInterruptActive) {
-      imageInterruptActive = false;
-      imageInterruptKeyLatch = false;
-      if (imagePreemptedWebInterrupt) {
-        webInterruptActive = true;
-        webInterruptKeyLatch = false;
-      }
-      imagePreemptedWebInterrupt = false;
-      tft.fillScreen(0x0000);
-      Serial.println("[WEB] image interrupt preempted by host");
-    }
-    if (immediateInterruptActive) {
-      immediateInterruptKeyLatch = false;
-      Serial.println("[ESPNOW] preempt immediate interrupt");
-    }
-    if (webInterruptActive) {
-      Serial.println("[ESPNOW] preempt web interrupt");
-    }
+    preemptByHost();
     playMessageWithGlitch(hostBroadcastMessage.c_str());
     return;
   }
 
   String immediateMessage;
   if (wirelessPortalPopImmediateMessage(immediateMessage)) {
-    if (!immediateInterruptActive) {
-      const bool hadImageInterrupt = imageInterruptActive;
-      const bool hadImagePreemptedWebInterrupt = imagePreemptedWebInterrupt;
-      const bool hadWebInterrupt = webInterruptActive;
-
-      if (hadImageInterrupt) {
-        imageInterruptActive = false;
-        imageInterruptKeyLatch = false;
-        imagePreemptedWebInterrupt = false;
-        tft.fillScreen(0x0000);
-        Serial.println("[WEB] image interrupt preempted by immediate");
-      }
-      if (hadWebInterrupt) {
-        webInterruptActive = false;
-        webInterruptKeyLatch = false;
-        Serial.println("[WEB] web interrupt preempted by immediate");
-      }
-
-      immediateInterruptActive = true;
-      immediateInterruptKeyLatch = false;
-      immediatePreemptedWebInterrupt = (!hadImageInterrupt) && hadWebInterrupt;
-      immediatePreemptedImageInterrupt = hadImageInterrupt;
-      immediatePreemptedImageHadWebInterrupt =
-          hadImageInterrupt && hadImagePreemptedWebInterrupt;
-      Serial.println("[WEB] immediate interrupt started");
-    } else {
-      immediateInterruptKeyLatch = false;
-      Serial.println("[WEB] immediate interrupt updated");
-    }
+    startImmediateInterrupt();
     playMessageWithGlitch(immediateMessage.c_str());
     return;
   }
 
-  if (immediateInterruptActive) {
-    Key_loop();
-    const uint8_t key = get_Keycode();
-    if (key == 2 && !immediateInterruptKeyLatch) {
-      immediateInterruptKeyLatch = true;
-      if (wakeBacklightByKeyIfNeeded()) {
-        return;
-      }
-      immediateInterruptActive = false;
-      immediateInterruptKeyLatch = false;
-      if (immediatePreemptedImageInterrupt) {
-        imageInterruptActive = true;
-        imageInterruptKeyLatch = false;
-        imagePreemptedWebInterrupt = immediatePreemptedImageHadWebInterrupt;
-        if (imageInterruptWidth > 0 && imageInterruptHeight > 0) {
-          showWebInterruptImage(gWebImageScratch,
-                                imageInterruptWidth,
-                                imageInterruptHeight,
-                                imageInterruptCenterX,
-                                imageInterruptCenterY);
-        }
-        Serial.println("[WEB] immediate interrupt resume image");
-      } else if (immediatePreemptedWebInterrupt) {
-        webInterruptActive = true;
-        webInterruptKeyLatch = false;
-        Serial.println("[WEB] immediate interrupt resume web");
-      } else {
-        Serial.println("[WEB] immediate interrupt finished");
-      }
-      immediatePreemptedWebInterrupt = false;
-      immediatePreemptedImageInterrupt = false;
-      immediatePreemptedImageHadWebInterrupt = false;
-      return;
-    }
-    if (key != 2) {
-      immediateInterruptKeyLatch = false;
-    }
-    return;
-  }
-
+  // Image interrupt and immediate interrupt are peer-level:
+  // image polling must happen before "immediate active" wait branch.
   if (gWebImageScratch) {
     uint16_t imageW = 0;
     uint16_t imageH = 0;
@@ -801,66 +840,60 @@ void processAppLoop() {
                                        centerX,
                                        centerY,
                                        pixelCount)) {
-      notifyBacklightActivity();
-      const bool hadWebInterrupt = webInterruptActive;
-      if (hadWebInterrupt) {
-        webInterruptActive = false;
-        webInterruptKeyLatch = false;
-      }
-      showWebInterruptImage(gWebImageScratch, imageW, imageH, centerX, centerY);
-      imageInterruptActive = true;
-      imageInterruptKeyLatch = false;
-      imagePreemptedWebInterrupt = hadWebInterrupt;
-      imageInterruptWidth = imageW;
-      imageInterruptHeight = imageH;
-      imageInterruptCenterX = centerX;
-      imageInterruptCenterY = centerY;
-      Serial.printf("[WEB] image interrupt started %ux%u\n",
-                    static_cast<unsigned int>(imageW),
-                    static_cast<unsigned int>(imageH));
+      (void)pixelCount;
+      startImageInterrupt(imageW, imageH, centerX, centerY);
       return;
     }
   }
 
-  if (imageInterruptActive) {
+  if (irq.immediateActive) {
     Key_loop();
     const uint8_t key = get_Keycode();
-    if (key == 2 && !imageInterruptKeyLatch) {
-      imageInterruptKeyLatch = true;
+    if (key == 2 && !irq.immediateKeyLatch) {
+      irq.immediateKeyLatch = true;
+      if (wakeBacklightByKeyIfNeeded()) {
+        return;
+      }
+      finishImmediateInterrupt();
+    }
+    if (key != 2) {
+      irq.immediateKeyLatch = false;
+    }
+    if (irq.immediateActive) {
+      return;
+    }
+  }
+
+  if (irq.imageActive) {
+    Key_loop();
+    const uint8_t key = get_Keycode();
+    if (key == 2 && !irq.imageKeyLatch) {
+      irq.imageKeyLatch = true;
       if (wakeBacklightByKeyIfNeeded()) {
         // Backlight wake is always effective and does not end image interrupt.
         return;
       }
-      imageInterruptActive = false;
-      imageInterruptKeyLatch = false;
-      if (imagePreemptedWebInterrupt) {
-        webInterruptActive = true;
-        webInterruptKeyLatch = false;
-      }
-      imagePreemptedWebInterrupt = false;
-      tft.fillScreen(0x0000);
-      syntheticKeyPress = true;
-      Serial.println("[WEB] image interrupt finished");
+      (void)finishImageInterrupt();
     } else {
       if (key != 2) {
-        imageInterruptKeyLatch = false;
+        irq.imageKeyLatch = false;
       }
       return;
     }
   }
 
-  if (!webInterruptActive && wirelessPortalHasPendingMessage()) {
+  if (!irq.webActive && wirelessPortalHasPendingMessage()) {
     String queuedMessage;
     if (wirelessPortalPopMessage(queuedMessage)) {
-      webInterruptActive = true;
-      webInterruptKeyLatch = false;
+      irq.webActive = true;
+      irq.webKeyLatch = false;
       Serial.println("[WEB] interrupt started");
       playMessageWithGlitch(queuedMessage.c_str());
       return;
     }
   }
 
-  if (webInterruptActive) {
+  if (irq.webActive) {
     uint8_t key = 255;
     if (syntheticKeyPress) {
       key = 2;
@@ -869,8 +902,8 @@ void processAppLoop() {
       Key_loop();
       key = get_Keycode();
     }
-    if (key == 2 && !webInterruptKeyLatch) {
-      webInterruptKeyLatch = true;
+    if (key == 2 && !irq.webKeyLatch) {
+      irq.webKeyLatch = true;
       if (wakeBacklightByKeyIfNeeded()) {
         return;
       }
@@ -878,21 +911,26 @@ void processAppLoop() {
       if (wirelessPortalPopMessage(queuedMessage)) {
         playMessageWithGlitch(queuedMessage.c_str());
         if (!wirelessPortalHasPendingMessage()) {
-          webInterruptActive = false;
-          webInterruptKeyLatch = false;
+          irq.webActive = false;
+          irq.webKeyLatch = false;
           Serial.println("[WEB] interrupt finished");
         }
       } else {
-        webInterruptActive = false;
-        webInterruptKeyLatch = false;
+        irq.webActive = false;
+        irq.webKeyLatch = false;
         Serial.println("[WEB] interrupt finished");
       }
-      return;
+      if (irq.webActive) {
+        return;
+      }
+      // Pass-through the same physical keypress so final web interrupt close
+      // does not require another key press to resume normal flow.
+      syntheticKeyPress = true;
     }
     if (key != 2) {
-      webInterruptKeyLatch = false;
+      irq.webKeyLatch = false;
+      return;
     }
-    return;
   }
 
   int csvTotal = csv.size();
@@ -926,9 +964,9 @@ void processAppLoop() {
         firstFlag = false;
       }
       if (csvCount >= csvTotal) {
+        generateUniqueRandomNumbers(1, csv.size(), csvTotal, csvArray);
         csvCount = 0;
-        RUNSTATE = 0;
-        return;
+        RUNSTATE = 1;
       }
 
       const int currentCsvId = csvArray[csvCount];
