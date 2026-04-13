@@ -4,6 +4,7 @@
 #include <FS.h>
 #include <FFat.h>
 #include <LittleFS.h>
+#include <Preferences.h>
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
@@ -38,6 +39,8 @@ constexpr uint16_t kImageDefaultWidth = 320;
 constexpr uint16_t kImageDefaultHeight = 140;
 constexpr int16_t kImageDefaultCenterX = 160;
 constexpr int16_t kImageDefaultCenterY = 155;
+constexpr char kPrefsNs[] = "wireless";
+constexpr char kPrefsInstantRefreshNoKey[] = "instant_no_key";
 
 struct WebQueuedMessage {
   char text[kTextMaxLen + 1];
@@ -583,6 +586,88 @@ bool applyHostMacFilterSetting(const String &rawMac, bool printOnError) {
   return true;
 }
 
+bool isLegacyInstantRefreshSettingKey(const String &key) {
+  return key == "instantrefreshnokey" || key == "instantrefresh";
+}
+
+void removeLegacyInstantRefreshModeFromSettingIni() {
+  if (!fatMounted) return;
+  if (!FFat.exists("/setting.ini")) return;
+
+  fs::File rf = FFat.open("/setting.ini", FILE_READ);
+  if (!rf) return;
+  const String original = rf.readString();
+  rf.close();
+
+  bool removed = false;
+  String output;
+  output.reserve(original.length());
+
+  int start = 0;
+  while (start <= original.length()) {
+    const int end = original.indexOf('\n', start);
+    const String line = (end >= 0) ? original.substring(start, end) : original.substring(start);
+
+    bool dropLine = false;
+    String trimmed = line;
+    trimmed.trim();
+    if (trimmed.length() && !trimmed.startsWith("#") && !trimmed.startsWith(";")) {
+      const int eq = trimmed.indexOf('=');
+      if (eq > 0) {
+        String key = trimmed.substring(0, eq);
+        key.trim();
+        key.toLowerCase();
+        if (isLegacyInstantRefreshSettingKey(key)) {
+          dropLine = true;
+          removed = true;
+        }
+      }
+    }
+
+    if (!dropLine) {
+      output += line;
+      if (end >= 0) {
+        output += '\n';
+      }
+    }
+
+    if (end >= 0) {
+      start = end + 1;
+    } else {
+      break;
+    }
+  }
+
+  if (!removed) return;
+  fs::File wf = FFat.open("/setting.ini", "w");
+  if (!wf) return;
+  wf.print(output);
+  wf.close();
+  Serial.println("[WEB] removed legacy InstantRefreshNoKey from /setting.ini");
+}
+
+bool loadInstantRefreshModeFromPreferences(bool fallbackValue, bool &outValue) {
+  outValue = fallbackValue;
+  Preferences prefs;
+  if (!prefs.begin(kPrefsNs, true)) {
+    Serial.println("[WEB] Preferences open (RO) failed for instantRefreshNoKey");
+    return false;
+  }
+  outValue = prefs.getBool(kPrefsInstantRefreshNoKey, fallbackValue);
+  prefs.end();
+  return true;
+}
+
+bool persistInstantRefreshModeToPreferences(bool enabled) {
+  Preferences prefs;
+  if (!prefs.begin(kPrefsNs, false)) {
+    return false;
+  }
+  const bool ok = prefs.putBool(kPrefsInstantRefreshNoKey, enabled) > 0;
+  prefs.end();
+  return ok;
+}
+
 void loadApCredentialsFromSettingIni() {
   copyStringToBuf(String(kDefaultApSsid), gApSsid, sizeof(gApSsid));
   copyStringToBuf(String(kDefaultApPassword), gApPassword, sizeof(gApPassword));
@@ -591,6 +676,11 @@ void loadApCredentialsFromSettingIni() {
   gEnableEspNow = true;
   gInstantRefreshNoKey = false;
   applyHostMacFilterSetting("", false);
+
+  bool persistedMode = gInstantRefreshNoKey;
+  if (loadInstantRefreshModeFromPreferences(gInstantRefreshNoKey, persistedMode)) {
+    gInstantRefreshNoKey = persistedMode;
+  }
 
   if (!fatMounted) return;
   fs::File f = FFat.open("/setting.ini", FILE_READ);
@@ -645,14 +735,10 @@ void loadApCredentialsFromSettingIni() {
       if (parseBoolString(value, parsed)) {
         gEnableEspNow = parsed;
       }
-    } else if (key == "instantrefreshnokey" || key == "instantrefresh") {
-      bool parsed = false;
-      if (parseBoolString(value, parsed)) {
-        gInstantRefreshNoKey = parsed;
-      }
     }
   }
   f.close();
+  removeLegacyInstantRefreshModeFromSettingIni();
 
   if (gotSsid) {
     if (ssidValue.length()) {
@@ -747,62 +833,6 @@ bool persistHostMacToSettingIni(const String &hostMacRaw) {
   if (!foundHostMac) {
     if (output.length() && output[output.length() - 1] != '\n') output += '\n';
     output += "HostMAC = \"" + hostMac + "\";\n";
-  }
-
-  fs::File wf = FFat.open("/setting.ini", "w");
-  if (!wf) return false;
-  const size_t written = wf.print(output);
-  wf.close();
-  return written == output.length();
-}
-
-bool persistInstantRefreshModeToSettingIni(bool enabled) {
-  if (!fatMounted) return false;
-
-  String original;
-  if (FFat.exists("/setting.ini")) {
-    fs::File rf = FFat.open("/setting.ini", FILE_READ);
-    if (!rf) return false;
-    original = rf.readString();
-    rf.close();
-  }
-
-  bool foundMode = false;
-  String output;
-  output.reserve(original.length() + 48);
-
-  int start = 0;
-  while (start <= original.length()) {
-    const int end = original.indexOf('\n', start);
-    String line = (end >= 0) ? original.substring(start, end) : original.substring(start);
-
-    String trimmed = line;
-    trimmed.trim();
-    if (trimmed.length() && !trimmed.startsWith("#") && !trimmed.startsWith(";")) {
-      const int eq = trimmed.indexOf('=');
-      if (eq > 0) {
-        String key = trimmed.substring(0, eq);
-        key.trim();
-        key.toLowerCase();
-        if (key == "instantrefreshnokey" || key == "instantrefresh") {
-          line = String("InstantRefreshNoKey = ") + (enabled ? "true;" : "false;");
-          foundMode = true;
-        }
-      }
-    }
-
-    output += line;
-    if (end >= 0) {
-      output += '\n';
-      start = end + 1;
-    } else {
-      break;
-    }
-  }
-
-  if (!foundMode) {
-    if (output.length() && output[output.length() - 1] != '\n') output += '\n';
-    output += String("InstantRefreshNoKey = ") + (enabled ? "true;\n" : "false;\n");
   }
 
   fs::File wf = FFat.open("/setting.ini", "w");
@@ -1458,8 +1488,8 @@ void registerRoutes() {
     }
 
     gInstantRefreshNoKey = next;
-    if (!persistInstantRefreshModeToSettingIni(gInstantRefreshNoKey)) {
-      gWebServer->send(500, "text/plain", "mode applied but save /setting.ini failed");
+    if (!persistInstantRefreshModeToPreferences(gInstantRefreshNoKey)) {
+      gWebServer->send(500, "text/plain", "mode applied but save Preferences failed");
       return;
     }
 
