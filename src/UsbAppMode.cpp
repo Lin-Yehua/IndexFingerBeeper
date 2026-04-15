@@ -768,6 +768,12 @@ static void showWebInterruptImage(const uint16_t *pixels,
   }
 }
 
+enum WirelessMode
+{
+  AP_STA,
+  STA_Online,
+  STA_Only
+}Wireless_MODE;
 void processAppLoop() {
   struct InterruptController {
     bool webActive = false;
@@ -783,7 +789,8 @@ void processAppLoop() {
     bool immediateKeyLatch = false;
     bool immediatePreemptedWeb = false;
   };
-
+  
+  
   enum class ImageResumeTarget : uint8_t {
     kNone = 0,
     kWeb = 1,
@@ -1066,58 +1073,80 @@ void processAppLoop() {
     return;
   }
 
-  if (RUNSTATE == 0) {
-    generateUniqueRandomNumbers(1, csv.size(), csvTotal, csvArray);
-    csvCount = 0;
-    RUNSTATE = 1;
-  }
-  if (RUNSTATE == 1) 
+  if(Wireless_MODE == AP_STA)
   {
-    uint8_t key = 255;
-    if (syntheticKeyPress) 
-    {
-      key = 2;
-      syntheticKeyPress = false;
-    } 
-    else 
-    {
-      Key_loop();
-      key = get_Keycode();
+    if (RUNSTATE == 0) {
+      generateUniqueRandomNumbers(1, csv.size(), csvTotal, csvArray);
+      csvCount = 0;
+      RUNSTATE = 1;
     }
-
-    if (key == 2 && wakeBacklightByKeyIfNeeded()) 
+    if (RUNSTATE == 1) 
     {
-      return;
-    }
-
-    if (key == 2 || firstFlag) 
-    {
-      if (firstFlag) 
+      uint8_t key = 255;
+      if (syntheticKeyPress) 
       {
-        firstFlag = false;
-      }
-      if (csvCount >= csvTotal) 
+        key = 2;
+        syntheticKeyPress = false;
+      } 
+      else 
       {
-        generateUniqueRandomNumbers(1, csv.size(), csvTotal, csvArray);
-        csvCount = 0;
-        RUNSTATE = 1;
+        Key_loop();
+        key = get_Keycode();
+      }
+      if (key == 3) 
+      {
+        Wireless_MODE = STA_Online;
+        return;
+      }
+      if (key == 2 && wakeBacklightByKeyIfNeeded()) 
+      {
+        return;
       }
 
-      const int currentCsvId = csvArray[csvCount];
-      csvCount++;
+      if (key == 2 || firstFlag) 
+      {
+        if (firstFlag) 
+        {
+          firstFlag = false;
+        }
+        if (csvCount >= csvTotal) 
+        {
+          generateUniqueRandomNumbers(1, csv.size(), csvTotal, csvArray);
+          csvCount = 0;
+          RUNSTATE = 1;
+        }
 
-      String localMessage;
-      const char *csvMessage = csv.getTextById(currentCsvId);
-      if (csvMessage) {
-        localMessage = csvMessage;
-      } else {
-        localMessage = "CSV id not found: ";
-        localMessage += String(currentCsvId);
+        const int currentCsvId = csvArray[csvCount];
+        csvCount++;
+
+        String localMessage;
+        const char *csvMessage = csv.getTextById(currentCsvId);
+        if (csvMessage) {
+          localMessage = csvMessage;
+        } else {
+          localMessage = "CSV id not found: ";
+          localMessage += String(currentCsvId);
+        }
+        message = localMessage.c_str();
+        playMessageWithGlitch(message);
+
+        
       }
-      message = localMessage.c_str();
-      playMessageWithGlitch(message);
-
-      
     }
+  }
+  else if(Wireless_MODE == STA_Online)
+  {
+
+    
+    
+    
+  }
+  else if(Wireless_MODE == STA_Only)
+  {
+
+  }
+  else
+  {
+    Wireless_MODE == AP_STA;
   }
 }
