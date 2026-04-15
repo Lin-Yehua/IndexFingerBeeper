@@ -627,7 +627,7 @@ bool initProjectResources() {
     Serial.println("[APP] Mixer init failed");
     return false;
   }
-  mixer.startOnCore(1);
+  mixer.startOnCore(0);
 
   if (!mountFat()) {
     Serial.println("[APP] mount FAT failed");
@@ -812,7 +812,7 @@ static constexpr const char *kStaConnectFailMsg =
     u8"WIFI\u8FDE\u63A5\u5931\u8D25\uFF1A\u77ED\u6309\u5207\u6362\u6A21\u5F0F";
 static constexpr const char *kStaCloudQueueEmptyMsg =
     u8"正在连接都市神经网络...";
-static constexpr const char *kStaCloudApiUrl = "https://index.dimension-404.cloud/api/get";
+static constexpr const char *kStaCloudApiUrl = "http://115.190.145.254:8080/random";
 static constexpr size_t kStaPrefetchDepth = 20;
 static constexpr uint32_t kStaQueueEmptyHintCooldownMs = 1800UL;
 static constexpr uint32_t kStaFetchFailCooldownMs = 1000UL;
@@ -999,7 +999,18 @@ static bool fetchStaMessageFromCloud(String &outMessage) {
   outMessage = "";
   if (WiFi.status() != WL_CONNECTED) return false;
 
-  if (!gStaHttpsClientReady) {
+  String apiUrl = kStaCloudApiUrl;
+  apiUrl.trim();
+  String apiUrlLower = apiUrl;
+  apiUrlLower.toLowerCase();
+  const bool useHttps = apiUrlLower.startsWith("https://");
+  const bool useHttp = apiUrlLower.startsWith("http://");
+  if (!useHttps && !useHttp) {
+    Serial.printf("[STA] API URL scheme unsupported: %s\n", apiUrl.c_str());
+    return false;
+  }
+
+  if (useHttps && !gStaHttpsClientReady) {
     gStaHttpsClient.setInsecure();
     gStaHttpsClient.setTimeout(kStaHttpReadTimeoutMs);
     gStaHttpsClientReady = true;
@@ -1009,9 +1020,12 @@ static bool fetchStaMessageFromCloud(String &outMessage) {
   http.setConnectTimeout(kStaHttpConnectTimeoutMs);
   http.setTimeout(kStaHttpReadTimeoutMs);
   http.setReuse(true);
-  if (!http.begin(gStaHttpsClient, kStaCloudApiUrl)) {
+  const bool beginOk = useHttps ? http.begin(gStaHttpsClient, apiUrl) : http.begin(apiUrl);
+  if (!beginOk) {
     Serial.println("[STA] API HTTP begin failed");
-    resetStaHttpClient();
+    if (useHttps) {
+      resetStaHttpClient();
+    }
     return false;
   }
 
@@ -1022,7 +1036,7 @@ static bool fetchStaMessageFromCloud(String &outMessage) {
   if (httpCode != HTTP_CODE_OK) {
     Serial.printf("[STA] API GET failed code=%d\n", httpCode);
     http.end();
-    if (httpCode < 0) {
+    if (httpCode < 0 && useHttps) {
       resetStaHttpClient();
     }
     return false;
