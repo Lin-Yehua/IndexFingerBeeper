@@ -679,7 +679,8 @@ static void playMessageWithGlitch(const char *text) {
   Text.pushSprite(0, 150 - 50);
   showGlitchEffectUTF8(text);
   mixer.stopBG();
-  mixer.playInsert("/BGend.wav");
+  mixer.playBGnoLoop("/BGend.wav");
+  mixer.playInsert("/BBend.wav");
 }
 
 static constexpr uint16_t kWebImageMaxWidth = 320;
@@ -1088,7 +1089,7 @@ void processAppLoop() {
     {
       return;
     }
-    
+
     if (key == 2 || firstFlag) 
     {
       if (firstFlag) 

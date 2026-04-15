@@ -41,6 +41,7 @@ public:
     void stop();
 
     bool playBG(const char* path);
+    bool playBGnoLoop(const char* path);
     bool stopBG();
 
     bool playInsert(const char* path);
@@ -81,6 +82,7 @@ private:
 
     size_t readSamplesLoop(fs::File& file, int16_t* buffer, size_t samplesNeeded, size_t dataOffset);
     size_t readSamplesOneShot(fs::File& file, int16_t* buffer, size_t samplesNeeded, size_t dataOffset, bool& finished);
+    size_t readSamplesOneShotPlain(fs::File& file, int16_t* buffer, size_t samplesNeeded, bool& finished);
 
     void mixAudio(const int16_t* bg, const int16_t* in, int16_t* out, size_t samples, bool insertActive);
     int16_t saturate16(int32_t x);
@@ -96,6 +98,7 @@ private:
     fs::File _bgFile;
     size_t _bgDataOffset;
     bool _bgActive;
+    bool _bgLoopEnabled;
     String _bgPath;
 
     fs::File _insertFile;

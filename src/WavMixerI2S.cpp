@@ -9,6 +9,7 @@ WavMixerI2S::WavMixerI2S()
       _outBuffer(nullptr),
       _bgDataOffset(44),
       _bgActive(false),
+      _bgLoopEnabled(true),
       _insertDataOffset(44),
       _insertActive(false),
       _insertLastSample(0),
@@ -164,10 +165,44 @@ bool WavMixerI2S::playBG(const char* path) {
         _bgDataOffset = newOffset;
         _bgPath = path;
         _bgActive = true;
+        _bgLoopEnabled = true;
         Serial.printf("[WavMixerI2S] BG started: %s\n", path);
     } else {
         _bgActive = false;
         Serial.printf("[WavMixerI2S] BG open failed: %s\n", path);
+    }
+
+    xSemaphoreGive(_fileMutex);
+    return ok;
+}
+
+bool WavMixerI2S::playBGnoLoop(const char* path) {
+    if (!_begun || path == nullptr) {
+        return false;
+    }
+
+    if (xSemaphoreTake(_fileMutex, pdMS_TO_TICKS(500)) != pdTRUE) {
+        return false;
+    }
+
+    if (_bgFile) {
+        _bgFile.close();
+    }
+
+    fs::File newFile;
+    size_t newOffset = 44;
+    bool ok = openAndValidateWav(newFile, path, newOffset);
+
+    if (ok) {
+        _bgFile = newFile;
+        _bgDataOffset = newOffset;
+        _bgPath = path;
+        _bgActive = true;
+        _bgLoopEnabled = false;
+        Serial.printf("[WavMixerI2S] BG one-shot started: %s\n", path);
+    } else {
+        _bgActive = false;
+        Serial.printf("[WavMixerI2S] BG one-shot open failed: %s\n", path);
     }
 
     xSemaphoreGive(_fileMutex);
@@ -183,6 +218,7 @@ bool WavMixerI2S::stopBG() {
         _bgFile.close();
     }
     _bgActive = false;
+    _bgLoopEnabled = true;
     _bgPath = "";
 
     xSemaphoreGive(_fileMutex);
@@ -273,6 +309,7 @@ void WavMixerI2S::audioTask() {
     while (_running) {
         bool bgActiveLocal = false;
         bool insertActiveLocal = false;
+        bool bgFinished = false;
         bool insertFinished = false;
 
         if (xSemaphoreTake(_fileMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
@@ -280,7 +317,16 @@ void WavMixerI2S::audioTask() {
             insertActiveLocal = _insertActive;
 
             if (bgActiveLocal && _bgFile) {
-                readSamplesLoop(_bgFile, _bgBuffer, _cfg.samplesPerChunk, _bgDataOffset);
+                if (_bgLoopEnabled) {
+                    readSamplesLoop(_bgFile, _bgBuffer, _cfg.samplesPerChunk, _bgDataOffset);
+                } else {
+                    readSamplesOneShotPlain(_bgFile, _bgBuffer, _cfg.samplesPerChunk, bgFinished);
+                    if (bgFinished) {
+                        _bgFile.close();
+                        _bgActive = false;
+                        _bgPath = "";
+                    }
+                }
             } else {
                 memset(_bgBuffer, 0, _cfg.samplesPerChunk * sizeof(int16_t));
             }
@@ -519,6 +565,38 @@ size_t WavMixerI2S::readSamplesOneShot(fs::File& file,
         }
         _insertHasLastSample = false;
         return samplesNeeded;
+    }
+
+    return bytesRead / sizeof(int16_t);
+}
+
+size_t WavMixerI2S::readSamplesOneShotPlain(fs::File& file,
+                                            int16_t* buffer,
+                                            size_t samplesNeeded,
+                                            bool& finished) {
+    finished = false;
+
+    size_t bytesNeeded = samplesNeeded * sizeof(int16_t);
+    size_t bytesRead = 0;
+
+    while (bytesRead < bytesNeeded) {
+        if (!file.available()) {
+            memset(((uint8_t*)buffer) + bytesRead, 0, bytesNeeded - bytesRead);
+            finished = true;
+            break;
+        }
+
+        size_t n = file.read(((uint8_t*)buffer) + bytesRead, bytesNeeded - bytesRead);
+        if (n == 0) {
+            memset(((uint8_t*)buffer) + bytesRead, 0, bytesNeeded - bytesRead);
+            finished = true;
+            break;
+        }
+        bytesRead += n;
+    }
+
+    if (!finished && !file.available()) {
+        finished = true;
     }
 
     return bytesRead / sizeof(int16_t);
