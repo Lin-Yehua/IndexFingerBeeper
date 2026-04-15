@@ -1070,24 +1070,33 @@ void processAppLoop() {
     csvCount = 0;
     RUNSTATE = 1;
   }
-  if (RUNSTATE == 1) {
+  if (RUNSTATE == 1) 
+  {
     uint8_t key = 255;
-    if (syntheticKeyPress) {
+    if (syntheticKeyPress) 
+    {
       key = 2;
       syntheticKeyPress = false;
-    } else {
+    } 
+    else 
+    {
       Key_loop();
       key = get_Keycode();
     }
-    if (key == 2 && wakeBacklightByKeyIfNeeded()) {
+
+    if (key == 2 && wakeBacklightByKeyIfNeeded()) 
+    {
       return;
     }
-
-    if (key == 2 || firstFlag) {
-      if (firstFlag) {
+    
+    if (key == 2 || firstFlag) 
+    {
+      if (firstFlag) 
+      {
         firstFlag = false;
       }
-      if (csvCount >= csvTotal) {
+      if (csvCount >= csvTotal) 
+      {
         generateUniqueRandomNumbers(1, csv.size(), csvTotal, csvArray);
         csvCount = 0;
         RUNSTATE = 1;
@@ -1107,8 +1116,7 @@ void processAppLoop() {
       message = localMessage.c_str();
       playMessageWithGlitch(message);
 
-      //tft.drawNumber(currentCsvId,20,100);
-      //tft.drawNumber(csvCount,20,120);
+      
     }
   }
 }

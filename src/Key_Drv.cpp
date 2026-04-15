@@ -23,6 +23,7 @@ uint8_t get_Keystate()
 void Key_loop()
 {
     static uint8_t now_State =255;
+    static uint16_t LongPressCount = 0;
     uint8_t last_State = 255;
     last_State = now_State;
     now_State = get_Keystate();
@@ -31,6 +32,24 @@ void Key_loop()
     {
         Keycode = now_State;
     }
+    else if (now_State == last_State && now_State != 255)
+    {
+        if (LongPressCount <= 400)
+        {
+            LongPressCount++;
+        }
+        if (LongPressCount == 50)
+        {
+            Keycode = 3;
+        }    
+    }
+    else if (now_State != last_State && now_State == 255)
+    {
+        LongPressCount  = 0;
+    }
+    
+    
+    
 }
 uint8_t get_Keycode()
 {
