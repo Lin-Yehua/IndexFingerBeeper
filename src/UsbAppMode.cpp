@@ -800,7 +800,7 @@ static uint32_t gStaAttemptStartMs = 0;
 static constexpr uint32_t kStaAttemptTimeoutMs = 10000UL;
 static constexpr uint8_t kStaMaxRetryCount = 5;
 static constexpr const char *kStaPromptMsg =
-    u8"\u6A21\u5F0F:\u8054\u7F51|\u77ED\u6309\u4EE5\u8FDE\u63A5WiFi";
+    u8"模式:联网 | 短按开始连接WiFi";
 static constexpr const char *kStaMissingCfgMsg =
     u8"WIFI\u914D\u7F6E\u7F3A\u5931\uFF1A\u77ED\u6309\u5207\u6362\u6A21\u5F0F";
 static constexpr const char *kStaConnectingPrefix =
@@ -815,6 +815,13 @@ static constexpr const char *kStaCloudQueueEmptyMsg =
     u8"正在连接都市神经网络...";
 static constexpr const char *kStaDisconnectedMsg =
     u8"WIFI已断开，按键重新连接";
+
+static constexpr const char *kApPromptMsg =
+    u8"模式：离线配置 | 连接热点以设置";
+
+static constexpr const char *kStaonlyPromptMsg =
+    u8"模式：省电";
+
 static constexpr const char *kStaCloudApiUrl = "http://115.190.145.254:8080/random";
 static constexpr size_t kStaPrefetchDepth = 20;
 static constexpr uint32_t kStaQueueEmptyHintCooldownMs = 1800UL;
@@ -1183,7 +1190,12 @@ static bool loadStaCredentialsFromSettingIni(String &outSsid, String &outPasswor
 static void playStaMessage(const String &text) {
   playMessageWithGlitch(text.c_str());
 }
-
+static void playAPMessage(const String &text) {
+  playMessageWithGlitch(text.c_str());
+}
+static void playStaOnlyMessage(const String &text) {
+  playMessageWithGlitch(text.c_str());
+}
 static void beginStaConnectAttempt() {
   if (!gStaNetSsid.length()) {
     gStaOnlinePhase = StaOnlinePhase::kFailWaitShort;
@@ -1765,6 +1777,7 @@ void processAppLoop() {
 
 void onApStaInit(AppLoopMode mode)
 {
+  static bool FristBootFlag = true;
   (void)mode;
   waitStaFetcherIdle(1000);
   resetStaHttpClient();
@@ -1780,6 +1793,15 @@ void onApStaInit(AppLoopMode mode)
   if (!wirelessPortalStart()) {
     Serial.println("[AP] wirelessPortalStart failed on AP init");
   }
+  if (FristBootFlag)
+  {
+    FristBootFlag = false;
+  }
+  else
+  {
+    playAPMessage(kApPromptMsg);
+  }
+  
 }
 
 void onStaOnlineInit(AppLoopMode mode)
@@ -1826,4 +1848,5 @@ void onStaOnlyInit(AppLoopMode mode)
   clearStaMessageQueue();
   WiFi.disconnect(true, false);
   WiFi.mode(WIFI_OFF);
+  playStaOnlyMessage(kStaonlyPromptMsg);
 }
