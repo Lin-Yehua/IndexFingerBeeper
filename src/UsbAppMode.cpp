@@ -865,11 +865,12 @@ static void beginStaConnectAttempt() {
     return;
   }
 
-  const uint8_t attemptNo = static_cast<uint8_t>(gStaRetryCount + 1);
   String msg = kStaConnectingPrefix;
   msg += gStaNetSsid;
-  msg += kStaRetryPrefix;
-  msg += String(attemptNo);
+  if (gStaRetryCount > 0) {
+    msg += kStaRetryPrefix;
+    msg += String(gStaRetryCount);
+  }
   playStaMessage(msg);
 
   WiFi.mode(WIFI_STA);
@@ -1215,9 +1216,8 @@ void processAppLoop() {
       if (irq.webActive) {
         return;
       }
-      // Pass-through the same physical keypress so final web interrupt close
-      // does not require another key press to resume normal flow.
-      syntheticKeyPress = true;
+      // Web queue finished: require a new physical keypress before AP normal flow continues.
+      return;
     }
     if (key != 2) {
       irq.webKeyLatch = false;
@@ -1252,13 +1252,13 @@ void processAppLoop() {
         Key_loop();
         key = get_Keycode();
       }
+      if ((key == 2 || key == 3) && wakeBacklightByKeyIfNeeded())
+      {
+        return;
+      }
       if (key == 3) 
       {
         switchAppMode(APP_MODE_STA_ONLINE);
-        return;
-      }
-      if (key == 2 && wakeBacklightByKeyIfNeeded()) 
-      {
         return;
       }
 
@@ -1305,6 +1305,10 @@ void processAppLoop() {
     {
       Key_loop();
       key = get_Keycode();
+    }
+    if ((key == 2 || key == 3) && wakeBacklightByKeyIfNeeded())
+    {
+      return;
     }
 
     // Long press always switches mode, including while connecting.
@@ -1371,6 +1375,10 @@ void processAppLoop() {
       Key_loop();
       key = get_Keycode();
     }
+    if ((key == 2 || key == 3) && wakeBacklightByKeyIfNeeded())
+    {
+      return;
+    }
     if (key == 3)
     {
       switchAppMode(APP_MODE_AP_STA);
@@ -1391,13 +1399,17 @@ void onApStaInit(AppLoopMode mode)
   gStaAttemptStartMs = 0;
   gStaNetSsid = "";
   gStaNetPassword = "";
-  WiFi.disconnect(true, false);
-  WiFi.mode(WIFI_OFF);
+  if (!wirelessPortalStart()) {
+    Serial.println("[AP] wirelessPortalStart failed on AP init");
+  }
 }
 
 void onStaOnlineInit(AppLoopMode mode)
 {
   (void)mode;
+  wirelessPortalStop();
+  WiFi.disconnect(true, false);
+
   gStaRetryCount = 0;
   gStaAttemptStartMs = 0;
   gStaOnlinePhase = StaOnlinePhase::kPromptWaitShort;
@@ -1415,6 +1427,7 @@ void onStaOnlineInit(AppLoopMode mode)
 void onStaOnlyInit(AppLoopMode mode)
 {
   (void)mode;
+  wirelessPortalStop();
   gStaOnlinePhase = StaOnlinePhase::kPromptWaitShort;
   gStaRetryCount = 0;
   gStaAttemptStartMs = 0;
