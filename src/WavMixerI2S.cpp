@@ -234,6 +234,13 @@ bool WavMixerI2S::playInsert(const char* path) {
         return false;
     }
 
+    // Avoid restarting the exact same insert file while it is still active.
+    // This prevents high-frequency reopen storms (for example BB2 in glitch effect).
+    if (_insertActive && _insertPath.equals(path)) {
+        xSemaphoreGive(_fileMutex);
+        return true;
+    }
+
     if (_insertFile) {
         _insertFile.close();
     }
@@ -362,6 +369,8 @@ void WavMixerI2S::audioTask() {
             &bytesWritten,
             portMAX_DELAY
         );
+        // Yield a tick so CPU0 idle task can run and feed task watchdog.
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 

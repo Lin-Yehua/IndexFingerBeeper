@@ -4,6 +4,8 @@
 #include <FFat.h>
 #include <USB.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <HTTPClient.h>
 #include <vector>
 #include <ctype.h>
 #include "esp_system.h"
@@ -625,7 +627,7 @@ bool initProjectResources() {
     Serial.println("[APP] Mixer init failed");
     return false;
   }
-  mixer.startOnCore(0);
+  mixer.startOnCore(1);
 
   if (!mountFat()) {
     Serial.println("[APP] mount FAT failed");
@@ -670,6 +672,7 @@ bool initProjectResources() {
 
 static void playMessageWithGlitch(const char *text) {
   if (!text || !text[0]) return;
+  static int8_t sBbEndExists = -1;
 
   notifyBacklightActivity();
   mixer.playBG("/BG.wav");
@@ -680,7 +683,15 @@ static void playMessageWithGlitch(const char *text) {
   showGlitchEffectUTF8(text);
   mixer.stopBG();
   mixer.playBGnoLoop("/BGend.wav");
-  mixer.playInsert("/BBend.wav");
+  if (sBbEndExists < 0 && fatMounted) {
+    sBbEndExists = FFat.exists("/sound/BBend.wav") ? 1 : 0;
+    if (sBbEndExists == 0) {
+      Serial.println("[AUDIO] /sound/BBend.wav missing, skip BBend insert");
+    }
+  }
+  if (sBbEndExists != 0) {
+    mixer.playInsert("/BBend.wav");
+  }
 }
 
 static constexpr uint16_t kWebImageMaxWidth = 320;
@@ -788,17 +799,315 @@ static uint32_t gStaAttemptStartMs = 0;
 static constexpr uint32_t kStaAttemptTimeoutMs = 10000UL;
 static constexpr uint8_t kStaMaxRetryCount = 5;
 static constexpr const char *kStaPromptMsg =
-    u8"\u6A21\u5F0F:STA\u8054\u7F51\u6A21\u5F0F|\u77ED\u6309\u4EE5\u5F00\u59CB\u8FDE\u63A5WiFi";
+    u8"\u6A21\u5F0F:\u8054\u7F51|\u77ED\u6309\u4EE5\u8FDE\u63A5WiFi";
 static constexpr const char *kStaMissingCfgMsg =
     u8"WIFI\u914D\u7F6E\u7F3A\u5931\uFF1A\u77ED\u6309\u5207\u6362\u6A21\u5F0F";
 static constexpr const char *kStaConnectingPrefix =
     u8"\u6B63\u5728\u8FDE\u63A5\uFF1A";
 static constexpr const char *kStaRetryPrefix =
-    u8"|\u91CD\u8BD5\u6B21\u6570\uFF1A";
+    u8"|重试次数";
 static constexpr const char *kStaConnectOkPrefix =
-    u8"WIFI\u8FDE\u63A5\u6210\u529F\uFF1A";
+    u8"WIFI连接成功";
 static constexpr const char *kStaConnectFailMsg =
     u8"WIFI\u8FDE\u63A5\u5931\u8D25\uFF1A\u77ED\u6309\u5207\u6362\u6A21\u5F0F";
+static constexpr const char *kStaCloudQueueEmptyMsg =
+    u8"正在连接都市神经网络...";
+static constexpr const char *kStaCloudApiUrl = "https://index.dimension-404.cloud/api/get";
+static constexpr size_t kStaPrefetchDepth = 20;
+static constexpr uint32_t kStaQueueEmptyHintCooldownMs = 1800UL;
+static constexpr uint32_t kStaFetchFailCooldownMs = 1000UL;
+static constexpr uint32_t kStaFetcherTickMs = 200UL;
+static constexpr uint32_t kStaHttpConnectTimeoutMs = 3500UL;
+static constexpr uint32_t kStaHttpReadTimeoutMs = 4500UL;
+static constexpr UBaseType_t kStaFetcherPriority = 1;
+static constexpr BaseType_t kStaFetcherCore = 0;
+static constexpr uint32_t kStaFetcherStackSize = 12288UL;
+static String gStaMsgQueue[kStaPrefetchDepth];
+static size_t gStaMsgQueueHead = 0;
+static size_t gStaMsgQueueSize = 0;
+static uint32_t gStaLastQueueEmptyHintMs = 0;
+static uint32_t gStaNextFetchAllowedMs = 0;
+static volatile bool gStaFetchInProgress = false;
+static WiFiClientSecure gStaHttpsClient;
+static bool gStaHttpsClientReady = false;
+static SemaphoreHandle_t gStaMsgQueueMutex = nullptr;
+static TaskHandle_t gStaFetcherTaskHandle = nullptr;
+
+static bool ensureStaQueueMutex() {
+  if (gStaMsgQueueMutex) return true;
+  gStaMsgQueueMutex = xSemaphoreCreateMutex();
+  return gStaMsgQueueMutex != nullptr;
+}
+
+static void resetStaHttpClient() {
+  if (gStaHttpsClientReady) {
+    gStaHttpsClient.stop();
+  }
+  gStaHttpsClientReady = false;
+}
+
+static void clearStaMessageQueue() {
+  if (!ensureStaQueueMutex()) return;
+  if (xSemaphoreTake(gStaMsgQueueMutex, pdMS_TO_TICKS(200)) != pdTRUE) return;
+  for (size_t i = 0; i < kStaPrefetchDepth; ++i) {
+    gStaMsgQueue[i] = "";
+  }
+  gStaMsgQueueHead = 0;
+  gStaMsgQueueSize = 0;
+  xSemaphoreGive(gStaMsgQueueMutex);
+}
+
+static bool pushStaMessageQueue(const String &message) {
+  if (!ensureStaQueueMutex()) return false;
+  String normalized = message;
+  normalized.trim();
+  if (!normalized.length()) return false;
+  if (xSemaphoreTake(gStaMsgQueueMutex, pdMS_TO_TICKS(200)) != pdTRUE) return false;
+  if (gStaMsgQueueSize >= kStaPrefetchDepth) {
+    xSemaphoreGive(gStaMsgQueueMutex);
+    return false;
+  }
+
+  const size_t tail = (gStaMsgQueueHead + gStaMsgQueueSize) % kStaPrefetchDepth;
+  gStaMsgQueue[tail] = normalized;
+  gStaMsgQueueSize++;
+  xSemaphoreGive(gStaMsgQueueMutex);
+  return true;
+}
+
+static bool popStaMessageQueue(String &outMessage) {
+  if (!ensureStaQueueMutex()) return false;
+  outMessage = "";
+  if (xSemaphoreTake(gStaMsgQueueMutex, pdMS_TO_TICKS(200)) != pdTRUE) return false;
+  if (gStaMsgQueueSize == 0) {
+    xSemaphoreGive(gStaMsgQueueMutex);
+    return false;
+  }
+
+  outMessage = gStaMsgQueue[gStaMsgQueueHead];
+  gStaMsgQueue[gStaMsgQueueHead] = "";
+  gStaMsgQueueHead = (gStaMsgQueueHead + 1) % kStaPrefetchDepth;
+  gStaMsgQueueSize--;
+  xSemaphoreGive(gStaMsgQueueMutex);
+  return outMessage.length() > 0;
+}
+
+static size_t staMessageQueueSize() {
+  if (!ensureStaQueueMutex()) return 0;
+  if (xSemaphoreTake(gStaMsgQueueMutex, pdMS_TO_TICKS(200)) != pdTRUE) return 0;
+  const size_t size = gStaMsgQueueSize;
+  xSemaphoreGive(gStaMsgQueueMutex);
+  return size;
+}
+
+static int hexNibble(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+  if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+  return -1;
+}
+
+static void appendUtf8Codepoint(String &out, uint16_t codepoint) {
+  if (codepoint <= 0x7F) {
+    out += static_cast<char>(codepoint);
+    return;
+  }
+  if (codepoint <= 0x7FF) {
+    out += static_cast<char>(0xC0 | ((codepoint >> 6) & 0x1F));
+    out += static_cast<char>(0x80 | (codepoint & 0x3F));
+    return;
+  }
+  out += static_cast<char>(0xE0 | ((codepoint >> 12) & 0x0F));
+  out += static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F));
+  out += static_cast<char>(0x80 | (codepoint & 0x3F));
+}
+
+static bool extractJsonTextField(const String &json, String &outText) {
+  outText = "";
+
+  const int keyPos = json.indexOf("\"text\"");
+  if (keyPos < 0) return false;
+
+  int colon = json.indexOf(':', keyPos + 6);
+  if (colon < 0) return false;
+  colon++;
+  while (colon < static_cast<int>(json.length()) &&
+         (json[colon] == ' ' || json[colon] == '\t' || json[colon] == '\r' || json[colon] == '\n')) {
+    colon++;
+  }
+  if (colon >= static_cast<int>(json.length()) || json[colon] != '"') return false;
+
+  String decoded;
+  decoded.reserve(128);
+  for (int i = colon + 1; i < static_cast<int>(json.length()); ++i) {
+    const char c = json[i];
+    if (c == '"') {
+      decoded.trim();
+      if (!decoded.length()) return false;
+      outText = decoded;
+      return true;
+    }
+    if (c != '\\') {
+      decoded += c;
+      continue;
+    }
+    if (i + 1 >= static_cast<int>(json.length())) return false;
+    const char esc = json[++i];
+    switch (esc) {
+      case '"':
+      case '\\':
+      case '/':
+        decoded += esc;
+        break;
+      case 'b':
+        decoded += '\b';
+        break;
+      case 'f':
+        decoded += '\f';
+        break;
+      case 'n':
+        decoded += '\n';
+        break;
+      case 'r':
+        decoded += '\r';
+        break;
+      case 't':
+        decoded += '\t';
+        break;
+      case 'u': {
+        if (i + 4 >= static_cast<int>(json.length())) return false;
+        const int h0 = hexNibble(json[i + 1]);
+        const int h1 = hexNibble(json[i + 2]);
+        const int h2 = hexNibble(json[i + 3]);
+        const int h3 = hexNibble(json[i + 4]);
+        if (h0 < 0 || h1 < 0 || h2 < 0 || h3 < 0) return false;
+        const uint16_t cp = static_cast<uint16_t>((h0 << 12) | (h1 << 8) | (h2 << 4) | h3);
+        appendUtf8Codepoint(decoded, cp);
+        i += 4;
+        break;
+      }
+      default:
+        decoded += esc;
+        break;
+    }
+  }
+
+  return false;
+}
+
+static bool fetchStaMessageFromCloud(String &outMessage) {
+  outMessage = "";
+  if (WiFi.status() != WL_CONNECTED) return false;
+
+  if (!gStaHttpsClientReady) {
+    gStaHttpsClient.setInsecure();
+    gStaHttpsClient.setTimeout(kStaHttpReadTimeoutMs);
+    gStaHttpsClientReady = true;
+  }
+
+  HTTPClient http;
+  http.setConnectTimeout(kStaHttpConnectTimeoutMs);
+  http.setTimeout(kStaHttpReadTimeoutMs);
+  http.setReuse(true);
+  if (!http.begin(gStaHttpsClient, kStaCloudApiUrl)) {
+    Serial.println("[STA] API HTTP begin failed");
+    resetStaHttpClient();
+    return false;
+  }
+
+  http.addHeader("Accept", "application/json");
+  http.setUserAgent("TestTFT-ESP32S3/1.0");
+
+  const int httpCode = http.GET();
+  if (httpCode != HTTP_CODE_OK) {
+    Serial.printf("[STA] API GET failed code=%d\n", httpCode);
+    http.end();
+    if (httpCode < 0) {
+      resetStaHttpClient();
+    }
+    return false;
+  }
+
+  const String payload = http.getString();
+  http.end();
+  if (!extractJsonTextField(payload, outMessage)) {
+    Serial.printf("[STA] API JSON parse failed, len=%u\n",
+                  static_cast<unsigned int>(payload.length()));
+    return false;
+  }
+  return true;
+}
+
+static bool fetchAndQueueOneStaMessage() {
+  if (WiFi.status() != WL_CONNECTED) return false;
+  if (staMessageQueueSize() >= kStaPrefetchDepth) return false;
+  const uint32_t nowMs = millis();
+  if (gStaNextFetchAllowedMs != 0 &&
+      static_cast<int32_t>(nowMs - gStaNextFetchAllowedMs) < 0) {
+    return false;
+  }
+
+  gStaFetchInProgress = true;
+  String fetched;
+  const bool fetchedOk = fetchStaMessageFromCloud(fetched);
+  gStaFetchInProgress = false;
+
+  if (!fetchedOk) {
+    gStaNextFetchAllowedMs = nowMs + kStaFetchFailCooldownMs;
+    return false;
+  }
+  if (!pushStaMessageQueue(fetched)) return false;
+  const size_t queued = staMessageQueueSize();
+  gStaNextFetchAllowedMs = 0;
+  Serial.printf("[STA] queued cloud message count=%u\n",
+                static_cast<unsigned int>(queued));
+  return true;
+}
+
+static void staMessageFetcherTask(void *param) {
+  (void)param;
+  while (true) {
+    const bool shouldFetch = (gAppLoopMode == APP_MODE_STA_ONLINE) &&
+                             (gStaOnlinePhase == StaOnlinePhase::kConnected) &&
+                             (WiFi.status() == WL_CONNECTED);
+
+    if (shouldFetch && staMessageQueueSize() < kStaPrefetchDepth) {
+      while (staMessageQueueSize() < kStaPrefetchDepth) {
+        if (!fetchAndQueueOneStaMessage()) {
+          break;
+        }
+      }
+    }
+    vTaskDelay(pdMS_TO_TICKS(kStaFetcherTickMs));
+  }
+}
+
+static void waitStaFetcherIdle(uint32_t maxWaitMs) {
+  const uint32_t started = millis();
+  while (gStaFetchInProgress && (millis() - started) < maxWaitMs) {
+    delay(10);
+  }
+}
+
+static void ensureStaFetcherTaskStarted() {
+  if (gStaFetcherTaskHandle) return;
+  if (!ensureStaQueueMutex()) {
+    Serial.println("[STA] queue mutex create failed");
+    return;
+  }
+  const BaseType_t ok = xTaskCreatePinnedToCore(
+      staMessageFetcherTask,
+      "StaMsgFetch",
+      kStaFetcherStackSize,
+      nullptr,
+      kStaFetcherPriority,
+      &gStaFetcherTaskHandle,
+      kStaFetcherCore);
+  if (ok != pdPASS) {
+    gStaFetcherTaskHandle = nullptr;
+    Serial.println("[STA] fetcher task create failed");
+  }
+}
 
 static String trimIniValue(String value) {
   value.trim();
@@ -960,6 +1269,11 @@ void processAppLoop() {
   bool syntheticKeyPress = false;
   const bool instantRefreshNoKey = wirelessPortalInstantRefreshNoKeyEnabled();
   dispatchModeEnterIfNeeded();
+  static AppLoopMode lastLoopMode = APP_MODE_AP_STA;
+  if (lastLoopMode != gAppLoopMode) {
+    irq = InterruptController{};
+    lastLoopMode = gAppLoopMode;
+  }
 
   auto preemptByHost = [&]() {
     if (irq.imageActive) {
@@ -1104,124 +1418,126 @@ void processAppLoop() {
     }
   }
 
-  String hostBroadcastMessage;
-  if (wirelessPortalPopHostMessage(hostBroadcastMessage)) {
-    preemptByHost();
-    playMessageWithGlitch(hostBroadcastMessage.c_str());
-    return;
-  }
-
-  String immediateMessage;
-  if (wirelessPortalPopImmediateMessage(immediateMessage)) {
-    startImmediateInterrupt();
-    playMessageWithGlitch(immediateMessage.c_str());
-    return;
-  }
-
-  // Image interrupt and immediate interrupt are peer-level:
-  // image polling must happen before "immediate active" wait branch.
-  if (gWebImageScratch) {
-    uint16_t imageW = 0;
-    uint16_t imageH = 0;
-    int16_t centerX = 160;
-    int16_t centerY = 155;
-    size_t pixelCount = 0;
-    if (wirelessPortalTakePendingImage(gWebImageScratch,
-                                       gWebImageScratchPixels,
-                                       imageW,
-                                       imageH,
-                                       centerX,
-                                       centerY,
-                                       pixelCount)) {
-      (void)pixelCount;
-      startImageInterrupt(imageW, imageH, centerX, centerY);
+  if (gAppLoopMode == APP_MODE_AP_STA) {
+    String hostBroadcastMessage;
+    if (wirelessPortalPopHostMessage(hostBroadcastMessage)) {
+      preemptByHost();
+      playMessageWithGlitch(hostBroadcastMessage.c_str());
       return;
     }
-  }
 
-  if (irq.immediateActive) {
-    Key_loop();
-    const uint8_t key = get_Keycode();
-    if (key == 2 && !irq.immediateKeyLatch) {
-      irq.immediateKeyLatch = true;
-      if (wakeBacklightByKeyIfNeeded()) {
+    String immediateMessage;
+    if (wirelessPortalPopImmediateMessage(immediateMessage)) {
+      startImmediateInterrupt();
+      playMessageWithGlitch(immediateMessage.c_str());
+      return;
+    }
+
+    // Image interrupt and immediate interrupt are peer-level:
+    // image polling must happen before "immediate active" wait branch.
+    if (gWebImageScratch) {
+      uint16_t imageW = 0;
+      uint16_t imageH = 0;
+      int16_t centerX = 160;
+      int16_t centerY = 155;
+      size_t pixelCount = 0;
+      if (wirelessPortalTakePendingImage(gWebImageScratch,
+                                         gWebImageScratchPixels,
+                                         imageW,
+                                         imageH,
+                                         centerX,
+                                         centerY,
+                                         pixelCount)) {
+        (void)pixelCount;
+        startImageInterrupt(imageW, imageH, centerX, centerY);
         return;
       }
-      finishImmediateInterrupt();
     }
-    if (key != 2) {
-      irq.immediateKeyLatch = false;
-    }
+
     if (irq.immediateActive) {
-      return;
-    }
-  }
-
-  if (irq.imageActive) {
-    Key_loop();
-    const uint8_t key = get_Keycode();
-    if (key == 2 && !irq.imageKeyLatch) {
-      irq.imageKeyLatch = true;
-      if (wakeBacklightByKeyIfNeeded()) {
-        // Backlight wake is always effective and does not end image interrupt.
-        return;
-      }
-      (void)finishImageInterrupt();
-    } else {
-      if (key != 2) {
-        irq.imageKeyLatch = false;
-      }
-      return;
-    }
-  }
-
-  if (!irq.webActive && wirelessPortalHasPendingMessage()) {
-    String queuedMessage;
-    if (wirelessPortalPopMessage(queuedMessage)) {
-      irq.webActive = true;
-      irq.webKeyLatch = false;
-      Serial.println("[WEB] interrupt started");
-      playMessageWithGlitch(queuedMessage.c_str());
-      return;
-    }
-  }
-
-  if (irq.webActive) {
-    uint8_t key = 255;
-    if (syntheticKeyPress) {
-      key = 2;
-      syntheticKeyPress = false;
-    } else {
       Key_loop();
-      key = get_Keycode();
-    }
-    if (key == 2 && !irq.webKeyLatch) {
-      irq.webKeyLatch = true;
-      if (wakeBacklightByKeyIfNeeded()) {
+      const uint8_t key = get_Keycode();
+      if (key == 2 && !irq.immediateKeyLatch) {
+        irq.immediateKeyLatch = true;
+        if (wakeBacklightByKeyIfNeeded()) {
+          return;
+        }
+        finishImmediateInterrupt();
+      }
+      if (key != 2) {
+        irq.immediateKeyLatch = false;
+      }
+      if (irq.immediateActive) {
         return;
       }
+    }
+
+    if (irq.imageActive) {
+      Key_loop();
+      const uint8_t key = get_Keycode();
+      if (key == 2 && !irq.imageKeyLatch) {
+        irq.imageKeyLatch = true;
+        if (wakeBacklightByKeyIfNeeded()) {
+          // Backlight wake is always effective and does not end image interrupt.
+          return;
+        }
+        (void)finishImageInterrupt();
+      } else {
+        if (key != 2) {
+          irq.imageKeyLatch = false;
+        }
+        return;
+      }
+    }
+
+    if (!irq.webActive && wirelessPortalHasPendingMessage()) {
       String queuedMessage;
       if (wirelessPortalPopMessage(queuedMessage)) {
+        irq.webActive = true;
+        irq.webKeyLatch = false;
+        Serial.println("[WEB] interrupt started");
         playMessageWithGlitch(queuedMessage.c_str());
-        if (!wirelessPortalHasPendingMessage()) {
+        return;
+      }
+    }
+
+    if (irq.webActive) {
+      uint8_t key = 255;
+      if (syntheticKeyPress) {
+        key = 2;
+        syntheticKeyPress = false;
+      } else {
+        Key_loop();
+        key = get_Keycode();
+      }
+      if (key == 2 && !irq.webKeyLatch) {
+        irq.webKeyLatch = true;
+        if (wakeBacklightByKeyIfNeeded()) {
+          return;
+        }
+        String queuedMessage;
+        if (wirelessPortalPopMessage(queuedMessage)) {
+          playMessageWithGlitch(queuedMessage.c_str());
+          if (!wirelessPortalHasPendingMessage()) {
+            irq.webActive = false;
+            irq.webKeyLatch = false;
+            Serial.println("[WEB] interrupt finished");
+          }
+        } else {
           irq.webActive = false;
           irq.webKeyLatch = false;
           Serial.println("[WEB] interrupt finished");
         }
-      } else {
-        irq.webActive = false;
-        irq.webKeyLatch = false;
-        Serial.println("[WEB] interrupt finished");
-      }
-      if (irq.webActive) {
+        if (irq.webActive) {
+          return;
+        }
+        // Web queue finished: require a new physical keypress before AP normal flow continues.
         return;
       }
-      // Web queue finished: require a new physical keypress before AP normal flow continues.
-      return;
-    }
-    if (key != 2) {
-      irq.webKeyLatch = false;
-      return;
+      if (key != 2) {
+        irq.webKeyLatch = false;
+        return;
+      }
     }
   }
 
@@ -1329,6 +1645,9 @@ void processAppLoop() {
         const wl_status_t status = WiFi.status();
         if (status == WL_CONNECTED) {
           gStaOnlinePhase = StaOnlinePhase::kConnected;
+          clearStaMessageQueue();
+          gStaLastQueueEmptyHintMs = 0;
+          gStaNextFetchAllowedMs = 0;
           String okMsg = kStaConnectOkPrefix;
           okMsg += gStaNetSsid;
           playStaMessage(okMsg);
@@ -1358,7 +1677,22 @@ void processAppLoop() {
         return;
 
       case StaOnlinePhase::kConnected:
-        // TODO: [later] online HTTP message flow.
+        if (key == 2) {
+          String nextMessage;
+          if (!popStaMessageQueue(nextMessage)) {
+            const uint32_t nowMs = millis();
+            if ((nowMs - gStaLastQueueEmptyHintMs) < kStaQueueEmptyHintCooldownMs) {
+              return;
+            }
+            gStaLastQueueEmptyHintMs = nowMs;
+            playStaMessage(kStaCloudQueueEmptyMsg);
+            return;
+          }
+          gStaLastQueueEmptyHintMs = 0;
+          playStaMessage(nextMessage);
+          // Refill is handled by background fetch task.
+          return;
+        }
         return;
     }
   }
@@ -1394,11 +1728,17 @@ void processAppLoop() {
 void onApStaInit(AppLoopMode mode)
 {
   (void)mode;
+  waitStaFetcherIdle(1000);
+  resetStaHttpClient();
   gStaOnlinePhase = StaOnlinePhase::kPromptWaitShort;
   gStaRetryCount = 0;
   gStaAttemptStartMs = 0;
+  gStaLastQueueEmptyHintMs = 0;
+  gStaNextFetchAllowedMs = 0;
+  gStaFetchInProgress = false;
   gStaNetSsid = "";
   gStaNetPassword = "";
+  clearStaMessageQueue();
   if (!wirelessPortalStart()) {
     Serial.println("[AP] wirelessPortalStart failed on AP init");
   }
@@ -1407,12 +1747,18 @@ void onApStaInit(AppLoopMode mode)
 void onStaOnlineInit(AppLoopMode mode)
 {
   (void)mode;
+  waitStaFetcherIdle(1000);
+  resetStaHttpClient();
   wirelessPortalStop();
   WiFi.disconnect(true, false);
 
   gStaRetryCount = 0;
   gStaAttemptStartMs = 0;
+  gStaLastQueueEmptyHintMs = 0;
+  gStaNextFetchAllowedMs = 0;
+  gStaFetchInProgress = false;
   gStaOnlinePhase = StaOnlinePhase::kPromptWaitShort;
+  clearStaMessageQueue();
 
   const bool loaded = loadStaCredentialsFromSettingIni(gStaNetSsid, gStaNetPassword);
   if (!loaded) {
@@ -1421,16 +1767,23 @@ void onStaOnlineInit(AppLoopMode mode)
     Serial.printf("[STA] target ssid: %s\\n", gStaNetSsid.c_str());
   }
 
+  ensureStaFetcherTaskStarted();
   playStaMessage(kStaPromptMsg);
 }
 
 void onStaOnlyInit(AppLoopMode mode)
 {
   (void)mode;
+  waitStaFetcherIdle(1000);
+  resetStaHttpClient();
   wirelessPortalStop();
   gStaOnlinePhase = StaOnlinePhase::kPromptWaitShort;
   gStaRetryCount = 0;
   gStaAttemptStartMs = 0;
+  gStaLastQueueEmptyHintMs = 0;
+  gStaNextFetchAllowedMs = 0;
+  gStaFetchInProgress = false;
+  clearStaMessageQueue();
   WiFi.disconnect(true, false);
   WiFi.mode(WIFI_OFF);
 }
