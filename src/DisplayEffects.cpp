@@ -25,6 +25,24 @@ uint8_t scaledBacklightDuty(uint8_t rawDuty) {
 void showGlitchEffectUTF8(const char *text) {
   if (!text) return;
 
+  // Normalize incoming text so display pipeline ignores line breaks.
+  // This keeps wrapped rendering fully controlled by our own layout logic.
+  String normalized;
+  normalized.reserve(strlen(text));
+  for (size_t i = 0; text[i] != '\0'; ++i) {
+    const char ch = text[i];
+    if (ch == '\r' || ch == '\n') continue;
+    if (ch == '\\' && text[i + 1] != '\0') {
+      const char next = text[i + 1];
+      if (next == 'r' || next == 'n') {
+        ++i;
+        continue;
+      }
+    }
+    normalized += ch;
+  }
+  text = normalized.c_str();
+
   static constexpr int kMaxChars = 128;
   static constexpr int kMaxLines = 8;
   static constexpr int kDisturbWidth = 5;
