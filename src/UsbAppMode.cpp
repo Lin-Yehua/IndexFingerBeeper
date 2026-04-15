@@ -1435,7 +1435,12 @@ void processAppLoop() {
     }
   }
 
-  if (gAppLoopMode == APP_MODE_AP_STA) {
+  const bool allowWebInterrupts =
+      (gAppLoopMode == APP_MODE_AP_STA) ||
+      (gAppLoopMode == APP_MODE_STA_ONLINE &&
+       gStaOnlinePhase == StaOnlinePhase::kConnected);
+
+  if (allowWebInterrupts) {
     String hostBroadcastMessage;
     if (wirelessPortalPopHostMessage(hostBroadcastMessage)) {
       preemptByHost();
@@ -1782,7 +1787,9 @@ void onStaOnlineInit(AppLoopMode mode)
   (void)mode;
   waitStaFetcherIdle(1000);
   resetStaHttpClient();
-  wirelessPortalStop();
+  if (!wirelessPortalStart()) {
+    Serial.println("[STA] wirelessPortalStart failed on STA_Online init");
+  }
   WiFi.disconnect(true, false);
 
   gStaRetryCount = 0;
