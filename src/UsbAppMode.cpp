@@ -3,6 +3,7 @@
 #include <LittleFS.h>
 #include <FFat.h>
 #include <USB.h>
+#include <WiFi.h>
 #include <vector>
 #include <ctype.h>
 #include "esp_system.h"
@@ -772,6 +773,114 @@ static AppModeEnterCallback gAppModeEnterCallback = nullptr;
 static AppModeEnterCallback gAppModeInitCallbacks[3] = {nullptr, nullptr, nullptr};
 static bool gAppModeEnterPending = true;
 
+enum class StaOnlinePhase : uint8_t {
+  kPromptWaitShort = 0,
+  kConnecting = 1,
+  kFailWaitShort = 2,
+  kConnected = 3,
+};
+
+static StaOnlinePhase gStaOnlinePhase = StaOnlinePhase::kPromptWaitShort;
+static String gStaNetSsid;
+static String gStaNetPassword;
+static uint8_t gStaRetryCount = 0;
+static uint32_t gStaAttemptStartMs = 0;
+static constexpr uint32_t kStaAttemptTimeoutMs = 10000UL;
+static constexpr uint8_t kStaMaxRetryCount = 5;
+static constexpr const char *kStaPromptMsg =
+    u8"\u6A21\u5F0F:STA\u8054\u7F51\u6A21\u5F0F|\u77ED\u6309\u4EE5\u5F00\u59CB\u8FDE\u63A5WiFi";
+static constexpr const char *kStaMissingCfgMsg =
+    u8"WIFI\u914D\u7F6E\u7F3A\u5931\uFF1A\u77ED\u6309\u5207\u6362\u6A21\u5F0F";
+static constexpr const char *kStaConnectingPrefix =
+    u8"\u6B63\u5728\u8FDE\u63A5\uFF1A";
+static constexpr const char *kStaRetryPrefix =
+    u8"|\u91CD\u8BD5\u6B21\u6570\uFF1A";
+static constexpr const char *kStaConnectOkPrefix =
+    u8"WIFI\u8FDE\u63A5\u6210\u529F\uFF1A";
+static constexpr const char *kStaConnectFailMsg =
+    u8"WIFI\u8FDE\u63A5\u5931\u8D25\uFF1A\u77ED\u6309\u5207\u6362\u6A21\u5F0F";
+
+static String trimIniValue(String value) {
+  value.trim();
+  const int semicolon = value.indexOf(';');
+  if (semicolon >= 0) {
+    value = value.substring(0, semicolon);
+  }
+  value.trim();
+  if (value.length() >= 2) {
+    const char first = value[0];
+    const char last = value[value.length() - 1];
+    if ((first == '"' && last == '"') || (first == '\'' && last == '\'')) {
+      value = value.substring(1, value.length() - 1);
+      value.trim();
+    }
+  }
+  return value;
+}
+
+static bool loadStaCredentialsFromSettingIni(String &outSsid, String &outPassword) {
+  outSsid = "";
+  outPassword = "";
+
+  fs::File f = FFat.open("/setting.ini", FILE_READ);
+  if (!f) {
+    Serial.println("[STA] /setting.ini not found");
+    return false;
+  }
+
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (!line.length()) continue;
+    if (line.startsWith("#") || line.startsWith(";")) continue;
+
+    const int eq = line.indexOf('=');
+    if (eq <= 0) continue;
+
+    String key = line.substring(0, eq);
+    String value = line.substring(eq + 1);
+    key.trim();
+    key.toLowerCase();
+    value = trimIniValue(value);
+
+    if (key == "netssid") {
+      outSsid = value;
+    } else if (key == "netpassword") {
+      outPassword = value;
+    }
+  }
+  f.close();
+
+  return outSsid.length() > 0;
+}
+
+static void playStaMessage(const String &text) {
+  playMessageWithGlitch(text.c_str());
+}
+
+static void beginStaConnectAttempt() {
+  if (!gStaNetSsid.length()) {
+    gStaOnlinePhase = StaOnlinePhase::kFailWaitShort;
+    playStaMessage(kStaMissingCfgMsg);
+    return;
+  }
+
+  const uint8_t attemptNo = static_cast<uint8_t>(gStaRetryCount + 1);
+  String msg = kStaConnectingPrefix;
+  msg += gStaNetSsid;
+  msg += kStaRetryPrefix;
+  msg += String(attemptNo);
+  playStaMessage(msg);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect(false, false);
+  delay(20);
+  WiFi.begin(gStaNetSsid.c_str(), gStaNetPassword.c_str());
+
+  gStaAttemptStartMs = millis();
+  gStaOnlinePhase = StaOnlinePhase::kConnecting;
+}
+
 static uint8_t modeToIndex(AppLoopMode mode) {
   switch (mode) {
     case APP_MODE_AP_STA:
@@ -1116,16 +1225,15 @@ void processAppLoop() {
     }
   }
 
-  int csvTotal = csv.size();
-  if (csvTotal > kCsvArrayCapacity) {
-    csvTotal = kCsvArrayCapacity;
-  }
-  if (csvTotal <= 0) {
-    return;
-  }
-
   if(gAppLoopMode == APP_MODE_AP_STA)
   {
+    int csvTotal = csv.size();
+    if (csvTotal > kCsvArrayCapacity) {
+      csvTotal = kCsvArrayCapacity;
+    }
+    if (csvTotal <= 0) {
+      return;
+    }
     if (RUNSTATE == 0) {
       generateUniqueRandomNumbers(1, csv.size(), csvTotal, csvArray);
       csvCount = 0;
@@ -1188,37 +1296,82 @@ void processAppLoop() {
   else if(gAppLoopMode == APP_MODE_STA_ONLINE)
   {
     uint8_t key = 255;
-    if (syntheticKeyPress) 
+    if (syntheticKeyPress)
     {
       key = 2;
       syntheticKeyPress = false;
-    } 
-    else 
+    }
+    else
     {
       Key_loop();
       key = get_Keycode();
     }
-    if (key == 3) 
+
+    // Long press always switches mode, including while connecting.
+    if (key == 3)
     {
       switchAppMode(APP_MODE_STA_ONLY);
       return;
     }
-    
+
+    switch (gStaOnlinePhase) {
+      case StaOnlinePhase::kPromptWaitShort:
+        if (key == 2) {
+          beginStaConnectAttempt();
+        }
+        return;
+
+      case StaOnlinePhase::kConnecting: {
+        const wl_status_t status = WiFi.status();
+        if (status == WL_CONNECTED) {
+          gStaOnlinePhase = StaOnlinePhase::kConnected;
+          String okMsg = kStaConnectOkPrefix;
+          okMsg += gStaNetSsid;
+          playStaMessage(okMsg);
+          return;
+        }
+
+        const uint32_t elapsed = millis() - gStaAttemptStartMs;
+        if (elapsed < kStaAttemptTimeoutMs) {
+          return;
+        }
+
+        gStaRetryCount++;
+        if (gStaRetryCount >= kStaMaxRetryCount) {
+          gStaOnlinePhase = StaOnlinePhase::kFailWaitShort;
+          playStaMessage(kStaConnectFailMsg);
+          return;
+        }
+
+        beginStaConnectAttempt();
+        return;
+      }
+
+      case StaOnlinePhase::kFailWaitShort:
+        if (key == 2) {
+          switchAppMode(APP_MODE_STA_ONLY);
+        }
+        return;
+
+      case StaOnlinePhase::kConnected:
+        // TODO: [later] online HTTP message flow.
+        return;
+    }
   }
   else if(gAppLoopMode == APP_MODE_STA_ONLY)
   {
     uint8_t key = 255;
-    if (syntheticKeyPress) 
+    if (syntheticKeyPress)
     {
       key = 2;
       syntheticKeyPress = false;
-    } 
-    else 
+    }
+    else
     {
       Key_loop();
       key = get_Keycode();
     }
-    if (key == 3) 
+    if (key == 3)
     {
       switchAppMode(APP_MODE_AP_STA);
       return;
@@ -1229,37 +1382,42 @@ void processAppLoop() {
     switchAppMode(APP_MODE_AP_STA);
   }
 }
+
 void onApStaInit(AppLoopMode mode)
 {
-
+  (void)mode;
+  gStaOnlinePhase = StaOnlinePhase::kPromptWaitShort;
+  gStaRetryCount = 0;
+  gStaAttemptStartMs = 0;
+  gStaNetSsid = "";
+  gStaNetPassword = "";
+  WiFi.disconnect(true, false);
+  WiFi.mode(WIFI_OFF);
 }
+
 void onStaOnlineInit(AppLoopMode mode)
 {
-  String localMessage ="模式:STA联网模式|短按以开始连接WiFi";
-  
-  message = localMessage.c_str();
-  playMessageWithGlitch(message);
-  uint8_t key = 255;
-  while (1)
-  {
-    Key_loop();
-    key = get_Keycode();
-    
-    if (key == 3) 
-    {
-      switchAppMode(APP_MODE_STA_ONLY);
-      return;
-    }
-    if ()
-    {
-      /* code */
-    }
-    
-    delay(20);
+  (void)mode;
+  gStaRetryCount = 0;
+  gStaAttemptStartMs = 0;
+  gStaOnlinePhase = StaOnlinePhase::kPromptWaitShort;
+
+  const bool loaded = loadStaCredentialsFromSettingIni(gStaNetSsid, gStaNetPassword);
+  if (!loaded) {
+    Serial.println("[STA] NetSSID missing in /setting.ini");
+  } else {
+    Serial.printf("[STA] target ssid: %s\\n", gStaNetSsid.c_str());
   }
-  
+
+  playStaMessage(kStaPromptMsg);
 }
+
 void onStaOnlyInit(AppLoopMode mode)
 {
-
+  (void)mode;
+  gStaOnlinePhase = StaOnlinePhase::kPromptWaitShort;
+  gStaRetryCount = 0;
+  gStaAttemptStartMs = 0;
+  WiFi.disconnect(true, false);
+  WiFi.mode(WIFI_OFF);
 }
