@@ -4,6 +4,7 @@
 #include "AppGlobals.h"
 #include "UsbAppMode.h"
 #include "WirelessPortal.h"
+#include "Ds1302Rtc.h"
 
 void setup() {
   Serial.begin(115200);
@@ -20,6 +21,7 @@ void setup() {
   msc.onWrite(onWrite);
   msc.onStartStop(onStartStop);
   msc.mediaPresent(false);
+  rtc.begin();
 
   if (!openRawBackend()) {
     Serial.println("[BOOT] raw FAT backend failed");
@@ -55,9 +57,15 @@ void setup() {
     }
   }
   usbHostActivePrev = usbHostActive;
+
+  setAppModeInitCallback(APP_MODE_AP_STA,onApStaInit);
+  setAppModeInitCallback(APP_MODE_STA_ONLINE,onStaOnlineInit);
+  setAppModeInitCallback(APP_MODE_STA_ONLY,onStaOnlyInit);
 }
 
-void loop() {
+void loop() 
+{
+  //检测USB模式
   if (usbHostActive != usbHostActivePrev) {
     if (usbHostActive) {
       Serial.println("[AUTO] USB plugged -> USB mode");
@@ -71,7 +79,7 @@ void loop() {
     }
     usbHostActivePrev = usbHostActive;
   }
-
+  //真正的mainLoop
   if (!usbModeActive && appInitialized) {
     processAppLoop();
   }

@@ -13,7 +13,6 @@
 #include "WirelessPortal.h"
 #include "Index_B.h"
 #include "Key_Drv.h"
-
 namespace {
 
 constexpr uint8_t kBacklightDutyOff = 0;
@@ -768,12 +767,63 @@ static void showWebInterruptImage(const uint16_t *pixels,
   }
 }
 
-enum WirelessMode
-{
-  AP_STA,
-  STA_Online,
-  STA_Only
-}Wireless_MODE;
+static AppLoopMode gAppLoopMode = APP_MODE_AP_STA;
+static AppModeEnterCallback gAppModeEnterCallback = nullptr;
+static AppModeEnterCallback gAppModeInitCallbacks[3] = {nullptr, nullptr, nullptr};
+static bool gAppModeEnterPending = true;
+
+static uint8_t modeToIndex(AppLoopMode mode) {
+  switch (mode) {
+    case APP_MODE_AP_STA:
+      return 0;
+    case APP_MODE_STA_ONLINE:
+      return 1;
+    case APP_MODE_STA_ONLY:
+      return 2;
+    default:
+      return 0;
+  }
+}
+
+static void switchAppMode(AppLoopMode mode) {
+  if (gAppLoopMode == mode) return;
+  gAppLoopMode = mode;
+  gAppModeEnterPending = true;
+}
+
+static void dispatchModeEnterIfNeeded() {
+  if (!gAppModeEnterPending) return;
+  gAppModeEnterPending = false;
+  AppModeEnterCallback callback = gAppModeInitCallbacks[modeToIndex(gAppLoopMode)];
+  if (!callback) {
+    callback = gAppModeEnterCallback;  // Fallback generic callback.
+  }
+  if (callback) {
+    callback(gAppLoopMode);
+  }
+}
+
+void setAppModeEnterCallback(AppModeEnterCallback callback) {
+  gAppModeEnterCallback = callback;
+  if (callback) {
+    // Ensure current mode triggers once after callback registration.
+    gAppModeEnterPending = true;
+  }
+}
+
+void setAppModeInitCallback(AppLoopMode mode, AppModeEnterCallback callback) {
+  gAppModeInitCallbacks[modeToIndex(mode)] = callback;
+  if (callback && mode == gAppLoopMode) {
+    // Ensure current mode triggers once after per-mode callback registration.
+    gAppModeEnterPending = true;
+  }
+}
+
+AppLoopMode getAppLoopMode() {
+  return gAppLoopMode;
+}
+
+
 void processAppLoop() {
   struct InterruptController {
     bool webActive = false;
@@ -799,6 +849,7 @@ void processAppLoop() {
   static InterruptController irq;
   bool syntheticKeyPress = false;
   const bool instantRefreshNoKey = wirelessPortalInstantRefreshNoKeyEnabled();
+  dispatchModeEnterIfNeeded();
 
   auto preemptByHost = [&]() {
     if (irq.imageActive) {
@@ -1073,7 +1124,7 @@ void processAppLoop() {
     return;
   }
 
-  if(Wireless_MODE == AP_STA)
+  if(gAppLoopMode == APP_MODE_AP_STA)
   {
     if (RUNSTATE == 0) {
       generateUniqueRandomNumbers(1, csv.size(), csvTotal, csvArray);
@@ -1095,7 +1146,7 @@ void processAppLoop() {
       }
       if (key == 3) 
       {
-        Wireless_MODE = STA_Online;
+        switchAppMode(APP_MODE_STA_ONLINE);
         return;
       }
       if (key == 2 && wakeBacklightByKeyIfNeeded()) 
@@ -1134,19 +1185,81 @@ void processAppLoop() {
       }
     }
   }
-  else if(Wireless_MODE == STA_Online)
+  else if(gAppLoopMode == APP_MODE_STA_ONLINE)
   {
-
-    
-    
+    uint8_t key = 255;
+    if (syntheticKeyPress) 
+    {
+      key = 2;
+      syntheticKeyPress = false;
+    } 
+    else 
+    {
+      Key_loop();
+      key = get_Keycode();
+    }
+    if (key == 3) 
+    {
+      switchAppMode(APP_MODE_STA_ONLY);
+      return;
+    }
     
   }
-  else if(Wireless_MODE == STA_Only)
+  else if(gAppLoopMode == APP_MODE_STA_ONLY)
   {
-
+    uint8_t key = 255;
+    if (syntheticKeyPress) 
+    {
+      key = 2;
+      syntheticKeyPress = false;
+    } 
+    else 
+    {
+      Key_loop();
+      key = get_Keycode();
+    }
+    if (key == 3) 
+    {
+      switchAppMode(APP_MODE_AP_STA);
+      return;
+    }
   }
   else
   {
-    Wireless_MODE == AP_STA;
+    switchAppMode(APP_MODE_AP_STA);
   }
+}
+void onApStaInit(AppLoopMode mode)
+{
+
+}
+void onStaOnlineInit(AppLoopMode mode)
+{
+  String localMessage ="模式:STA联网模式|短按以开始连接WiFi";
+  
+  message = localMessage.c_str();
+  playMessageWithGlitch(message);
+  uint8_t key = 255;
+  while (1)
+  {
+    Key_loop();
+    key = get_Keycode();
+    
+    if (key == 3) 
+    {
+      switchAppMode(APP_MODE_STA_ONLY);
+      return;
+    }
+    if ()
+    {
+      /* code */
+    }
+    
+    delay(20);
+  }
+  
+}
+void onStaOnlyInit(AppLoopMode mode)
+{
+
 }
