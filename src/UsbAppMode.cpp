@@ -1,4 +1,4 @@
-#include <Arduino.h>
+﻿#include <Arduino.h>
 #include <FS.h>
 #include <LittleFS.h>
 #include <FFat.h>
@@ -789,6 +789,7 @@ enum class StaOnlinePhase : uint8_t {
   kConnecting = 1,
   kFailWaitShort = 2,
   kConnected = 3,
+  kDisconnectedWaitShort = 4,
 };
 
 static StaOnlinePhase gStaOnlinePhase = StaOnlinePhase::kPromptWaitShort;
@@ -812,6 +813,8 @@ static constexpr const char *kStaConnectFailMsg =
     u8"WIFI\u8FDE\u63A5\u5931\u8D25\uFF1A\u77ED\u6309\u5207\u6362\u6A21\u5F0F";
 static constexpr const char *kStaCloudQueueEmptyMsg =
     u8"正在连接都市神经网络...";
+static constexpr const char *kStaDisconnectedMsg =
+    u8"WIFI已断开，按键重新连接";
 static constexpr const char *kStaCloudApiUrl = "http://115.190.145.254:8080/random";
 static constexpr size_t kStaPrefetchDepth = 20;
 static constexpr uint32_t kStaQueueEmptyHintCooldownMs = 1800UL;
@@ -1691,6 +1694,16 @@ void processAppLoop() {
         return;
 
       case StaOnlinePhase::kConnected:
+        if (WiFi.status() != WL_CONNECTED) {
+          gStaOnlinePhase = StaOnlinePhase::kDisconnectedWaitShort;
+          gStaRetryCount = 0;
+          gStaAttemptStartMs = 0;
+          gStaLastQueueEmptyHintMs = 0;
+          gStaNextFetchAllowedMs = 0;
+          clearStaMessageQueue();
+          playStaMessage(kStaDisconnectedMsg);
+          return;
+        }
         if (key == 2) {
           String nextMessage;
           if (!popStaMessageQueue(nextMessage)) {
@@ -1706,6 +1719,12 @@ void processAppLoop() {
           playStaMessage(nextMessage);
           // Refill is handled by background fetch task.
           return;
+        }
+        return;
+
+      case StaOnlinePhase::kDisconnectedWaitShort:
+        if (key == 2) {
+          beginStaConnectAttempt();
         }
         return;
     }
