@@ -2033,6 +2033,54 @@ bool wirelessPortalStart() {
   return true;
 }
 
+bool wirelessPortalStartEspNowOnly() {
+  if (gPortalStarted) return true;
+
+  if (!gImageMutex) {
+    gImageMutex = xSemaphoreCreateMutex();
+    if (!gImageMutex) {
+      Serial.println("[ESPNOW] image mutex create failed");
+      return false;
+    }
+  }
+
+  if (xSemaphoreTake(gImageMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+    resetImageUploadStateLocked();
+    gPendingImage.ready = false;
+    xSemaphoreGive(gImageMutex);
+  }
+
+  loadApCredentialsFromSettingIni();
+  gEnableAp = false;
+  gEnableEspNow = true;
+
+  if (!gHostMessageQueue) {
+    gHostMessageQueue = xQueueCreate(kQueueDepth, sizeof(WebQueuedMessage));
+    if (!gHostMessageQueue) {
+      Serial.println("[ESPNOW] host queue create failed");
+      return false;
+    }
+  }
+
+  WiFi.mode(WIFI_STA);
+  delay(10);
+  if (!forceStaChannel(gApChannel)) {
+    WiFi.mode(WIFI_OFF);
+    return false;
+  }
+
+  if (!initEspNowReceiver()) {
+    WiFi.mode(WIFI_OFF);
+    return false;
+  }
+
+  gPortalStarted = true;
+  Serial.printf("[ESPNOW] STA-only receiver started CH=%d HostMAC=%s\n",
+                WiFi.channel(),
+                gHostMacFilterEnabled ? gHostMacFilterText : "<ANY>");
+  return true;
+}
+
 void wirelessPortalStop() {
   if (!gPortalStarted) return;
 

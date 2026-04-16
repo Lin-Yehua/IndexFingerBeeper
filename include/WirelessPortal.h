@@ -3,6 +3,7 @@
 #include <Arduino.h>
 
 bool wirelessPortalStart();
+bool wirelessPortalStartEspNowOnly();
 void wirelessPortalStop();
 bool wirelessPortalPopMessage(String &outMessage);
 bool wirelessPortalHasPendingMessage();

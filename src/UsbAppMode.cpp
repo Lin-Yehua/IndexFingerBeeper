@@ -10,6 +10,7 @@
 #include <ctype.h>
 #include "esp_system.h"
 #include "esp_heap_caps.h"
+#include "esp_sleep.h"
 #include "AppGlobals.h"
 #include "UsbAppMode.h"
 #include "DisplayEffects.h"
@@ -23,6 +24,7 @@ constexpr uint32_t kBacklightDimToOffMs = 20000UL;
 constexpr uint32_t kBacklightTaskTickMs = 100UL;
 constexpr uint32_t kBootAnimPollMs = 10UL;
 constexpr uint32_t kBootAnimMaxWaitMs = 12000UL;
+constexpr uint32_t kStaOnlySleepAfterOffMs = 60000UL;
 
 enum BacklightState : uint8_t {
   kBacklightBright = 0,
@@ -91,6 +93,39 @@ bool wakeBacklightByKeyIfNeeded() {
     applyBacklightState(kBacklightBright);
   }
   return wakeOnly;
+}
+
+bool staOnlySleepTimeoutReached() {
+  int backlightTimeSec = -1;
+  uint32_t lastActivity = 0;
+  BacklightState stateNow = kBacklightBright;
+  portENTER_CRITICAL(&gBacklightMux);
+  backlightTimeSec = gBacklightTimeSec;
+  lastActivity = gBacklightLastActivityMs;
+  stateNow = gBacklightState;
+  portEXIT_CRITICAL(&gBacklightMux);
+
+  if (stateNow != kBacklightOff || backlightTimeSec < 0) return false;
+
+  const uint32_t dimMs = static_cast<uint32_t>(backlightTimeSec) * 1000UL;
+  const uint32_t offAtMs = lastActivity + dimMs + kBacklightDimToOffMs;
+  const uint32_t nowMs = millis();
+  return (nowMs - offAtMs) >= kStaOnlySleepAfterOffMs;
+}
+
+[[noreturn]] void enterStaOnlyDeepSleep() {
+  Serial.println("[STA_ONLY] backlight off for 60s, entering deep sleep");
+  mixer.stopBG();
+  mixer.stopInsert();
+  wirelessPortalStop();
+  WiFi.mode(WIFI_OFF);
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+  esp_sleep_enable_ext0_wakeup(GPIO_NUM_2, 0);  // Key pin LOW wakes the device.
+  delay(20);
+  esp_deep_sleep_start();
+  while (true) {
+    delay(1000);
+  }
 }
 
 void backlightTask(void *param) {
@@ -1447,19 +1482,28 @@ void processAppLoop() {
     }
   }
 
-  const bool allowWebInterrupts =
+  const bool allowHostInterrupts =
       (gAppLoopMode == APP_MODE_AP_STA) ||
+      (gAppLoopMode == APP_MODE_STA_ONLY) ||
       (gAppLoopMode == APP_MODE_STA_ONLINE &&
        gStaOnlinePhase == StaOnlinePhase::kConnected);
 
-  if (allowWebInterrupts) {
+  if (allowHostInterrupts) {
     String hostBroadcastMessage;
     if (wirelessPortalPopHostMessage(hostBroadcastMessage)) {
       preemptByHost();
       playMessageWithGlitch(hostBroadcastMessage.c_str());
       return;
     }
+  }
 
+  //网页来源中断（网页常规|网页立即|网页图片）门控：只有在AP模式或者STA已连接模式启用
+  const bool allowWebInterrupts =
+      (gAppLoopMode == APP_MODE_AP_STA) ||
+      (gAppLoopMode == APP_MODE_STA_ONLINE &&
+       gStaOnlinePhase == StaOnlinePhase::kConnected);
+
+  if (allowWebInterrupts) {
     String immediateMessage;
     if (wirelessPortalPopImmediateMessage(immediateMessage)) {
       startImmediateInterrupt();
@@ -1748,6 +1792,19 @@ void processAppLoop() {
   }
   else if(gAppLoopMode == APP_MODE_STA_ONLY)
   {
+    int csvTotal = csv.size();
+    if (csvTotal > kCsvArrayCapacity) {
+      csvTotal = kCsvArrayCapacity;
+    }
+    if (csvTotal <= 0) {
+      return;
+    }
+    if (RUNSTATE == 0) {
+      generateUniqueRandomNumbers(1, csv.size(), csvTotal, csvArray);
+      csvCount = 0;
+      RUNSTATE = 1;
+    }
+
     uint8_t key = 255;
     if (syntheticKeyPress)
     {
@@ -1763,10 +1820,43 @@ void processAppLoop() {
     {
       return;
     }
+
     if (key == 3)
     {
       switchAppMode(APP_MODE_AP_STA);
       return;
+    }
+
+    if (staOnlySleepTimeoutReached()) {
+      enterStaOnlyDeepSleep();
+    }
+
+    if (key == 2 || firstFlag)
+    {
+      if (firstFlag)
+      {
+        firstFlag = false;
+      }
+      if (csvCount >= csvTotal)
+      {
+        generateUniqueRandomNumbers(1, csv.size(), csvTotal, csvArray);
+        csvCount = 0;
+        RUNSTATE = 1;
+      }
+
+      const int currentCsvId = csvArray[csvCount];
+      csvCount++;
+
+      String localMessage;
+      const char *csvMessage = csv.getTextById(currentCsvId);
+      if (csvMessage) {
+        localMessage = csvMessage;
+      } else {
+        localMessage = "CSV id not found: ";
+        localMessage += String(currentCsvId);
+      }
+      message = localMessage.c_str();
+      playMessageWithGlitch(message);
     }
   }
   else
@@ -1847,6 +1937,8 @@ void onStaOnlyInit(AppLoopMode mode)
   gStaFetchInProgress = false;
   clearStaMessageQueue();
   WiFi.disconnect(true, false);
-  WiFi.mode(WIFI_OFF);
+  if (!wirelessPortalStartEspNowOnly()) {
+    Serial.println("[STA_ONLY] wirelessPortalStartEspNowOnly failed");
+  }
   playStaOnlyMessage(kStaonlyPromptMsg);
 }
