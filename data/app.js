@@ -5,9 +5,14 @@ const st = {
   schedules: [],
   imageFile: null,
   imageBuf: null,
-  volTimer: null
+  volTimer: null,
+  cmdPage: 1,
+  schedulePage: 1,
+  cmdCollapsed: {},
+  scheduleCollapsed: {}
 };
 const LS = { hist: "bb_msg_history", pfxOn: "bb_prefix_on", pfxText: "bb_prefix_text" };
+const PAGE_SIZE = 10;
 
 const el = {
   tabMsg: $("tabMsg"), tabImg: $("tabImg"), panelMsg: $("panelMsg"), panelImg: $("panelImg"),
@@ -15,12 +20,12 @@ const el = {
   msgPrefixEnable: $("msgPrefixEnable"), msgPrefix: $("msgPrefix"), btnSendMsg: $("btnSendMsg"),
   btnClearMsg: $("btnClearMsg"), msgStatus: $("msgStatus"),
   portalUrl: $("portalUrl"), btnCopyPortalUrl: $("btnCopyPortalUrl"), imgFile: $("imgFile"),
-  imgOffsetY: $("imgOffsetY"), imgPreview: $("imgPreview"), imgFitMode: $("imgFitMode"),
+  imgOffsetY: $("imgOffsetY"), imgOffsetYInput: $("imgOffsetYInput"), imgPreview: $("imgPreview"), imgFitMode: $("imgFitMode"),
   imgCenterX: $("imgCenterX"), imgCenterY: $("imgCenterY"), imgWidth: $("imgWidth"), imgHeight: $("imgHeight"),
   btnSendImg: $("btnSendImg"), btnClearImg: $("btnClearImg"), imgStatus: $("imgStatus"),
-  cmdList: $("cmdList"), cmdAddInput: $("cmdAddInput"), btnCmdAdd: $("btnCmdAdd"), btnCmdSave: $("btnCmdSave"), cmdStatus: $("cmdStatus"),
+  cmdList: $("cmdList"), cmdPager: $("cmdPager"), cmdAddInput: $("cmdAddInput"), btnCmdAdd: $("btnCmdAdd"), btnCmdSave: $("btnCmdSave"), btnCmdFoldAll: $("btnCmdFoldAll"), btnCmdExpandAll: $("btnCmdExpandAll"), cmdStatus: $("cmdStatus"),
   rtcNow: $("rtcNow"), rtcYear: $("rtcYear"), rtcMonth: $("rtcMonth"), rtcDay: $("rtcDay"), rtcHour: $("rtcHour"), rtcMinute: $("rtcMinute"), rtcSecond: $("rtcSecond"), btnRtcSet: $("btnRtcSet"), btnRtcSyncPhone: $("btnRtcSyncPhone"), rtcStatus: $("rtcStatus"),
-  scheduleDate: $("scheduleDate"), scheduleList: $("scheduleList"), scheduleAddTime: $("scheduleAddTime"), scheduleAddRepeat: $("scheduleAddRepeat"), scheduleAddText: $("scheduleAddText"), btnScheduleAdd: $("btnScheduleAdd"), btnScheduleSave: $("btnScheduleSave"), scheduleStatus: $("scheduleStatus"),
+  scheduleDate: $("scheduleDate"), scheduleList: $("scheduleList"), schedulePager: $("schedulePager"), scheduleAddTime: $("scheduleAddTime"), scheduleAddRepeat: $("scheduleAddRepeat"), scheduleAddText: $("scheduleAddText"), btnScheduleAdd: $("btnScheduleAdd"), btnScheduleSave: $("btnScheduleSave"), scheduleStatus: $("scheduleStatus"),
   bgVol: $("bgVol"), insertVol: $("insertVol"), bgVolVal: $("bgVolVal"), insertVolVal: $("insertVolVal"), backlight: $("backlight"), backlightTime: $("backlightTime"), backlightCloseTime: $("backlightCloseTime"), btnSaveDisplay: $("btnSaveDisplay"), displayStatus: $("displayStatus"),
   apSsid: $("apSsid"), apPassword: $("apPassword"), apChannel: $("apChannel"), btnSaveAp: $("btnSaveAp"),
   staSsid: $("staSsid"), staPassword: $("staPassword"), staNet: $("staNet"), btnSaveSta: $("btnSaveSta"),
@@ -33,6 +38,109 @@ const toInt = (v, d = 0) => { const n = parseInt(String(v ?? "").trim(), 10); re
 const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
 const setStatus = (node, text, err = false) => { if (!node) return; node.textContent = text || ""; node.classList.toggle("error", !!err); node.classList.toggle("ok", !err && !!text); };
 const autoGrow = (ta) => { if (!ta) return; ta.style.height = "auto"; ta.style.height = `${ta.scrollHeight + 2}px`; };
+const lineCount = (s) => Math.max(1, String(s || "").split(/\r?\n/).length);
+const fitTextarea = (ta, minRows = 2) => {
+  if (!ta) return;
+  ta.rows = Math.max(minRows, lineCount(ta.value));
+  if (ta.offsetParent !== null) autoGrow(ta);
+  else ta.style.height = "";
+};
+const cmdPreview = (s) => {
+  const t = String(s || "").replace(/\s+/g, " ").trim();
+  if (!t) return "";
+  return `${t.slice(0, 8)}....`;
+};
+const isCmdCollapsed = (idx) => st.cmdCollapsed[idx] !== false;
+const setCmdCollapsedAll = (collapsed) => {
+  for (let i = 0; i < st.commands.length; i += 1) st.cmdCollapsed[i] = !!collapsed;
+  renderCmdList();
+};
+const setImgOffsetY = (v) => {
+  const oy = clamp(toInt(v, 0), -200, 200);
+  if (el.imgOffsetY) el.imgOffsetY.value = String(oy);
+  if (el.imgOffsetYInput) el.imgOffsetYInput.value = String(oy);
+  return oy;
+};
+
+function renderPager(container, page, totalPages, onPage) {
+  if (!container) return;
+  container.innerHTML = "";
+  if (totalPages <= 1) {
+    container.classList.add("empty");
+    return;
+  }
+  container.classList.remove("empty");
+  const prev = document.createElement("button");
+  prev.type = "button";
+  prev.className = "ghost";
+  prev.textContent = "上一页";
+  prev.disabled = page <= 1;
+  prev.addEventListener("click", () => { if (page > 1) onPage(page - 1); });
+
+  const info = document.createElement("span");
+  info.className = "page-info";
+  info.textContent = `第 ${page} / ${totalPages} 页`;
+
+  const next = document.createElement("button");
+  next.type = "button";
+  next.className = "ghost";
+  next.textContent = "下一页";
+  next.disabled = page >= totalPages;
+  next.addEventListener("click", () => { if (page < totalPages) onPage(page + 1); });
+
+  container.append(prev, info, next);
+}
+
+function reindexCmdCollapsedAfterDelete(deletedIdx) {
+  const next = {};
+  Object.keys(st.cmdCollapsed).forEach((k) => {
+    const idx = toInt(k, -1);
+    if (idx < 0 || idx === deletedIdx) return;
+    next[idx > deletedIdx ? idx - 1 : idx] = !!st.cmdCollapsed[k];
+  });
+  st.cmdCollapsed = next;
+}
+
+function firstDirectTitle(block) {
+  for (const child of Array.from(block.children || [])) {
+    if (child.tagName === "H2" || child.tagName === "H3") return child;
+  }
+  return null;
+}
+
+function initCollapsibleCards() {
+  document.querySelectorAll(".card, .sub-card").forEach((block) => {
+    if (!block || block.dataset.foldReady === "1") return;
+    const title = firstDirectTitle(block);
+    if (!title) return;
+    block.dataset.foldReady = "1";
+
+    const head = document.createElement("div");
+    head.className = "fold-head";
+    title.parentNode.insertBefore(head, title);
+    head.appendChild(title);
+
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "fold-btn ghost";
+    head.appendChild(btn);
+
+    const body = document.createElement("div");
+    body.className = "fold-body";
+    while (head.nextSibling) {
+      body.appendChild(head.nextSibling);
+    }
+    block.appendChild(body);
+    if (block.classList.contains("card")) block.classList.add("is-folded");
+
+    const sync = () => { btn.textContent = block.classList.contains("is-folded") ? "展开" : "收起"; };
+    btn.addEventListener("click", () => {
+      block.classList.toggle("is-folded");
+      sync();
+    });
+    sync();
+  });
+}
 
 async function fetchJsonSafe(url, label) {
   const r = await fetch(url);
@@ -154,8 +262,11 @@ function to565(imgData) {
 async function prepImage() {
   if (!st.imageFile) { st.imageBuf = null; clearPreview(); return; }
   try {
-    const w = clamp(toInt(el.imgWidth.value, 320), 1, 320), h = clamp(toInt(el.imgHeight.value, 140), 1, 240), oy = clamp(toInt(el.imgOffsetY.value, 0), -200, 200);
-    const img = await fileToImage(st.imageFile); const fit = el.imgFitMode.value; el.imgPreview.width = w; el.imgPreview.height = h;
+    const w = clamp(toInt(el.imgWidth.value, 320), 1, 320), h = clamp(toInt(el.imgHeight.value, 140), 1, 240);
+    const fit = el.imgFitMode.value;
+    let oy = setImgOffsetY(el.imgOffsetY ? el.imgOffsetY.value : 0);
+    if (fit === "center" && oy !== 0) oy = setImgOffsetY(0);
+    const img = await fileToImage(st.imageFile); el.imgPreview.width = w; el.imgPreview.height = h;
     const ctx = el.imgPreview.getContext("2d", { willReadFrequently: true }); ctx.fillStyle = "#000"; ctx.fillRect(0, 0, w, h);
     if (fit === "center") { const sc = Math.min(w / img.width, h / img.height, 1); const dw = img.width * sc, dh = img.height * sc; ctx.drawImage(img, (w - dw) / 2, (h - dh) / 2 + oy, dw, dh); }
     else { const sc = Math.max(w / img.width, h / img.height); const dw = img.width * sc, dh = img.height * sc; let dy = (h - dh) / 2 + oy; dy = Math.max(h - dh, Math.min(0, dy)); ctx.drawImage(img, (w - dw) / 2, dy, dw, dh); }
@@ -183,18 +294,72 @@ function cmdToLine(text, id) { return `${id},"${String(text || "").replace(/\r?\
 
 function renderCmdList() {
   el.cmdList.innerHTML = "";
-  if (!st.commands.length) { const p = document.createElement("p"); p.className = "status"; p.textContent = "指令库为空"; el.cmdList.appendChild(p); return; }
-  st.commands.forEach((txt, idx) => {
+  if (!st.commands.length) {
+    const p = document.createElement("p");
+    p.className = "status";
+    p.textContent = "指令库为空";
+    el.cmdList.appendChild(p);
+    renderPager(el.cmdPager, 1, 1, () => {});
+    return;
+  }
+  const totalPages = Math.max(1, Math.ceil(st.commands.length / PAGE_SIZE));
+  st.cmdPage = clamp(st.cmdPage, 1, totalPages);
+  const start = (st.cmdPage - 1) * PAGE_SIZE;
+  const end = Math.min(start + PAGE_SIZE, st.commands.length);
+
+  for (let idx = start; idx < end; idx += 1) {
+    const txt = st.commands[idx];
     const wrap = document.createElement("div"); wrap.className = "list-item";
     const head = document.createElement("div"); head.className = "item-head";
+    const meta = document.createElement("div"); meta.className = "item-meta";
     const n = document.createElement("div"); n.textContent = `#${idx + 1}`;
+    const pv = document.createElement("span"); pv.className = "item-preview";
+    const actions = document.createElement("div"); actions.className = "item-actions";
+    const tg = document.createElement("button"); tg.className = "item-toggle ghost"; tg.type = "button";
     const del = document.createElement("button"); del.className = "del"; del.type = "button"; del.textContent = "-";
-    del.addEventListener("click", () => { st.commands.splice(idx, 1); renderCmdList(); });
-    head.append(n, del);
-    const ta = document.createElement("textarea"); ta.rows = 2; ta.value = txt; autoGrow(ta);
-    ta.addEventListener("input", () => { st.commands[idx] = ta.value; autoGrow(ta); });
-    ta.addEventListener("blur", () => { if (!String(ta.value || "").trim()) { st.commands.splice(idx, 1); renderCmdList(); } });
-    wrap.append(head, ta); el.cmdList.appendChild(wrap);
+    del.addEventListener("click", () => {
+      st.commands.splice(idx, 1);
+      reindexCmdCollapsedAfterDelete(idx);
+      const nextPages = Math.max(1, Math.ceil(st.commands.length / PAGE_SIZE));
+      st.cmdPage = clamp(st.cmdPage, 1, nextPages);
+      renderCmdList();
+    });
+    actions.append(tg, del);
+    meta.append(n, pv);
+    head.append(meta, actions);
+
+    const body = document.createElement("div"); body.className = "item-body";
+    const ta = document.createElement("textarea"); ta.rows = Math.max(2, lineCount(txt)); ta.value = txt; fitTextarea(ta, 2);
+    ta.addEventListener("input", () => { st.commands[idx] = ta.value; fitTextarea(ta, 2); pv.textContent = cmdPreview(st.commands[idx]); });
+    ta.addEventListener("blur", () => {
+      if (!String(ta.value || "").trim()) {
+        st.commands.splice(idx, 1);
+        reindexCmdCollapsedAfterDelete(idx);
+        const nextPages = Math.max(1, Math.ceil(st.commands.length / PAGE_SIZE));
+        st.cmdPage = clamp(st.cmdPage, 1, nextPages);
+        renderCmdList();
+      }
+    });
+    body.appendChild(ta);
+    wrap.append(head, body);
+
+    const syncFold = () => {
+      const folded = isCmdCollapsed(idx);
+      wrap.classList.toggle("item-folded", folded);
+      tg.textContent = folded ? "展开" : "收起";
+      pv.textContent = cmdPreview(st.commands[idx]);
+      if (!folded) fitTextarea(ta, 2);
+    };
+    tg.addEventListener("click", () => {
+      st.cmdCollapsed[idx] = !isCmdCollapsed(idx);
+      syncFold();
+    });
+    syncFold();
+    el.cmdList.appendChild(wrap);
+  }
+  renderPager(el.cmdPager, st.cmdPage, totalPages, (nextPage) => {
+    st.cmdPage = nextPage;
+    renderCmdList();
   });
 }
 
@@ -202,6 +367,8 @@ async function loadCommands() {
   try {
     const r = await fetch("/api/csv"); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`);
     st.commands = raw.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith("#")).map(parseCmdLine).filter((x) => typeof x === "string" && x.trim());
+    st.cmdPage = 1;
+    st.cmdCollapsed = {};
     renderCmdList(); setStatus(el.cmdStatus, "指令库已加载");
   } catch (e) { setStatus(el.cmdStatus, `加载失败: ${e.message}`, true); }
 }
@@ -295,16 +462,38 @@ function renderSchedules() {
   el.scheduleList.innerHTML = "";
   const day = pickDay();
   const shown = st.schedules.filter((it) => schMatch(it, day)).sort((a, b) => (a.h - b.h) || (a.i - b.i));
-  if (!shown.length) { const p = document.createElement("p"); p.className = "status"; p.textContent = "当日无日程"; el.scheduleList.appendChild(p); return; }
+  if (!shown.length) {
+    const p = document.createElement("p");
+    p.className = "status";
+    p.textContent = "当日无日程";
+    el.scheduleList.appendChild(p);
+    renderPager(el.schedulePager, 1, 1, () => {});
+    return;
+  }
+  const totalPages = Math.max(1, Math.ceil(shown.length / PAGE_SIZE));
+  st.schedulePage = clamp(st.schedulePage, 1, totalPages);
+  const start = (st.schedulePage - 1) * PAGE_SIZE;
+  const pageItems = shown.slice(start, start + PAGE_SIZE);
 
-  shown.forEach((it) => {
+  pageItems.forEach((it) => {
     const wrap = document.createElement("div"); wrap.className = "list-item"; if (schPast(it, day)) wrap.classList.add("is-past");
     const head = document.createElement("div"); head.className = "item-head";
+    const left = document.createElement("div"); left.className = "item-left";
     const lab = document.createElement("div"); lab.className = "item-repeat"; lab.textContent = schPrefix(it);
+    const timePreview = document.createElement("span"); timePreview.className = "item-preview item-time-preview"; timePreview.textContent = schTime(it);
+    const actions = document.createElement("div"); actions.className = "item-actions";
+    const tg = document.createElement("button"); tg.className = "item-toggle ghost"; tg.type = "button";
     const del = document.createElement("button"); del.className = "del"; del.type = "button"; del.textContent = "-";
-    del.addEventListener("click", () => { st.schedules = st.schedules.filter((x) => x.id !== it.id); renderSchedules(); });
-    head.append(lab, del);
+    del.addEventListener("click", () => {
+      st.schedules = st.schedules.filter((x) => x.id !== it.id);
+      delete st.scheduleCollapsed[it.id];
+      renderSchedules();
+    });
+    actions.append(tg, del);
+    left.append(lab, timePreview);
+    head.append(left, actions);
 
+    const body = document.createElement("div"); body.className = "item-body";
     const row = document.createElement("div"); row.className = "item-row";
     const ti = document.createElement("input"); ti.type = "time"; ti.value = schTime(it);
     ti.addEventListener("change", () => { const [h, m] = ti.value.split(":").map((v) => toInt(v, 0)); it.h = clamp(h, 0, 23); it.i = clamp(m, 0, 59); renderSchedules(); });
@@ -317,14 +506,36 @@ function renderSchedules() {
     const tx = document.createElement("textarea"); tx.rows = 2; tx.placeholder = "内容（可选）"; tx.value = it.text || ""; autoGrow(tx);
     tx.addEventListener("input", () => { it.text = tx.value.replace(/\r?\n+/g, " ").trim(); autoGrow(tx); });
 
-    row.append(ti, rp, tx); wrap.append(head, row); el.scheduleList.appendChild(wrap);
+    row.append(ti, rp, tx);
+    body.appendChild(row);
+    wrap.append(head, body);
+    const syncFold = () => {
+      const folded = !!st.scheduleCollapsed[it.id];
+      wrap.classList.toggle("item-folded", folded);
+      tg.textContent = folded ? "展开" : "收起";
+      timePreview.textContent = schTime(it);
+    };
+    tg.addEventListener("click", () => {
+      st.scheduleCollapsed[it.id] = !st.scheduleCollapsed[it.id];
+      syncFold();
+    });
+    syncFold();
+    el.scheduleList.appendChild(wrap);
+  });
+  renderPager(el.schedulePager, st.schedulePage, totalPages, (nextPage) => {
+    st.schedulePage = nextPage;
+    renderSchedules();
   });
 }
 
 async function loadSchedules() {
   try {
     const r = await fetch("/api/schedule"); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`);
-    st.schedules = parseSchedules(raw); renderSchedules(); setStatus(el.scheduleStatus, "日程表已加载");
+    st.schedules = parseSchedules(raw);
+    st.schedulePage = 1;
+    st.scheduleCollapsed = {};
+    renderSchedules();
+    setStatus(el.scheduleStatus, "日程表已加载");
   } catch (e) { setStatus(el.scheduleStatus, `加载失败: ${e.message}`, true); }
 }
 
@@ -340,7 +551,7 @@ async function saveSchedules() {
 function addSchedule() {
   const d = pickDay(); const [h, m] = (el.scheduleAddTime.value || "09:00").split(":").map((x) => toInt(x, 0));
   const it = { id: `sc_${Date.now()}_${Math.random().toString(16).slice(2, 6)}`, Y: d.getFullYear(), M: d.getMonth() + 1, D: d.getDate(), h: clamp(h, 0, 23), i: clamp(m, 0, 59), week: weekMon(d), d: false, m: false, w: false, y: false, text: String(el.scheduleAddText.value || "").replace(/\r?\n+/g, " ").trim() };
-  setSchRepeat(it, el.scheduleAddRepeat.value, d); st.schedules.push(it); el.scheduleAddText.value = ""; renderSchedules(); setStatus(el.scheduleStatus, "已添加（记得保存）");
+  setSchRepeat(it, el.scheduleAddRepeat.value, d); st.schedules.push(it); el.scheduleAddText.value = ""; st.schedulePage = 1; renderSchedules(); setStatus(el.scheduleStatus, "已添加（记得保存）");
 }
 
 function rtcPayload() {
@@ -507,14 +718,40 @@ function bind() {
 
   el.btnCopyPortalUrl.addEventListener("click", async () => setStatus(el.imgStatus, (await copyText(el.portalUrl.value || portalRoot())) ? "地址已复制" : "复制失败", false));
   el.imgFile.addEventListener("change", async (ev) => { st.imageFile = ev.target.files && ev.target.files[0] ? ev.target.files[0] : null; await prepImage(); });
-  [el.imgOffsetY, el.imgFitMode, el.imgWidth, el.imgHeight].forEach((x) => { x.addEventListener("input", prepImage); x.addEventListener("change", prepImage); });
+  if (el.imgOffsetY) {
+    el.imgOffsetY.addEventListener("input", () => { setImgOffsetY(el.imgOffsetY.value); prepImage(); });
+    el.imgOffsetY.addEventListener("change", () => { setImgOffsetY(el.imgOffsetY.value); prepImage(); });
+  }
+  if (el.imgOffsetYInput) {
+    el.imgOffsetYInput.addEventListener("input", () => { setImgOffsetY(el.imgOffsetYInput.value); prepImage(); });
+    el.imgOffsetYInput.addEventListener("change", () => { setImgOffsetY(el.imgOffsetYInput.value); prepImage(); });
+  }
+  if (el.imgFitMode) {
+    el.imgFitMode.addEventListener("change", () => {
+      if (el.imgFitMode.value === "center") setImgOffsetY(0);
+      prepImage();
+    });
+  }
+  [el.imgWidth, el.imgHeight].forEach((x) => { x.addEventListener("input", prepImage); x.addEventListener("change", prepImage); });
   el.btnSendImg.addEventListener("click", sendImage);
   el.btnClearImg.addEventListener("click", () => { st.imageFile = null; st.imageBuf = null; el.imgFile.value = ""; clearPreview(); setStatus(el.imgStatus, "已清除图片"); });
 
-  el.btnCmdAdd.addEventListener("click", () => { const t = String(el.cmdAddInput.value || "").trim(); if (!t) return; st.commands.push(t); el.cmdAddInput.value = ""; renderCmdList(); setStatus(el.cmdStatus, "已添加（记得保存）"); });
+  el.btnCmdAdd.addEventListener("click", () => {
+    const t = String(el.cmdAddInput.value || "").trim();
+    if (!t) return;
+    const nextIdx = st.commands.length;
+    st.commands.push(t);
+    st.cmdCollapsed[nextIdx] = true;
+    st.cmdPage = Math.max(1, Math.ceil(st.commands.length / PAGE_SIZE));
+    el.cmdAddInput.value = "";
+    renderCmdList();
+    setStatus(el.cmdStatus, "已添加（记得保存）");
+  });
   el.btnCmdSave.addEventListener("click", saveCommands);
+  if (el.btnCmdFoldAll) el.btnCmdFoldAll.addEventListener("click", () => setCmdCollapsedAll(true));
+  if (el.btnCmdExpandAll) el.btnCmdExpandAll.addEventListener("click", () => setCmdCollapsedAll(false));
 
-  el.scheduleDate.addEventListener("change", renderSchedules); el.btnScheduleAdd.addEventListener("click", addSchedule); el.btnScheduleSave.addEventListener("click", saveSchedules);
+  el.scheduleDate.addEventListener("change", () => { st.schedulePage = 1; renderSchedules(); }); el.btnScheduleAdd.addEventListener("click", addSchedule); el.btnScheduleSave.addEventListener("click", saveSchedules);
   el.btnRtcSet.addEventListener("click", rtcSet); el.btnRtcSyncPhone.addEventListener("click", rtcSyncPhone);
 
   el.insertVol.addEventListener("input", () => { setVolUi(el.insertVol.value, el.bgVol.value); if (st.volTimer) clearTimeout(st.volTimer); st.volTimer = setTimeout(async () => { st.volTimer = null; try { const d = await pushVol(false); setVolUi(d.insertVolume, d.bgVolume); } catch (_) {} }, 120); });
@@ -539,8 +776,9 @@ function bind() {
 }
 
 async function boot() {
-  switchPush("msg"); bind(); loadMsgLocal();
+  switchPush("msg"); bind(); initCollapsibleCards(); loadMsgLocal();
   el.portalUrl.value = portalRoot();
+  setImgOffsetY(0);
   const n = new Date(); el.scheduleDate.value = `${n.getFullYear()}-${pad2(n.getMonth() + 1)}-${pad2(n.getDate())}`;
   clearPreview();
   await Promise.all([loadCommands(), loadSchedules(), loadRtc(), loadDisplayAudio(), loadWireless(), loadBattery()]);

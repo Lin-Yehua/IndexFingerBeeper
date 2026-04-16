@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
@@ -66,6 +66,7 @@
                 <option value="center">中心</option>
               </select>
             </label>
+            <label>图片Y偏移<input id="imgOffsetYInput" type="number" min="-200" max="200" step="1" value="0"></label>
             <label>显示中心X<input id="imgCenterX" type="number" value="160"></label>
             <label>显示中心Y<input id="imgCenterY" type="number" value="155"></label>
             <label>显示尺寸W<input id="imgWidth" type="number" min="1" max="320" value="320"></label>
@@ -83,7 +84,15 @@
 
     <section class="card">
       <h2>编辑指令库</h2>
-      <div id="cmdList" class="list"></div>
+      <div class="sub-card">
+        <h3>指令陈列（可翻页）</h3>
+        <div class="btn-row compact-row">
+          <button id="btnCmdFoldAll" class="ghost" type="button">全部收起</button>
+          <button id="btnCmdExpandAll" class="ghost" type="button">全部展开</button>
+        </div>
+        <div id="cmdList" class="list"></div>
+        <div id="cmdPager" class="pager"></div>
+      </div>
       <div class="sub-card">
         <h3>添加指令</h3>
         <textarea id="cmdAddInput" rows="2" placeholder="输入新增指令"></textarea>
@@ -121,6 +130,7 @@
         <label class="label" for="scheduleDate">选择日期</label>
         <input id="scheduleDate" type="date">
         <div id="scheduleList" class="list"></div>
+        <div id="schedulePager" class="pager"></div>
       </div>
 
       <div class="sub-card">
