@@ -2950,12 +2950,19 @@ void processAppLoop() {
   auto finishImmediateInterrupt = [&]() {
     irq.immediateActive = false;
     irq.immediateKeyLatch = false;
-    if (irq.immediatePreemptedWeb) {
+    const bool canResumeWeb = irq.immediatePreemptedWeb && wirelessPortalHasPendingMessage();
+    if (canResumeWeb) {
       irq.webActive = true;
       irq.webKeyLatch = false;
       Serial.println("[WEB] immediate interrupt resume web");
     } else {
-      Serial.println("[WEB] immediate interrupt finished");
+      if (irq.immediatePreemptedWeb) {
+        irq.webActive = false;
+        irq.webKeyLatch = false;
+        Serial.println("[WEB] immediate interrupt finished (no pending web message)");
+      } else {
+        Serial.println("[WEB] immediate interrupt finished");
+      }
     }
     // Pass-through the same physical keypress so immediate close does not require a second press.
     syntheticKeyPress = true;
