@@ -284,6 +284,12 @@ function schPast(it, day) {
   if (d0 < t0) return true; if (d0 > t0) return false;
   return (it.h * 60 + it.i) < (n.getHours() * 60 + n.getMinutes());
 }
+function isScheduleEditorBusy() {
+  const a = document.activeElement;
+  if (!a) return false;
+  if (a === el.scheduleDate || a === el.scheduleAddTime || a === el.scheduleAddRepeat || a === el.scheduleAddText) return true;
+  return !!(el.scheduleList && el.scheduleList.contains(a));
+}
 function renderSchedules() {
   el.scheduleList.innerHTML = "";
   const day = pickDay();
@@ -357,7 +363,9 @@ async function loadRtc() {
     if (!d.ok) throw new Error("RTC读取失败");
     el.rtcNow.textContent = rtcText(d);
     rtcFill(d);
-    renderSchedules();
+    if (!isScheduleEditorBusy()) {
+      renderSchedules();
+    }
   }
   catch (e) { setStatus(el.rtcStatus, `RTC读取失败: ${e.message}`, true); }
 }
