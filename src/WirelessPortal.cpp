@@ -148,6 +148,7 @@ char gHostMacFilterText[18] = {0};
 bool gInstantRefreshNoKey = false;
 volatile bool gWebTaskRunning = false;
 volatile bool gCsvReloadRequested = false;
+volatile bool gScheduleReloadRequested = false;
 bool gPortalStarted = false;
 PendingImageFrame gPendingImage;
 ImageUploadState gImageUpload;
@@ -1061,11 +1062,26 @@ void setCsvReloadRequested() {
   portEXIT_CRITICAL(&gFlagMux);
 }
 
+void setScheduleReloadRequested() {
+  portENTER_CRITICAL(&gFlagMux);
+  gScheduleReloadRequested = true;
+  portEXIT_CRITICAL(&gFlagMux);
+}
+
 bool takeCsvReloadRequested() {
   bool value = false;
   portENTER_CRITICAL(&gFlagMux);
   value = gCsvReloadRequested;
   gCsvReloadRequested = false;
+  portEXIT_CRITICAL(&gFlagMux);
+  return value;
+}
+
+bool takeScheduleReloadRequested() {
+  bool value = false;
+  portENTER_CRITICAL(&gFlagMux);
+  value = gScheduleReloadRequested;
+  gScheduleReloadRequested = false;
   portEXIT_CRITICAL(&gFlagMux);
   return value;
 }
@@ -1105,7 +1121,9 @@ bool saveScheduleCsvText(const String &content) {
   if (!f) return false;
   const size_t written = f.print(content);
   f.close();
-  return written == content.length();
+  if (written != content.length()) return false;
+  setScheduleReloadRequested();
+  return true;
 }
 
 void loadStaConfigFromSettingIni(String &outSsid, String &outPassword, String &outNet) {
@@ -2602,6 +2620,7 @@ void wirelessPortalStop() {
 
   portENTER_CRITICAL(&gFlagMux);
   gCsvReloadRequested = false;
+  gScheduleReloadRequested = false;
   portEXIT_CRITICAL(&gFlagMux);
 
   gPortalStarted = false;
@@ -2689,6 +2708,10 @@ bool wirelessPortalPushHostMessageForRestore(const String &text) {
 
 bool wirelessPortalConsumeCsvReloadRequest() {
   return takeCsvReloadRequested();
+}
+
+bool wirelessPortalConsumeScheduleReloadRequest() {
+  return takeScheduleReloadRequested();
 }
 
 bool wirelessPortalInstantRefreshNoKeyEnabled() {

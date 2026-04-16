@@ -15,6 +15,7 @@ bool wirelessPortalPushMessageForRestore(const String &text);
 bool wirelessPortalPushImmediateMessageForRestore(const String &text);
 bool wirelessPortalPushHostMessageForRestore(const String &text);
 bool wirelessPortalConsumeCsvReloadRequest();
+bool wirelessPortalConsumeScheduleReloadRequest();
 bool wirelessPortalInstantRefreshNoKeyEnabled();
 bool wirelessPortalTakePendingImage(uint16_t *outPixels,
                                     size_t outCapacityPixels,

@@ -243,27 +243,27 @@ function setSchRepeat(it, type, day) {
   if (type === "none") { it.Y = day.getFullYear(); it.M = day.getMonth() + 1; it.D = day.getDate(); }
 }
 function schPrefix(it) { if (it.d) return "日重复"; if (it.w) return "周重复"; if (it.m) return "月重复"; if (it.y) return "年重复"; return "不重复"; }
-function schTime(it) { return `${pad2(it.h)}:${pad2(it.i)}:${pad2(it.s)}`; }
+function schTime(it) { return `${pad2(it.h)}:${pad2(it.i)}`; }
 
 function parseSchedules(text) {
   const out = [];
   text.split(/\r?\n/).forEach((raw, idx) => {
     const line = raw.trim(); if (!line || line.startsWith("#") || line.startsWith(";")) return;
     const c = splitSchedule(line); if (!c) return;
-    const Y = toInt(c[0], -1), M = toInt(c[1], -1), D = toInt(c[2], -1), h = toInt(c[3], 0), i = toInt(c[4], 0), s = toInt(c[5], 0);
-    if (Y < 2000 || Y > 2099 || M < 1 || M > 12 || D < 1 || D > 31 || h < 0 || h > 23 || i < 0 || i > 59 || s < 0 || s > 59) return;
+    const Y = toInt(c[0], -1), M = toInt(c[1], -1), D = toInt(c[2], -1), h = toInt(c[3], 0), i = toInt(c[4], 0);
+    if (Y < 2000 || Y > 2099 || M < 1 || M > 12 || D < 1 || D > 31 || h < 0 || h > 23 || i < 0 || i > 59) return;
     const dt = new Date(Y, M - 1, D);
     const wkRaw = toInt(c[6], 0);
     const wk = (wkRaw >= 1 && wkRaw <= 7) ? wkRaw : weekMon(dt);
-    out.push({ id: `sc_${Date.now()}_${idx}_${Math.random().toString(16).slice(2, 6)}`, Y, M, D, h, i, s, week: wk, d: toInt(c[7], 0) !== 0, m: toInt(c[8], 0) !== 0, w: toInt(c[9], 0) !== 0, y: toInt(c[10], 0) !== 0, text: parseScheduleMessageCell(c[11] || "") });
+    out.push({ id: `sc_${Date.now()}_${idx}_${Math.random().toString(16).slice(2, 6)}`, Y, M, D, h, i, week: wk, d: toInt(c[7], 0) !== 0, m: toInt(c[8], 0) !== 0, w: toInt(c[9], 0) !== 0, y: toInt(c[10], 0) !== 0, text: parseScheduleMessageCell(c[11] || "") });
   });
   return out;
 }
 
 function schedulesToCsv(list) {
   const lines = ["#YEAR,MOUTH,DAY,HOUR,MIN,SEC,WEEK,IsDayRange,IsMouthRange,IsWeekRange,IsYearRange,ScheduleMessage"];
-  [...list].sort((a, b) => (a.Y - b.Y) || (a.M - b.M) || (a.D - b.D) || (a.h - b.h) || (a.i - b.i) || (a.s - b.s)).forEach((it) => {
-    const line = `${it.Y},${it.M},${it.D},${it.h},${it.i},${it.s},${it.week},${it.d ? 1 : 0},${it.m ? 1 : 0},${it.w ? 1 : 0},${it.y ? 1 : 0},${encodeScheduleMessageCell(it.text)}`;
+  [...list].sort((a, b) => (a.Y - b.Y) || (a.M - b.M) || (a.D - b.D) || (a.h - b.h) || (a.i - b.i)).forEach((it) => {
+    const line = `${it.Y},${it.M},${it.D},${it.h},${it.i},0,${it.week},${it.d ? 1 : 0},${it.m ? 1 : 0},${it.w ? 1 : 0},${it.y ? 1 : 0},${encodeScheduleMessageCell(it.text)}`;
     lines.push(line);
   });
   return `${lines.join("\n")}\n`;
@@ -282,12 +282,12 @@ function schMatch(it, day) {
 function schPast(it, day) {
   const n = new Date(); const t0 = new Date(n.getFullYear(), n.getMonth(), n.getDate()); const d0 = new Date(day.getFullYear(), day.getMonth(), day.getDate());
   if (d0 < t0) return true; if (d0 > t0) return false;
-  return (it.h * 3600 + it.i * 60 + it.s) < (n.getHours() * 3600 + n.getMinutes() * 60 + n.getSeconds());
+  return (it.h * 60 + it.i) < (n.getHours() * 60 + n.getMinutes());
 }
 function renderSchedules() {
   el.scheduleList.innerHTML = "";
   const day = pickDay();
-  const shown = st.schedules.filter((it) => schMatch(it, day)).sort((a, b) => (a.h - b.h) || (a.i - b.i) || (a.s - b.s));
+  const shown = st.schedules.filter((it) => schMatch(it, day)).sort((a, b) => (a.h - b.h) || (a.i - b.i));
   if (!shown.length) { const p = document.createElement("p"); p.className = "status"; p.textContent = "当日无日程"; el.scheduleList.appendChild(p); return; }
 
   shown.forEach((it) => {
@@ -299,8 +299,8 @@ function renderSchedules() {
     head.append(lab, del);
 
     const row = document.createElement("div"); row.className = "item-row";
-    const ti = document.createElement("input"); ti.type = "time"; ti.step = "1"; ti.value = schTime(it);
-    ti.addEventListener("change", () => { const [h, m, s] = ti.value.split(":").map((v) => toInt(v, 0)); it.h = clamp(h, 0, 23); it.i = clamp(m, 0, 59); it.s = clamp(s, 0, 59); renderSchedules(); });
+    const ti = document.createElement("input"); ti.type = "time"; ti.value = schTime(it);
+    ti.addEventListener("change", () => { const [h, m] = ti.value.split(":").map((v) => toInt(v, 0)); it.h = clamp(h, 0, 23); it.i = clamp(m, 0, 59); renderSchedules(); });
 
     const rp = document.createElement("select");
     [["none", "不重复"], ["daily", "每日重复"], ["weekly", "每周重复"], ["monthly", "每月重复"], ["yearly", "每年重复"]].forEach(([v, t]) => { const o = document.createElement("option"); o.value = v; o.textContent = t; rp.appendChild(o); });
@@ -331,8 +331,8 @@ async function saveSchedules() {
 }
 
 function addSchedule() {
-  const d = pickDay(); const [h, m, s] = (el.scheduleAddTime.value || "09:00:00").split(":").map((x) => toInt(x, 0));
-  const it = { id: `sc_${Date.now()}_${Math.random().toString(16).slice(2, 6)}`, Y: d.getFullYear(), M: d.getMonth() + 1, D: d.getDate(), h: clamp(h, 0, 23), i: clamp(m, 0, 59), s: clamp(s, 0, 59), week: weekMon(d), d: false, m: false, w: false, y: false, text: String(el.scheduleAddText.value || "").replace(/\r?\n+/g, " ").trim() };
+  const d = pickDay(); const [h, m] = (el.scheduleAddTime.value || "09:00").split(":").map((x) => toInt(x, 0));
+  const it = { id: `sc_${Date.now()}_${Math.random().toString(16).slice(2, 6)}`, Y: d.getFullYear(), M: d.getMonth() + 1, D: d.getDate(), h: clamp(h, 0, 23), i: clamp(m, 0, 59), week: weekMon(d), d: false, m: false, w: false, y: false, text: String(el.scheduleAddText.value || "").replace(/\r?\n+/g, " ").trim() };
   setSchRepeat(it, el.scheduleAddRepeat.value, d); st.schedules.push(it); el.scheduleAddText.value = ""; renderSchedules(); setStatus(el.scheduleStatus, "已添加（记得保存）");
 }
 
@@ -350,16 +350,44 @@ function rtcFill(d) { el.rtcYear.value = d.year; el.rtcMonth.value = d.month; el
 function rtcText(d) { return `当前RTC: ${d.year}-${pad2(d.month)}-${pad2(d.day)} ${pad2(d.hour)}:${pad2(d.minute)}:${pad2(d.second)} (W${d.week})`; }
 
 async function loadRtc() {
-  try { const r = await fetch("/api/rtc"); const d = await r.json(); if (!r.ok) throw new Error(`HTTP ${r.status}`); if (!d.ok) throw new Error("RTC读取失败"); el.rtcNow.textContent = rtcText(d); rtcFill(d); }
+  try {
+    const r = await fetch("/api/rtc");
+    const d = await r.json();
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (!d.ok) throw new Error("RTC读取失败");
+    el.rtcNow.textContent = rtcText(d);
+    rtcFill(d);
+    renderSchedules();
+  }
   catch (e) { setStatus(el.rtcStatus, `RTC读取失败: ${e.message}`, true); }
 }
 async function rtcSet() {
-  try { const r = await fetch("/api/rtc/set", { method: "POST", body: rtcPayload() }); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`); const d = JSON.parse(raw); if (!d.ok) throw new Error("写后读失败"); el.rtcNow.textContent = rtcText(d); rtcFill(d); setStatus(el.rtcStatus, "RTC设置成功"); }
+  try {
+    const r = await fetch("/api/rtc/set", { method: "POST", body: rtcPayload() });
+    const raw = await r.text();
+    if (!r.ok) throw new Error(raw || `HTTP ${r.status}`);
+    const d = JSON.parse(raw);
+    if (!d.ok) throw new Error("写后读失败");
+    el.rtcNow.textContent = rtcText(d);
+    rtcFill(d);
+    renderSchedules();
+    setStatus(el.rtcStatus, "RTC设置成功");
+  }
   catch (e) { setStatus(el.rtcStatus, `RTC设置失败: ${e.message}`, true); }
 }
 async function rtcSyncPhone() {
   const n = new Date(); el.rtcYear.value = n.getFullYear(); el.rtcMonth.value = n.getMonth() + 1; el.rtcDay.value = n.getDate(); el.rtcHour.value = n.getHours(); el.rtcMinute.value = n.getMinutes(); el.rtcSecond.value = n.getSeconds();
-  try { const r = await fetch("/api/rtc/sync-phone", { method: "POST", body: rtcPayload() }); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`); const d = JSON.parse(raw); if (!d.ok) throw new Error("写后读失败"); el.rtcNow.textContent = rtcText(d); rtcFill(d); setStatus(el.rtcStatus, "已同步手机时间"); }
+  try {
+    const r = await fetch("/api/rtc/sync-phone", { method: "POST", body: rtcPayload() });
+    const raw = await r.text();
+    if (!r.ok) throw new Error(raw || `HTTP ${r.status}`);
+    const d = JSON.parse(raw);
+    if (!d.ok) throw new Error("写后读失败");
+    el.rtcNow.textContent = rtcText(d);
+    rtcFill(d);
+    renderSchedules();
+    setStatus(el.rtcStatus, "已同步手机时间");
+  }
   catch (e) { setStatus(el.rtcStatus, `同步失败: ${e.message}`, true); }
 }
 

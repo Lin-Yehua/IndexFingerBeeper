@@ -28,6 +28,7 @@ static bool pushStaMessageQueue(const String &message);
 static bool loadStaCredentialsFromSettingIni(String &outSsid, String &outPassword, String &outNet);
 static void ensureStaFetcherTaskStarted();
 static void beginStaConnectAttempt();
+static bool refreshTodayReminderSlotsFromRtc(bool forceReload, bool markPastTriggered);
 static bool parseAppModeFromIniValue(String value, AppLoopMode &outMode);
 static const char *appModeToIniValue(AppLoopMode mode);
 static bool loadAppModeFromSettingIni(AppLoopMode &outMode);
@@ -50,11 +51,12 @@ constexpr gpio_num_t kWakeKeyGpio = GPIO_NUM_2;
 constexpr uint32_t kRtcWakeDefaultSec = 60U;
 constexpr uint32_t kRtcWakeMaxSec = 30U * 60U;
 constexpr uint32_t kRtcMismatchToleranceSec = 2U;
-constexpr uint32_t kReminderTriggerWindowSec = 2U;
+constexpr uint32_t kReminderTriggerWindowSec = 59U;
 constexpr size_t kSleepTextMaxLen = 240;
 constexpr size_t kSleepPortalQueueMax = 128;
 constexpr size_t kSleepStaQueueMax = 20;
 constexpr size_t kMaxReminderTimes = 128;
+constexpr size_t kScheduleInterruptQueueMax = 16;
 constexpr char kSleepSnapshotPath[] = "/sleep_state.bin";
 constexpr const char *kDefaultReminderMessage = u8"这个时候你似乎有什么事要干";
 constexpr uint32_t kSleepFileMagic = 0x53534E50UL;      // "SSNP"
@@ -110,6 +112,25 @@ bool gSimheiFontPreloaded = false;
 bool gSettingsPreloadedAtBoot = false;
 char gLastDisplayedText[kSleepTextMaxLen + 1] = {0};
 
+struct ScheduleInterruptQueueItem {
+  char text[kSleepTextMaxLen + 1] = {0};
+};
+
+struct DailyReminderSlot {
+  uint8_t hour = 0;
+  uint8_t minute = 0;
+  uint16_t order = 0;
+  bool triggered = false;
+};
+
+ScheduleInterruptQueueItem gScheduleInterruptQueue[kScheduleInterruptQueueMax];
+size_t gScheduleInterruptHead = 0;
+size_t gScheduleInterruptCount = 0;
+DailyReminderSlot gTodayReminderSlots[kMaxReminderTimes];
+size_t gTodayReminderCount = 0;
+uint32_t gTodayReminderDateKey = 0;
+uint16_t gTodayReminderLastCheckedMinute = 0xFFFFU;
+
 void sanitizeMessageForSnapshot(const String &in, char out[kSleepTextMaxLen + 1]) {
   if (!out) return;
   String normalized = in;
@@ -127,6 +148,51 @@ void rememberLastDisplayedText(const char *text) {
   if (!text) return;
   String normalized = text;
   sanitizeMessageForSnapshot(normalized, gLastDisplayedText);
+}
+
+void clearScheduleInterruptQueue() {
+  gScheduleInterruptHead = 0;
+  gScheduleInterruptCount = 0;
+  for (size_t i = 0; i < kScheduleInterruptQueueMax; ++i) {
+    gScheduleInterruptQueue[i].text[0] = '\0';
+  }
+}
+
+bool enqueueScheduleInterruptMessage(const String &rawText) {
+  String normalized = rawText;
+  normalized.replace("\r", " ");
+  normalized.replace("\n", " ");
+  normalized.trim();
+  if (!normalized.length()) {
+    normalized = kDefaultReminderMessage;
+  }
+  if (normalized.length() > kSleepTextMaxLen) {
+    normalized.remove(kSleepTextMaxLen);
+  }
+
+  if (gScheduleInterruptCount >= kScheduleInterruptQueueMax) {
+    gScheduleInterruptHead = (gScheduleInterruptHead + 1) % kScheduleInterruptQueueMax;
+    gScheduleInterruptCount--;
+  }
+
+  const size_t writeIdx = (gScheduleInterruptHead + gScheduleInterruptCount) % kScheduleInterruptQueueMax;
+  normalized.toCharArray(gScheduleInterruptQueue[writeIdx].text,
+                         sizeof(gScheduleInterruptQueue[writeIdx].text));
+  gScheduleInterruptQueue[writeIdx].text[kSleepTextMaxLen] = '\0';
+  gScheduleInterruptCount++;
+  return true;
+}
+
+bool popScheduleInterruptMessage(String &outText) {
+  outText = "";
+  if (gScheduleInterruptCount == 0) return false;
+  const size_t readIdx = gScheduleInterruptHead;
+  outText = String(gScheduleInterruptQueue[readIdx].text);
+  gScheduleInterruptQueue[readIdx].text[0] = '\0';
+  gScheduleInterruptHead = (gScheduleInterruptHead + 1) % kScheduleInterruptQueueMax;
+  gScheduleInterruptCount--;
+  outText.trim();
+  return outText.length() > 0;
 }
 
 bool writeExact(fs::File &f, const void *data, size_t len) {
@@ -764,6 +830,7 @@ bool initProjectResources() {
   digitalWrite(42, HIGH);
 
   Key_init();
+  clearScheduleInterruptQueue();
 
   if (!LittleFS.begin(false, "/littlefs", 10, kLittleFsPartitionLabel)) {
     Serial.println("[APP] LittleFS mount failed, trying format...");
@@ -809,6 +876,7 @@ bool initProjectResources() {
     Serial.println("[APP] /data.csv load failed from FAT");
     return false;
   }
+  (void)refreshTodayReminderSlotsFromRtc(true, true);
 
   Text.createSprite(320, 120);
   Text.fillSprite(TFT_BLACK);
@@ -1069,6 +1137,7 @@ bool readRtcUnix(uint64_t &outUnix) {
 
 struct ReminderSchedule {
   struct Entry {
+    uint16_t sourceIndex = 0;
     uint16_t year = 2000;
     uint8_t month = 1;
     uint8_t day = 1;
@@ -1080,12 +1149,16 @@ struct ReminderSchedule {
     bool repeatMonth = false;
     bool repeatWeek = false;
     bool repeatYear = false;
-    char message[kSleepTextMaxLen + 1] = {0};
   };
 
   Entry entries[kMaxReminderTimes];
   size_t count = 0;
 };
+
+ReminderSchedule &scheduleScratchBuffer() {
+  static ReminderSchedule schedule;
+  return schedule;
+}
 
 bool isLeapYearLocal(uint16_t year) {
   if ((year % 4U) != 0U) return false;
@@ -1171,11 +1244,16 @@ String decodeScheduleMessageValue(String value) {
   return value;
 }
 
-bool parseScheduleCsvLine(const String &lineRaw, ReminderSchedule::Entry &outEntry) {
+bool parseScheduleCsvLine(const String &lineRaw,
+                          ReminderSchedule::Entry &outEntry,
+                          String *outMessage) {
   String line = lineRaw;
   line.trim();
   if (!line.length()) return false;
   if (line.startsWith("#") || line.startsWith(";")) return false;
+  if (outMessage) {
+    *outMessage = "";
+  }
 
   String cols[12];
   size_t colCount = 0;
@@ -1234,7 +1312,7 @@ bool parseScheduleCsvLine(const String &lineRaw, ReminderSchedule::Entry &outEnt
   outEntry.day = base.day;
   outEntry.hour = base.hour;
   outEntry.minute = base.minute;
-  outEntry.second = base.second;
+  outEntry.second = 0;  // Minute precision: ignore second field from CSV.
   outEntry.week = (week == 0)
                       ? weekdayMondayOneFromCivil(outEntry.year, outEntry.month, outEntry.day)
                       : static_cast<uint8_t>(week);
@@ -1243,14 +1321,32 @@ bool parseScheduleCsvLine(const String &lineRaw, ReminderSchedule::Entry &outEnt
   outEntry.repeatWeek = (repeatWeek != 0);
   outEntry.repeatYear = (repeatYear != 0);
 
-  if (colCount > 11) {
-    const String decoded = decodeScheduleMessageValue(cols[11]);
-    sanitizeMessageForSnapshot(decoded, outEntry.message);
-  } else {
-    sanitizeMessageForSnapshot(String(kDefaultReminderMessage), outEntry.message);
+  if (outMessage) {
+    String decoded = (colCount > 11) ? decodeScheduleMessageValue(cols[11]) : String();
+    if (!decoded.length()) {
+      decoded = kDefaultReminderMessage;
+    }
+    *outMessage = decoded;
   }
-  if (!outEntry.message[0]) {
-    sanitizeMessageForSnapshot(String(kDefaultReminderMessage), outEntry.message);
+  return true;
+}
+
+bool openScheduleCsvRead(fs::File &outFile, bool &outMountedTemp) {
+  outMountedTemp = false;
+  if (!fatMounted) {
+    if (!mountFat()) {
+      return false;
+    }
+    outMountedTemp = true;
+  }
+
+  outFile = FFat.open("/schedule.csv", FILE_READ);
+  if (!outFile) {
+    if (outMountedTemp) {
+      unmountFat();
+      outMountedTemp = false;
+    }
+    return false;
   }
   return true;
 }
@@ -1258,26 +1354,15 @@ bool parseScheduleCsvLine(const String &lineRaw, ReminderSchedule::Entry &outEnt
 bool loadReminderSchedule(ReminderSchedule &outSchedule) {
   outSchedule.count = 0;
 
+  fs::File f;
   bool mountedTemp = false;
-  if (!fatMounted) {
-    if (!mountFat()) {
-      return false;
-    }
-    mountedTemp = true;
-  }
-
-  fs::File f = FFat.open("/schedule.csv", FILE_READ);
-  if (!f) {
-    if (mountedTemp) {
-      unmountFat();
-    }
-    return false;
-  }
+  if (!openScheduleCsvRead(f, mountedTemp)) return false;
 
   while (f.available() && outSchedule.count < kMaxReminderTimes) {
     const String line = f.readStringUntil('\n');
     ReminderSchedule::Entry entry;
-    if (parseScheduleCsvLine(line, entry)) {
+    if (parseScheduleCsvLine(line, entry, nullptr)) {
+      entry.sourceIndex = static_cast<uint16_t>(outSchedule.count);
       outSchedule.entries[outSchedule.count++] = entry;
     }
   }
@@ -1288,6 +1373,215 @@ bool loadReminderSchedule(ReminderSchedule &outSchedule) {
   }
 
   return outSchedule.count > 0;
+}
+
+uint32_t dateKeyFromDateTime(const Ds1302DateTime &dt) {
+  return static_cast<uint32_t>(dt.year) * 10000U +
+         static_cast<uint32_t>(dt.month) * 100U +
+         static_cast<uint32_t>(dt.day);
+}
+
+bool reminderEntryMatchesToday(const ReminderSchedule::Entry &entry,
+                               const Ds1302DateTime &today,
+                               uint8_t todayWeek) {
+  const bool anyRepeat = entry.repeatDay || entry.repeatMonth || entry.repeatWeek || entry.repeatYear;
+  if (!anyRepeat) {
+    return entry.year == today.year &&
+           entry.month == today.month &&
+           entry.day == today.day;
+  }
+  if (entry.repeatDay) return true;
+  if (entry.repeatWeek && entry.week == todayWeek) return true;
+  if (entry.repeatMonth && entry.day == today.day) return true;
+  if (entry.repeatYear && entry.month == today.month && entry.day == today.day) return true;
+  return false;
+}
+
+bool loadReminderMessageBySourceIndex(uint16_t sourceIndex, String &outMessage) {
+  outMessage = "";
+  fs::File f;
+  bool mountedTemp = false;
+  if (!openScheduleCsvRead(f, mountedTemp)) return false;
+
+  uint16_t currentIndex = 0;
+  while (f.available()) {
+    const String line = f.readStringUntil('\n');
+    ReminderSchedule::Entry entry;
+    String message;
+    if (!parseScheduleCsvLine(line, entry, &message)) continue;
+
+    if (currentIndex == sourceIndex) {
+      f.close();
+      if (mountedTemp) {
+        unmountFat();
+      }
+      message.trim();
+      if (!message.length()) {
+        message = kDefaultReminderMessage;
+      }
+      outMessage = message;
+      return true;
+    }
+    ++currentIndex;
+  }
+
+  f.close();
+  if (mountedTemp) {
+    unmountFat();
+  }
+  return false;
+}
+
+bool loadReminderMessageByDateMinute(const Ds1302DateTime &today,
+                                     uint8_t hour,
+                                     uint8_t minute,
+                                     String &outMessage) {
+  outMessage = "";
+  fs::File f;
+  bool mountedTemp = false;
+  if (!openScheduleCsvRead(f, mountedTemp)) return false;
+
+  const uint8_t todayWeek = weekdayMondayOneFromCivil(today.year, today.month, today.day);
+  while (f.available()) {
+    const String line = f.readStringUntil('\n');
+    ReminderSchedule::Entry entry;
+    String message;
+    if (!parseScheduleCsvLine(line, entry, &message)) continue;
+    if (!reminderEntryMatchesToday(entry, today, todayWeek)) continue;
+    if (entry.hour != hour || entry.minute != minute) continue;
+
+    f.close();
+    if (mountedTemp) {
+      unmountFat();
+    }
+    message.trim();
+    if (!message.length()) {
+      message = kDefaultReminderMessage;
+    }
+    outMessage = message;
+    return true;
+  }
+
+  f.close();
+  if (mountedTemp) {
+    unmountFat();
+  }
+  return false;
+}
+
+void refreshTodayReminderSlots(const Ds1302DateTime &nowDt, bool markPastTriggered) {
+  ReminderSchedule &schedule = scheduleScratchBuffer();
+  const bool loaded = loadReminderSchedule(schedule);
+  gTodayReminderCount = 0;
+  gTodayReminderDateKey = dateKeyFromDateTime(nowDt);
+  gTodayReminderLastCheckedMinute = 0xFFFFU;
+
+  if (!loaded) {
+    Serial.printf("[SCHEDULE] today slot refresh: no schedule (%04u-%02u-%02u)\n",
+                  static_cast<unsigned int>(nowDt.year),
+                  static_cast<unsigned int>(nowDt.month),
+                  static_cast<unsigned int>(nowDt.day));
+    return;
+  }
+
+  const uint8_t todayWeek = weekdayMondayOneFromCivil(nowDt.year, nowDt.month, nowDt.day);
+  for (size_t i = 0; i < schedule.count && gTodayReminderCount < kMaxReminderTimes; ++i) {
+    const ReminderSchedule::Entry &entry = schedule.entries[i];
+    if (!reminderEntryMatchesToday(entry, nowDt, todayWeek)) continue;
+    DailyReminderSlot &slot = gTodayReminderSlots[gTodayReminderCount];
+    slot.hour = entry.hour;
+    slot.minute = entry.minute;
+    slot.order = static_cast<uint16_t>(gTodayReminderCount);
+    slot.triggered = false;
+    ++gTodayReminderCount;
+  }
+
+  std::sort(gTodayReminderSlots,
+            gTodayReminderSlots + gTodayReminderCount,
+            [](const DailyReminderSlot &a, const DailyReminderSlot &b) {
+              const uint16_t aMin = static_cast<uint16_t>(a.hour) * 60U + static_cast<uint16_t>(a.minute);
+              const uint16_t bMin = static_cast<uint16_t>(b.hour) * 60U + static_cast<uint16_t>(b.minute);
+              if (aMin != bMin) return aMin < bMin;
+              return a.order < b.order;
+            });
+
+  if (markPastTriggered) {
+    const uint16_t nowMinuteOfDay =
+        static_cast<uint16_t>(nowDt.hour) * 60U + static_cast<uint16_t>(nowDt.minute);
+    for (size_t i = 0; i < gTodayReminderCount; ++i) {
+      const uint16_t slotMinuteOfDay =
+          static_cast<uint16_t>(gTodayReminderSlots[i].hour) * 60U +
+          static_cast<uint16_t>(gTodayReminderSlots[i].minute);
+      if (slotMinuteOfDay < nowMinuteOfDay) {
+        gTodayReminderSlots[i].triggered = true;
+      }
+    }
+  }
+
+  Serial.printf("[SCHEDULE] today slot refresh count=%u (%04u-%02u-%02u)\n",
+                static_cast<unsigned int>(gTodayReminderCount),
+                static_cast<unsigned int>(nowDt.year),
+                static_cast<unsigned int>(nowDt.month),
+                static_cast<unsigned int>(nowDt.day));
+}
+
+bool refreshTodayReminderSlotsFromRtc(bool forceReload, bool markPastTriggered) {
+  Ds1302DateTime nowDt;
+  if (!rtc.readDateTime(nowDt) || !ds1302IsValidDateTime(nowDt)) {
+    return false;
+  }
+  const uint32_t dateKey = dateKeyFromDateTime(nowDt);
+  if (!forceReload && gTodayReminderDateKey == dateKey) {
+    return true;
+  }
+  refreshTodayReminderSlots(nowDt, markPastTriggered);
+  return true;
+}
+
+void serviceScheduleInterruptByRtcMinute() {
+  const bool scheduleChanged = wirelessPortalConsumeScheduleReloadRequest();
+  Ds1302DateTime nowDt;
+  if (!rtc.readDateTime(nowDt) || !ds1302IsValidDateTime(nowDt)) {
+    return;
+  }
+
+  const uint32_t dateKey = dateKeyFromDateTime(nowDt);
+  if (scheduleChanged || gTodayReminderDateKey != dateKey) {
+    refreshTodayReminderSlots(nowDt, true);
+  }
+
+  if (gTodayReminderDateKey != dateKey || gTodayReminderCount == 0) {
+    return;
+  }
+
+  const uint16_t nowMinuteOfDay =
+      static_cast<uint16_t>(nowDt.hour) * 60U + static_cast<uint16_t>(nowDt.minute);
+  if (gTodayReminderLastCheckedMinute == nowMinuteOfDay) {
+    return;
+  }
+  gTodayReminderLastCheckedMinute = nowMinuteOfDay;
+
+  for (size_t i = 0; i < gTodayReminderCount; ++i) {
+    DailyReminderSlot &slot = gTodayReminderSlots[i];
+    if (slot.triggered) continue;
+    const uint16_t slotMinuteOfDay =
+        static_cast<uint16_t>(slot.hour) * 60U + static_cast<uint16_t>(slot.minute);
+    if (slotMinuteOfDay < nowMinuteOfDay) {
+      slot.triggered = true;
+      continue;
+    }
+    if (slot.hour == nowDt.hour && slot.minute == nowDt.minute) {
+      slot.triggered = true;
+      String reminderMessage;
+      if (!loadReminderMessageByDateMinute(nowDt, slot.hour, slot.minute, reminderMessage)) {
+        reminderMessage = kDefaultReminderMessage;
+      }
+      enqueueScheduleInterruptMessage(reminderMessage);
+      Serial.printf("[SCHEDULE] due now %02u:%02u\n",
+                    static_cast<unsigned int>(slot.hour),
+                    static_cast<unsigned int>(slot.minute));
+    }
+  }
 }
 
 bool computeNextReminderDelta(const ReminderSchedule &schedule,
@@ -1304,9 +1598,9 @@ bool computeNextReminderDelta(const ReminderSchedule &schedule,
   const uint64_t dayStartUnix = nowUnix - static_cast<uint64_t>(nowSecOfDay);
   const uint8_t nowWeek = weekdayMondayOneFromUnix(nowUnix);
   uint32_t bestDelta = std::numeric_limits<uint32_t>::max();
-  char bestMessage[kSleepTextMaxLen + 1] = {0};
+  uint16_t bestSourceIndex = 0xFFFFU;
 
-  auto considerCandidate = [&](uint64_t candidateUnix, const char *messageText) {
+  auto considerCandidate = [&](uint64_t candidateUnix, uint16_t sourceIndex) {
     uint32_t delta = 0;
     if (candidateUnix >= nowUnix) {
       const uint64_t diff = candidateUnix - nowUnix;
@@ -1317,10 +1611,9 @@ bool computeNextReminderDelta(const ReminderSchedule &schedule,
       if (late > kReminderTriggerWindowSec) return;
       delta = 0;
     }
-    if (delta < bestDelta) {
+    if (delta < bestDelta || (delta == bestDelta && sourceIndex < bestSourceIndex)) {
       bestDelta = delta;
-      sanitizeMessageForSnapshot(String(messageText ? messageText : kDefaultReminderMessage),
-                                 bestMessage);
+      bestSourceIndex = sourceIndex;
     }
   };
 
@@ -1346,15 +1639,14 @@ bool computeNextReminderDelta(const ReminderSchedule &schedule,
   for (size_t i = 0; i < schedule.count; ++i) {
     const ReminderSchedule::Entry &entry = schedule.entries[i];
     const uint32_t entrySecOfDay = static_cast<uint32_t>(entry.hour) * 3600U +
-                                   static_cast<uint32_t>(entry.minute) * 60U +
-                                   static_cast<uint32_t>(entry.second);
+                                   static_cast<uint32_t>(entry.minute) * 60U;
 
     const bool anyRepeat = entry.repeatDay || entry.repeatMonth || entry.repeatWeek || entry.repeatYear;
     if (!anyRepeat) {
       uint64_t candidateUnix = 0;
       if (makeUnix(entry.year, entry.month, entry.day,
-                   entry.hour, entry.minute, entry.second, candidateUnix)) {
-        considerCandidate(candidateUnix, entry.message);
+                   entry.hour, entry.minute, 0, candidateUnix)) {
+        considerCandidate(candidateUnix, entry.sourceIndex);
       }
       continue;
     }
@@ -1364,7 +1656,7 @@ bool computeNextReminderDelta(const ReminderSchedule &schedule,
       if (candidateUnix + static_cast<uint64_t>(kReminderTriggerWindowSec) < nowUnix) {
         candidateUnix += 86400ULL;
       }
-      considerCandidate(candidateUnix, entry.message);
+      considerCandidate(candidateUnix, entry.sourceIndex);
     }
 
     if (entry.repeatWeek) {
@@ -1380,7 +1672,7 @@ bool computeNextReminderDelta(const ReminderSchedule &schedule,
       if (candidateUnix + static_cast<uint64_t>(kReminderTriggerWindowSec) < nowUnix) {
         candidateUnix += 7ULL * 86400ULL;
       }
-      considerCandidate(candidateUnix, entry.message);
+      considerCandidate(candidateUnix, entry.sourceIndex);
     }
 
     if (entry.repeatMonth) {
@@ -1388,7 +1680,7 @@ bool computeNextReminderDelta(const ReminderSchedule &schedule,
       int targetMonth = nowDt.month;
       uint64_t candidateUnix = 0;
       if (makeUnix(targetYear, targetMonth, entry.day,
-                   entry.hour, entry.minute, entry.second, candidateUnix)) {
+                   entry.hour, entry.minute, 0, candidateUnix)) {
         if (candidateUnix + static_cast<uint64_t>(kReminderTriggerWindowSec) < nowUnix) {
           targetMonth += 1;
           if (targetMonth > 12) {
@@ -1396,11 +1688,11 @@ bool computeNextReminderDelta(const ReminderSchedule &schedule,
             targetYear += 1;
           }
           if (makeUnix(targetYear, targetMonth, entry.day,
-                       entry.hour, entry.minute, entry.second, candidateUnix)) {
-            considerCandidate(candidateUnix, entry.message);
+                       entry.hour, entry.minute, 0, candidateUnix)) {
+            considerCandidate(candidateUnix, entry.sourceIndex);
           }
         } else {
-          considerCandidate(candidateUnix, entry.message);
+          considerCandidate(candidateUnix, entry.sourceIndex);
         }
       }
     }
@@ -1409,15 +1701,15 @@ bool computeNextReminderDelta(const ReminderSchedule &schedule,
       int targetYear = nowDt.year;
       uint64_t candidateUnix = 0;
       if (makeUnix(targetYear, entry.month, entry.day,
-                   entry.hour, entry.minute, entry.second, candidateUnix)) {
+                   entry.hour, entry.minute, 0, candidateUnix)) {
         if (candidateUnix + static_cast<uint64_t>(kReminderTriggerWindowSec) < nowUnix) {
           targetYear += 1;
           if (makeUnix(targetYear, entry.month, entry.day,
-                       entry.hour, entry.minute, entry.second, candidateUnix)) {
-            considerCandidate(candidateUnix, entry.message);
+                       entry.hour, entry.minute, 0, candidateUnix)) {
+            considerCandidate(candidateUnix, entry.sourceIndex);
           }
         } else {
-          considerCandidate(candidateUnix, entry.message);
+          considerCandidate(candidateUnix, entry.sourceIndex);
         }
       }
     }
@@ -1429,11 +1721,11 @@ bool computeNextReminderDelta(const ReminderSchedule &schedule,
 
   outDeltaSec = bestDelta;
   if (outMessage) {
-    memcpy(outMessage, bestMessage, kSleepTextMaxLen + 1);
-    outMessage[kSleepTextMaxLen] = '\0';
-    if (!outMessage[0]) {
-      sanitizeMessageForSnapshot(String(kDefaultReminderMessage), outMessage);
+    String message;
+    if (!loadReminderMessageBySourceIndex(bestSourceIndex, message)) {
+      message = kDefaultReminderMessage;
     }
+    sanitizeMessageForSnapshot(message, outMessage);
   }
   return true;
 }
@@ -1805,7 +2097,7 @@ bool handleRtcMaintenanceWake() {
     gSleepRtcCtx.expectedUnix = 0;
     Serial.println("[SLEEP] RTC read invalid, no external time, quick retry");
   } else {
-    ReminderSchedule schedule;
+    ReminderSchedule &schedule = scheduleScratchBuffer();
     uint32_t nextReminderDelta = 0;
     char nextReminderMessage[kSleepTextMaxLen + 1] = {0};
     const bool hasSchedule = loadReminderSchedule(schedule);
@@ -2686,6 +2978,7 @@ void processAppLoop() {
       Serial.println("[WEB] /data.csv reload failed");
     }
   }
+  serviceScheduleInterruptByRtcMinute();
 
   const bool allowHostInterrupts =
       (gAppLoopMode == APP_MODE_AP_STA) ||
@@ -2698,6 +2991,13 @@ void processAppLoop() {
     if (wirelessPortalPopHostMessage(hostBroadcastMessage)) {
       preemptByHost();
       playMessageWithGlitch(hostBroadcastMessage.c_str());
+      return;
+    }
+
+    String scheduleInterruptMessage;
+    if (popScheduleInterruptMessage(scheduleInterruptMessage)) {
+      preemptByHost();
+      playMessageWithGlitch(scheduleInterruptMessage.c_str());
       return;
     }
   }
@@ -3218,7 +3518,7 @@ bool appRestoreFromDeepSleepSnapshot() {
   }
 
   if (timerReminderWake) {
-    playMessageWithGlitch(reminderMessage);
+    (void)enqueueScheduleInterruptMessage(String(reminderMessage));
     notifyBacklightActivity();
   }
 
