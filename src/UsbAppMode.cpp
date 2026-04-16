@@ -3139,18 +3139,26 @@ void processAppLoop() {
           if (!wirelessPortalHasPendingMessage()) {
             irq.webActive = false;
             irq.webKeyLatch = false;
+            // This key press just consumed the final web message:
+            // pass it through so AP/STA normal flow does not need a second press.
+            syntheticKeyPress = true;
             Serial.println("[WEB] interrupt finished");
           }
         } else {
           irq.webActive = false;
           irq.webKeyLatch = false;
+          // No next web message to pop: pass this same physical keypress
+          // to AP normal flow so a single-message web interrupt does not
+          // require pressing the key twice to continue.
+          syntheticKeyPress = true;
           Serial.println("[WEB] interrupt finished");
         }
         if (irq.webActive) {
           return;
         }
-        // Web queue finished: require a new physical keypress before AP normal flow continues.
-        return;
+        // Web queue finished: continue in this same loop so the key-press
+        // pass-through can be consumed by AP/STA normal flow immediately.
+        // (do not return here, otherwise syntheticKeyPress is lost)
       }
       if (key != 2) {
         irq.webKeyLatch = false;
