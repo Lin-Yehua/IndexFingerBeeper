@@ -1584,6 +1584,34 @@ void serviceScheduleInterruptByRtcMinute() {
   }
 }
 
+static bool markCurrentMinuteScheduleAsTriggeredFromRtc() {
+  Ds1302DateTime nowDt;
+  if (!rtc.readDateTime(nowDt) || !ds1302IsValidDateTime(nowDt)) {
+    return false;
+  }
+
+  const uint32_t dateKey = dateKeyFromDateTime(nowDt);
+  if (gTodayReminderDateKey != dateKey) {
+    refreshTodayReminderSlots(nowDt, true);
+  }
+
+  const uint16_t nowMinuteOfDay =
+      static_cast<uint16_t>(nowDt.hour) * 60U + static_cast<uint16_t>(nowDt.minute);
+  gTodayReminderLastCheckedMinute = nowMinuteOfDay;
+
+  if (gTodayReminderDateKey != dateKey) {
+    return false;
+  }
+
+  for (size_t i = 0; i < gTodayReminderCount; ++i) {
+    DailyReminderSlot &slot = gTodayReminderSlots[i];
+    if (slot.hour == nowDt.hour && slot.minute == nowDt.minute) {
+      slot.triggered = true;
+    }
+  }
+  return true;
+}
+
 bool computeNextReminderDelta(const ReminderSchedule &schedule,
                               uint64_t nowUnix,
                               uint32_t &outDeltaSec,
@@ -1969,7 +1997,7 @@ StaOnlinePhase decodeSnapshotStaPhase(uint8_t rawPhase) {
   }
 }
 
-bool applySleepSnapshot(const SleepSnapshotData &snapshot) {
+bool applySleepSnapshot(const SleepSnapshotData &snapshot, bool replayLastDisplayed) {
   gAppLoopMode = decodeSnapshotMode(snapshot.header.appMode);
   gAppModeEnterPending = false;
 
@@ -2031,7 +2059,7 @@ bool applySleepSnapshot(const SleepSnapshotData &snapshot) {
   notifyBacklightActivity();
 
   rememberLastDisplayedText(snapshot.header.lastDisplayed);
-  if (snapshot.header.lastDisplayed[0]) {
+  if (replayLastDisplayed && snapshot.header.lastDisplayed[0]) {
     playMessageWithGlitch(snapshot.header.lastDisplayed);
   }
 
@@ -3511,15 +3539,16 @@ bool appRestoreFromDeepSleepSnapshot() {
     clearSleepRtcContext();
     return false;
   }
-  if (!applySleepSnapshot(snapshot)) {
+  if (!applySleepSnapshot(snapshot, !timerReminderWake)) {
     Serial.println("[SLEEP] snapshot apply failed, fallback normal app boot");
     clearSleepRtcContext();
     return false;
   }
+  gSkipStartupPromptOnce = false;
 
   if (timerReminderWake) {
-    (void)enqueueScheduleInterruptMessage(String(reminderMessage));
-    notifyBacklightActivity();
+    (void)markCurrentMinuteScheduleAsTriggeredFromRtc();
+    playMessageWithGlitch(reminderMessage);
   }
 
   (void)FFat.remove(kSleepSnapshotPath);
