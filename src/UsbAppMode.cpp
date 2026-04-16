@@ -10,6 +10,7 @@
 #include <limits>
 #include <vector>
 #include <ctype.h>
+#include <time.h>
 #include "esp_system.h"
 #include "esp_heap_caps.h"
 #include "esp_sleep.h"
@@ -49,7 +50,7 @@ constexpr uint32_t kReminderTriggerWindowSec = 2U;
 constexpr size_t kSleepTextMaxLen = 240;
 constexpr size_t kSleepPortalQueueMax = 128;
 constexpr size_t kSleepStaQueueMax = 20;
-constexpr size_t kMaxReminderTimes = 16;
+constexpr size_t kMaxReminderTimes = 128;
 constexpr char kSleepSnapshotPath[] = "/sleep_state.bin";
 constexpr const char *kDefaultReminderMessage = u8"日程提醒时间到了";
 constexpr uint32_t kSleepFileMagic = 0x53534E50UL;      // "SSNP"
@@ -978,6 +979,12 @@ static constexpr uint32_t kStaFetchFailCooldownMs = 1000UL;
 static constexpr uint32_t kStaFetcherTickMs = 200UL;
 static constexpr uint32_t kStaHttpConnectTimeoutMs = 3500UL;
 static constexpr uint32_t kStaHttpReadTimeoutMs = 4500UL;
+static constexpr uint32_t kStaNtpPollTimeoutMs = 6000UL;
+static constexpr uint32_t kStaNtpAttemptCooldownMs = 10000UL;
+static constexpr int32_t kStaNtpGmtOffsetSec = 8 * 3600;
+static constexpr const char *kStaNtpServer1 = "ntp.ntsc.ac.cn";
+static constexpr const char *kStaNtpServer2 = "cn.pool.ntp.org";
+static constexpr const char *kStaNtpServer3 = "pool.ntp.org";
 static constexpr UBaseType_t kStaFetcherPriority = 1;
 static constexpr BaseType_t kStaFetcherCore = 0;
 static constexpr uint32_t kStaFetcherStackSize = 12288UL;
@@ -991,6 +998,8 @@ static WiFiClientSecure gStaHttpsClient;
 static bool gStaHttpsClientReady = false;
 static SemaphoreHandle_t gStaMsgQueueMutex = nullptr;
 static TaskHandle_t gStaFetcherTaskHandle = nullptr;
+static bool gStaNtpSyncedThisSession = false;
+static uint32_t gStaNtpLastAttemptMs = 0;
 
 struct SleepSnapshotData {
   SleepSnapshotHeader header;
@@ -1031,90 +1040,195 @@ bool readRtcUnix(uint64_t &outUnix) {
 }
 
 struct ReminderSchedule {
-  uint32_t secondsOfDay[kMaxReminderTimes] = {0};
+  struct Entry {
+    uint16_t year = 2000;
+    uint8_t month = 1;
+    uint8_t day = 1;
+    uint8_t hour = 0;
+    uint8_t minute = 0;
+    uint8_t second = 0;
+    uint8_t week = 0;  // Monday=1 ... Sunday=7
+    bool repeatDay = false;
+    bool repeatMonth = false;
+    bool repeatWeek = false;
+    bool repeatYear = false;
+    char message[kSleepTextMaxLen + 1] = {0};
+  };
+
+  Entry entries[kMaxReminderTimes];
   size_t count = 0;
-  char message[kSleepTextMaxLen + 1] = {0};
 };
 
-String normalizeIniValue(String value) {
-  value.trim();
-  const int hashPos = value.indexOf('#');
-  if (hashPos >= 0) {
-    value = value.substring(0, hashPos);
-  }
-  value.trim();
-  while (value.length() > 0 && value[value.length() - 1] == ';') {
-    value.remove(value.length() - 1);
-    value.trim();
-  }
-  if (value.length() >= 2) {
-    const char first = value[0];
-    const char last = value[value.length() - 1];
-    if ((first == '"' && last == '"') || (first == '\'' && last == '\'')) {
-      value = value.substring(1, value.length() - 1);
-      value.trim();
-    }
-  }
-  return value;
+bool isLeapYearLocal(uint16_t year) {
+  if ((year % 4U) != 0U) return false;
+  if ((year % 100U) != 0U) return true;
+  return (year % 400U) == 0U;
 }
 
-bool parseReminderClockToken(String token, uint32_t &outSeconds) {
-  token.trim();
-  if (!token.length()) return false;
+uint8_t maxDayInMonthLocal(uint16_t year, uint8_t month) {
+  static const uint8_t kDays[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  if (month < 1 || month > 12) return 0;
+  if (month == 2 && isLeapYearLocal(year)) return 29;
+  return kDays[month - 1];
+}
 
-  int hour = -1;
-  int minute = -1;
-  int second = 0;
-  int matched = sscanf(token.c_str(), "%d:%d:%d", &hour, &minute, &second);
-  if (matched != 3) {
-    second = 0;
-    matched = sscanf(token.c_str(), "%d:%d", &hour, &minute);
-    if (matched != 2) return false;
+void civilFromDays(int64_t z, int &year, unsigned &month, unsigned &day) {
+  z += 719468;
+  const int era = (z >= 0 ? z : z - 146096) / 146097;
+  const unsigned doe = static_cast<unsigned>(z - static_cast<int64_t>(era) * 146097);
+  const unsigned yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  year = static_cast<int>(yoe) + era * 400;
+  const unsigned doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  const unsigned mp = (5 * doy + 2) / 153;
+  day = doy - (153 * mp + 2) / 5 + 1;
+  month = mp + (mp < 10 ? 3 : -9);
+  year += (month <= 2);
+}
+
+bool unixToDs1302DateTime(uint64_t unixSeconds, Ds1302DateTime &out) {
+  const uint64_t days = unixSeconds / 86400ULL;
+  const uint32_t secOfDay = static_cast<uint32_t>(unixSeconds % 86400ULL);
+  int year = 0;
+  unsigned month = 0;
+  unsigned day = 0;
+  civilFromDays(static_cast<int64_t>(days), year, month, day);
+
+  out.year = static_cast<uint16_t>(year);
+  out.month = static_cast<uint8_t>(month);
+  out.day = static_cast<uint8_t>(day);
+  out.hour = static_cast<uint8_t>(secOfDay / 3600U);
+  out.minute = static_cast<uint8_t>((secOfDay % 3600U) / 60U);
+  out.second = static_cast<uint8_t>(secOfDay % 60U);
+  return ds1302IsValidDateTime(out);
+}
+
+uint8_t weekdayMondayOneFromDays(int64_t daysSinceEpoch) {
+  int weekday = static_cast<int>((daysSinceEpoch + 3LL) % 7LL);  // 1970-01-01 is Thursday.
+  if (weekday < 0) weekday += 7;
+  return static_cast<uint8_t>(weekday + 1);  // Monday=1 ... Sunday=7
+}
+
+uint8_t weekdayMondayOneFromUnix(uint64_t unixSeconds) {
+  return weekdayMondayOneFromDays(static_cast<int64_t>(unixSeconds / 86400ULL));
+}
+
+uint8_t weekdayMondayOneFromCivil(uint16_t year, uint8_t month, uint8_t day) {
+  return weekdayMondayOneFromDays(daysFromCivil(static_cast<int>(year), month, day));
+}
+
+bool parseStrictInt(String value, int &out) {
+  value.trim();
+  if (!value.length()) return false;
+  int start = 0;
+  if (value[0] == '+' || value[0] == '-') {
+    if (value.length() == 1) return false;
+    start = 1;
   }
-
-  if (hour < 0 || hour > 23) return false;
-  if (minute < 0 || minute > 59) return false;
-  if (second < 0 || second > 59) return false;
-
-  outSeconds = static_cast<uint32_t>(hour * 3600 + minute * 60 + second);
+  for (int i = start; i < value.length(); ++i) {
+    if (!isDigit(value[i])) return false;
+  }
+  out = value.toInt();
   return true;
 }
 
-void addReminderSeconds(ReminderSchedule &schedule, uint32_t secondsOfDay) {
-  if (schedule.count >= kMaxReminderTimes) return;
-  for (size_t i = 0; i < schedule.count; ++i) {
-    if (schedule.secondsOfDay[i] == secondsOfDay) return;
+String decodeScheduleMessageValue(String value) {
+  value.trim();
+  if (value.length() >= 2 && value[0] == '"' && value[value.length() - 1] == '"') {
+    value = value.substring(1, value.length() - 1);
+    value.replace("\"\"", "\"");
   }
-  schedule.secondsOfDay[schedule.count++] = secondsOfDay;
+  value.replace("\r", " ");
+  value.replace("\n", " ");
+  value.trim();
+  return value;
 }
 
-void parseReminderTimesList(const String &rawList, ReminderSchedule &schedule) {
-  String normalized = rawList;
-  normalized.replace("|", ",");
-  normalized.replace(";", ",");
-  normalized.replace(" ", ",");
+bool parseScheduleCsvLine(const String &lineRaw, ReminderSchedule::Entry &outEntry) {
+  String line = lineRaw;
+  line.trim();
+  if (!line.length()) return false;
+  if (line.startsWith("#") || line.startsWith(";")) return false;
 
+  String cols[12];
+  size_t colCount = 0;
   int start = 0;
-  while (start <= normalized.length()) {
-    const int end = normalized.indexOf(',', start);
-    String token = (end >= 0) ? normalized.substring(start, end) : normalized.substring(start);
-    uint32_t sec = 0;
-    if (parseReminderClockToken(token, sec)) {
-      addReminderSeconds(schedule, sec);
+  while (start <= line.length()) {
+    if (colCount >= 11) {
+      cols[colCount++] = line.substring(start);
+      cols[colCount - 1].trim();
+      break;
     }
-    if (end < 0) break;
-    start = end + 1;
+    const int comma = line.indexOf(',', start);
+    String token = (comma >= 0) ? line.substring(start, comma) : line.substring(start);
+    token.trim();
+    cols[colCount++] = token;
+    if (comma < 0) break;
+    start = comma + 1;
   }
-}
 
-void sortReminderSchedule(ReminderSchedule &schedule) {
-  if (schedule.count < 2) return;
-  std::sort(schedule.secondsOfDay, schedule.secondsOfDay + schedule.count);
+  if (colCount < 11) return false;
+
+  int year = 0;
+  int month = 0;
+  int day = 0;
+  int hour = 0;
+  int minute = 0;
+  int second = 0;
+  int week = 0;
+  int repeatDay = 0;
+  int repeatMonth = 0;
+  int repeatWeek = 0;
+  int repeatYear = 0;
+
+  if (!parseStrictInt(cols[0], year) || year < 2000 || year > 2099) return false;
+  if (!parseStrictInt(cols[1], month) || month < 1 || month > 12) return false;
+  if (!parseStrictInt(cols[2], day) || day < 1 || day > 31) return false;
+  if (!parseStrictInt(cols[3], hour) || hour < 0 || hour > 23) return false;
+  if (!parseStrictInt(cols[4], minute) || minute < 0 || minute > 59) return false;
+  if (!parseStrictInt(cols[5], second) || second < 0 || second > 59) return false;
+  if (!parseStrictInt(cols[6], week) || week < 0 || week > 7) return false;
+  if (!parseStrictInt(cols[7], repeatDay) || (repeatDay != 0 && repeatDay != 1)) return false;
+  if (!parseStrictInt(cols[8], repeatMonth) || (repeatMonth != 0 && repeatMonth != 1)) return false;
+  if (!parseStrictInt(cols[9], repeatWeek) || (repeatWeek != 0 && repeatWeek != 1)) return false;
+  if (!parseStrictInt(cols[10], repeatYear) || (repeatYear != 0 && repeatYear != 1)) return false;
+
+  Ds1302DateTime base;
+  base.year = static_cast<uint16_t>(year);
+  base.month = static_cast<uint8_t>(month);
+  base.day = static_cast<uint8_t>(day);
+  base.hour = static_cast<uint8_t>(hour);
+  base.minute = static_cast<uint8_t>(minute);
+  base.second = static_cast<uint8_t>(second);
+  if (!ds1302IsValidDateTime(base)) return false;
+
+  outEntry.year = base.year;
+  outEntry.month = base.month;
+  outEntry.day = base.day;
+  outEntry.hour = base.hour;
+  outEntry.minute = base.minute;
+  outEntry.second = base.second;
+  outEntry.week = (week == 0)
+                      ? weekdayMondayOneFromCivil(outEntry.year, outEntry.month, outEntry.day)
+                      : static_cast<uint8_t>(week);
+  outEntry.repeatDay = (repeatDay != 0);
+  outEntry.repeatMonth = (repeatMonth != 0);
+  outEntry.repeatWeek = (repeatWeek != 0);
+  outEntry.repeatYear = (repeatYear != 0);
+
+  if (colCount > 11) {
+    const String decoded = decodeScheduleMessageValue(cols[11]);
+    sanitizeMessageForSnapshot(decoded, outEntry.message);
+  } else {
+    sanitizeMessageForSnapshot(String(kDefaultReminderMessage), outEntry.message);
+  }
+  if (!outEntry.message[0]) {
+    sanitizeMessageForSnapshot(String(kDefaultReminderMessage), outEntry.message);
+  }
+  return true;
 }
 
 bool loadReminderSchedule(ReminderSchedule &outSchedule) {
   outSchedule.count = 0;
-  sanitizeMessageForSnapshot(String(kDefaultReminderMessage), outSchedule.message);
 
   bool mountedTemp = false;
   if (!fatMounted) {
@@ -1124,7 +1238,7 @@ bool loadReminderSchedule(ReminderSchedule &outSchedule) {
     mountedTemp = true;
   }
 
-  fs::File f = FFat.open("/setting.ini", FILE_READ);
+  fs::File f = FFat.open("/schedule.csv", FILE_READ);
   if (!f) {
     if (mountedTemp) {
       unmountFat();
@@ -1132,54 +1246,167 @@ bool loadReminderSchedule(ReminderSchedule &outSchedule) {
     return false;
   }
 
-  while (f.available()) {
-    String line = f.readStringUntil('\n');
-    line.trim();
-    if (!line.length()) continue;
-    if (line.startsWith("#") || line.startsWith(";")) continue;
-    const int eq = line.indexOf('=');
-    if (eq <= 0) continue;
-
-    String key = line.substring(0, eq);
-    key.trim();
-    key.toLowerCase();
-    String value = normalizeIniValue(line.substring(eq + 1));
-
-    if (key == "remindertimes" || key == "scheduletimes" || key == "alarmtimes") {
-      parseReminderTimesList(value, outSchedule);
-    } else if (key == "remindermessage" || key == "schedulemessage" || key == "alarmmessage") {
-      sanitizeMessageForSnapshot(value, outSchedule.message);
+  while (f.available() && outSchedule.count < kMaxReminderTimes) {
+    const String line = f.readStringUntil('\n');
+    ReminderSchedule::Entry entry;
+    if (parseScheduleCsvLine(line, entry)) {
+      outSchedule.entries[outSchedule.count++] = entry;
     }
   }
   f.close();
-  sortReminderSchedule(outSchedule);
 
   if (mountedTemp) {
     unmountFat();
   }
+
   return outSchedule.count > 0;
 }
 
 bool computeNextReminderDelta(const ReminderSchedule &schedule,
                               uint64_t nowUnix,
-                              uint32_t &outDeltaSec) {
+                              uint32_t &outDeltaSec,
+                              char outMessage[kSleepTextMaxLen + 1]) {
   if (schedule.count == 0) return false;
-  const uint32_t nowSecOfDay = static_cast<uint32_t>(nowUnix % 86400ULL);
-  uint32_t bestDelta = std::numeric_limits<uint32_t>::max();
 
-  for (size_t i = 0; i < schedule.count; ++i) {
-    const uint32_t target = schedule.secondsOfDay[i];
-    const uint32_t delta = (target >= nowSecOfDay)
-                               ? (target - nowSecOfDay)
-                               : (86400U - nowSecOfDay + target);
+  Ds1302DateTime nowDt;
+  if (!unixToDs1302DateTime(nowUnix, nowDt)) return false;
+  const uint32_t nowSecOfDay = static_cast<uint32_t>(nowDt.hour) * 3600U +
+                               static_cast<uint32_t>(nowDt.minute) * 60U +
+                               static_cast<uint32_t>(nowDt.second);
+  const uint64_t dayStartUnix = nowUnix - static_cast<uint64_t>(nowSecOfDay);
+  const uint8_t nowWeek = weekdayMondayOneFromUnix(nowUnix);
+  uint32_t bestDelta = std::numeric_limits<uint32_t>::max();
+  char bestMessage[kSleepTextMaxLen + 1] = {0};
+
+  auto considerCandidate = [&](uint64_t candidateUnix, const char *messageText) {
+    uint32_t delta = 0;
+    if (candidateUnix >= nowUnix) {
+      const uint64_t diff = candidateUnix - nowUnix;
+      if (diff > static_cast<uint64_t>(std::numeric_limits<uint32_t>::max())) return;
+      delta = static_cast<uint32_t>(diff);
+    } else {
+      const uint64_t late = nowUnix - candidateUnix;
+      if (late > kReminderTriggerWindowSec) return;
+      delta = 0;
+    }
     if (delta < bestDelta) {
       bestDelta = delta;
+      sanitizeMessageForSnapshot(String(messageText ? messageText : kDefaultReminderMessage),
+                                 bestMessage);
+    }
+  };
+
+  auto makeUnix = [](int year, int month, int day, int hour, int minute, int second,
+                     uint64_t &outUnix) -> bool {
+    if (month < 1 || month > 12) return false;
+    const uint8_t maxDay = maxDayInMonthLocal(static_cast<uint16_t>(year),
+                                              static_cast<uint8_t>(month));
+    if (maxDay == 0) return false;
+    if (day < 1) day = 1;
+    if (day > maxDay) day = maxDay;
+    Ds1302DateTime dt;
+    dt.year = static_cast<uint16_t>(year);
+    dt.month = static_cast<uint8_t>(month);
+    dt.day = static_cast<uint8_t>(day);
+    dt.hour = static_cast<uint8_t>(hour);
+    dt.minute = static_cast<uint8_t>(minute);
+    dt.second = static_cast<uint8_t>(second);
+    if (!ds1302IsValidDateTime(dt)) return false;
+    return ds1302DateTimeToUnix(dt, outUnix);
+  };
+
+  for (size_t i = 0; i < schedule.count; ++i) {
+    const ReminderSchedule::Entry &entry = schedule.entries[i];
+    const uint32_t entrySecOfDay = static_cast<uint32_t>(entry.hour) * 3600U +
+                                   static_cast<uint32_t>(entry.minute) * 60U +
+                                   static_cast<uint32_t>(entry.second);
+
+    const bool anyRepeat = entry.repeatDay || entry.repeatMonth || entry.repeatWeek || entry.repeatYear;
+    if (!anyRepeat) {
+      uint64_t candidateUnix = 0;
+      if (makeUnix(entry.year, entry.month, entry.day,
+                   entry.hour, entry.minute, entry.second, candidateUnix)) {
+        considerCandidate(candidateUnix, entry.message);
+      }
+      continue;
+    }
+
+    if (entry.repeatDay) {
+      uint64_t candidateUnix = dayStartUnix + static_cast<uint64_t>(entrySecOfDay);
+      if (candidateUnix + static_cast<uint64_t>(kReminderTriggerWindowSec) < nowUnix) {
+        candidateUnix += 86400ULL;
+      }
+      considerCandidate(candidateUnix, entry.message);
+    }
+
+    if (entry.repeatWeek) {
+      uint8_t targetWeek = entry.week;
+      if (targetWeek < 1 || targetWeek > 7) {
+        targetWeek = weekdayMondayOneFromCivil(entry.year, entry.month, entry.day);
+      }
+      int dayOffset = static_cast<int>(targetWeek) - static_cast<int>(nowWeek);
+      if (dayOffset < 0) dayOffset += 7;
+      uint64_t candidateUnix = dayStartUnix +
+                               static_cast<uint64_t>(dayOffset) * 86400ULL +
+                               static_cast<uint64_t>(entrySecOfDay);
+      if (candidateUnix + static_cast<uint64_t>(kReminderTriggerWindowSec) < nowUnix) {
+        candidateUnix += 7ULL * 86400ULL;
+      }
+      considerCandidate(candidateUnix, entry.message);
+    }
+
+    if (entry.repeatMonth) {
+      int targetYear = nowDt.year;
+      int targetMonth = nowDt.month;
+      uint64_t candidateUnix = 0;
+      if (makeUnix(targetYear, targetMonth, entry.day,
+                   entry.hour, entry.minute, entry.second, candidateUnix)) {
+        if (candidateUnix + static_cast<uint64_t>(kReminderTriggerWindowSec) < nowUnix) {
+          targetMonth += 1;
+          if (targetMonth > 12) {
+            targetMonth = 1;
+            targetYear += 1;
+          }
+          if (makeUnix(targetYear, targetMonth, entry.day,
+                       entry.hour, entry.minute, entry.second, candidateUnix)) {
+            considerCandidate(candidateUnix, entry.message);
+          }
+        } else {
+          considerCandidate(candidateUnix, entry.message);
+        }
+      }
+    }
+
+    if (entry.repeatYear) {
+      int targetYear = nowDt.year;
+      uint64_t candidateUnix = 0;
+      if (makeUnix(targetYear, entry.month, entry.day,
+                   entry.hour, entry.minute, entry.second, candidateUnix)) {
+        if (candidateUnix + static_cast<uint64_t>(kReminderTriggerWindowSec) < nowUnix) {
+          targetYear += 1;
+          if (makeUnix(targetYear, entry.month, entry.day,
+                       entry.hour, entry.minute, entry.second, candidateUnix)) {
+            considerCandidate(candidateUnix, entry.message);
+          }
+        } else {
+          considerCandidate(candidateUnix, entry.message);
+        }
+      }
     }
   }
+
   if (bestDelta == std::numeric_limits<uint32_t>::max()) {
     return false;
   }
+
   outDeltaSec = bestDelta;
+  if (outMessage) {
+    memcpy(outMessage, bestMessage, kSleepTextMaxLen + 1);
+    outMessage[kSleepTextMaxLen] = '\0';
+    if (!outMessage[0]) {
+      sanitizeMessageForSnapshot(String(kDefaultReminderMessage), outMessage);
+    }
+  }
   return true;
 }
 
@@ -1551,12 +1778,14 @@ bool handleRtcMaintenanceWake() {
   } else {
     ReminderSchedule schedule;
     uint32_t nextReminderDelta = 0;
+    char nextReminderMessage[kSleepTextMaxLen + 1] = {0};
     const bool hasSchedule = loadReminderSchedule(schedule);
-    if (hasSchedule && computeNextReminderDelta(schedule, nowUnix, nextReminderDelta)) {
+    if (hasSchedule &&
+        computeNextReminderDelta(schedule, nowUnix, nextReminderDelta, nextReminderMessage)) {
       if (nextReminderDelta <= kReminderTriggerWindowSec) {
         gSleepRtcCtx.pendingReminder = 1;
         memcpy(gSleepRtcCtx.reminderMessage,
-               schedule.message,
+               nextReminderMessage,
                sizeof(gSleepRtcCtx.reminderMessage));
         gSleepRtcCtx.reminderMessage[sizeof(gSleepRtcCtx.reminderMessage) - 1] = '\0';
         gSleepRtcCtx.expectedUnix = nowUnix;
@@ -1944,6 +2173,71 @@ static bool loadStaCredentialsFromSettingIni(String &outSsid, String &outPasswor
   return outSsid.length() > 0;
 }
 
+static bool tmToDs1302DateTime(const struct tm &in, Ds1302DateTime &out) {
+  out.year = static_cast<uint16_t>(in.tm_year + 1900);
+  out.month = static_cast<uint8_t>(in.tm_mon + 1);
+  out.day = static_cast<uint8_t>(in.tm_mday);
+  out.hour = static_cast<uint8_t>(in.tm_hour);
+  out.minute = static_cast<uint8_t>(in.tm_min);
+  out.second = static_cast<uint8_t>(in.tm_sec);
+  return ds1302IsValidDateTime(out);
+}
+
+static bool syncDs1302FromStaNtp(String &detailOut) {
+  detailOut = "";
+  if (WiFi.status() != WL_CONNECTED) {
+    detailOut = "wifi disconnected";
+    return false;
+  }
+
+  const uint32_t nowMs = millis();
+  if (gStaNtpLastAttemptMs != 0 &&
+      (nowMs - gStaNtpLastAttemptMs) < kStaNtpAttemptCooldownMs) {
+    detailOut = gStaNtpSyncedThisSession ? "already synced" : "cooldown";
+    return gStaNtpSyncedThisSession;
+  }
+  gStaNtpLastAttemptMs = nowMs;
+
+  configTime(kStaNtpGmtOffsetSec, 0, kStaNtpServer1, kStaNtpServer2, kStaNtpServer3);
+  struct tm tmNow = {};
+  const uint32_t started = millis();
+  bool gotTime = false;
+  while ((millis() - started) < kStaNtpPollTimeoutMs) {
+    if (getLocalTime(&tmNow, 300)) {
+      gotTime = true;
+      break;
+    }
+    delay(60);
+  }
+
+  if (!gotTime) {
+    detailOut = "ntp timeout";
+    return false;
+  }
+
+  Ds1302DateTime synced;
+  if (!tmToDs1302DateTime(tmNow, synced)) {
+    detailOut = "invalid ntp datetime";
+    return false;
+  }
+  if (!rtc.writeDateTime(synced)) {
+    detailOut = "ds1302 write failed";
+    return false;
+  }
+
+  gStaNtpSyncedThisSession = true;
+  char buf[48] = {0};
+  snprintf(buf, sizeof(buf), "%04u-%02u-%02u %02u:%02u:%02u",
+           static_cast<unsigned int>(synced.year),
+           static_cast<unsigned int>(synced.month),
+           static_cast<unsigned int>(synced.day),
+           static_cast<unsigned int>(synced.hour),
+           static_cast<unsigned int>(synced.minute),
+           static_cast<unsigned int>(synced.second));
+  detailOut = String(buf);
+  return true;
+}
+
 static void playStaMessage(const String &text) {
   playMessageWithGlitch(text.c_str());
 }
@@ -1971,6 +2265,8 @@ static void beginStaConnectAttempt() {
   WiFi.mode(WIFI_STA);
   WiFi.disconnect(false, false);
   delay(20);
+  gStaNtpSyncedThisSession = false;
+  gStaNtpLastAttemptMs = 0;
   WiFi.begin(gStaNetSsid.c_str(), gStaNetPassword.c_str());
 
   gStaAttemptStartMs = millis();
@@ -2450,6 +2746,12 @@ void processAppLoop() {
           gStaNextFetchAllowedMs = 0;
           String okMsg = kStaConnectOkPrefix;
           okMsg += gStaNetSsid;
+          String ntpDetail;
+          if (syncDs1302FromStaNtp(ntpDetail)) {
+            Serial.printf("[STA] NTP sync -> DS1302 ok: %s\n", ntpDetail.c_str());
+          } else {
+            Serial.printf("[STA] NTP sync skipped/failed: %s\n", ntpDetail.c_str());
+          }
           playStaMessage(okMsg);
           return;
         }
@@ -2483,6 +2785,8 @@ void processAppLoop() {
           gStaAttemptStartMs = 0;
           gStaLastQueueEmptyHintMs = 0;
           gStaNextFetchAllowedMs = 0;
+          gStaNtpSyncedThisSession = false;
+          gStaNtpLastAttemptMs = 0;
           clearStaMessageQueue();
           playStaMessage(kStaDisconnectedMsg);
           return;
@@ -2599,6 +2903,8 @@ void onApStaInit(AppLoopMode mode)
   gStaLastQueueEmptyHintMs = 0;
   gStaNextFetchAllowedMs = 0;
   gStaFetchInProgress = false;
+  gStaNtpSyncedThisSession = false;
+  gStaNtpLastAttemptMs = 0;
   gStaNetSsid = "";
   gStaNetPassword = "";
   clearStaMessageQueue();
@@ -2631,6 +2937,8 @@ void onStaOnlineInit(AppLoopMode mode)
   gStaLastQueueEmptyHintMs = 0;
   gStaNextFetchAllowedMs = 0;
   gStaFetchInProgress = false;
+  gStaNtpSyncedThisSession = false;
+  gStaNtpLastAttemptMs = 0;
   gStaOnlinePhase = StaOnlinePhase::kPromptWaitShort;
   clearStaMessageQueue();
 
@@ -2657,6 +2965,8 @@ void onStaOnlyInit(AppLoopMode mode)
   gStaLastQueueEmptyHintMs = 0;
   gStaNextFetchAllowedMs = 0;
   gStaFetchInProgress = false;
+  gStaNtpSyncedThisSession = false;
+  gStaNtpLastAttemptMs = 0;
   clearStaMessageQueue();
   WiFi.disconnect(true, false);
   if (!wirelessPortalStartEspNowOnly()) {

@@ -1,632 +1,411 @@
-const csvBox = document.getElementById("csvBox");
-const msgBox = document.getElementById("msgBox");
-const csvStatus = document.getElementById("csvStatus");
-const msgStatus = document.getElementById("msgStatus");
-const bgVolumeSlider = document.getElementById("bgVolumeSlider");
-const bgVolumeValue = document.getElementById("bgVolumeValue");
-const insertVolumeSlider = document.getElementById("insertVolumeSlider");
-const insertVolumeValue = document.getElementById("insertVolumeValue");
-const volumeStatus = document.getElementById("volumeStatus");
-const wrongProb3Input = document.getElementById("wrongProb3Input");
-const wrongProb5Input = document.getElementById("wrongProb5Input");
-const enableReprintInput = document.getElementById("enableReprintInput");
-const backlightInput = document.getElementById("backlightInput");
-const backlightTimeInput = document.getElementById("backlightTimeInput");
-const effectsStatus = document.getElementById("effectsStatus");
-const instantRefreshNoKey = document.getElementById("instantRefreshNoKey");
-const refreshModeStatus = document.getElementById("refreshModeStatus");
-const hostMacInput = document.getElementById("hostMacInput");
-const hostMacStatus = document.getElementById("hostMacStatus");
-const apSsidInput = document.getElementById("apSsidInput");
-const apPasswordInput = document.getElementById("apPasswordInput");
-const apChannelInput = document.getElementById("apChannelInput");
-const apConfigStatus = document.getElementById("apConfigStatus");
-const selfMacInput = document.getElementById("selfMacInput");
-const selfMacStatus = document.getElementById("selfMacStatus");
-const imgFileInput = document.getElementById("imgFileInput");
-const imgTargetWidthInput = document.getElementById("imgTargetWidthInput");
-const imgTargetHeightInput = document.getElementById("imgTargetHeightInput");
-const imgCenterXInput = document.getElementById("imgCenterXInput");
-const imgCenterYInput = document.getElementById("imgCenterYInput");
-const imgCropOffsetYInput = document.getElementById("imgCropOffsetYInput");
-const imgPreviewCanvas = document.getElementById("imgPreviewCanvas");
-const imgStatus = document.getElementById("imgStatus");
-const portalBrowserHint = document.getElementById("portalBrowserHint");
-const portalUrlInput = document.getElementById("portalUrlInput");
-const btnCopyPortalUrl = document.getElementById("btnCopyPortalUrl");
+﻿const $ = (id) => document.getElementById(id);
+const st = {
+  msgHistory: [],
+  commands: [],
+  schedules: [],
+  imageFile: null,
+  imageBuf: null,
+  volTimer: null
+};
+const LS = { hist: "bb_msg_history", pfxOn: "bb_prefix_on", pfxText: "bb_prefix_text" };
 
-let volumePushTimer = null;
-const IMAGE_FILE_MAX_BYTES = 10 * 1024 * 1024;
-let preparedImageBuffer = null;
-let selectedImageFile = null;
+const el = {
+  tabMsg: $("tabMsg"), tabImg: $("tabImg"), panelMsg: $("panelMsg"), panelImg: $("panelImg"),
+  msgInput: $("msgInput"), msgHistory: $("msgHistory"), msgImmediate: $("msgImmediate"),
+  msgPrefixEnable: $("msgPrefixEnable"), msgPrefix: $("msgPrefix"), btnSendMsg: $("btnSendMsg"),
+  btnClearMsg: $("btnClearMsg"), msgStatus: $("msgStatus"),
+  portalUrl: $("portalUrl"), btnCopyPortalUrl: $("btnCopyPortalUrl"), imgFile: $("imgFile"),
+  imgOffsetY: $("imgOffsetY"), imgPreview: $("imgPreview"), imgFitMode: $("imgFitMode"),
+  imgCenterX: $("imgCenterX"), imgCenterY: $("imgCenterY"), imgWidth: $("imgWidth"), imgHeight: $("imgHeight"),
+  btnSendImg: $("btnSendImg"), btnClearImg: $("btnClearImg"), imgStatus: $("imgStatus"),
+  cmdList: $("cmdList"), cmdAddInput: $("cmdAddInput"), btnCmdAdd: $("btnCmdAdd"), btnCmdSave: $("btnCmdSave"), cmdStatus: $("cmdStatus"),
+  rtcNow: $("rtcNow"), rtcYear: $("rtcYear"), rtcMonth: $("rtcMonth"), rtcDay: $("rtcDay"), rtcHour: $("rtcHour"), rtcMinute: $("rtcMinute"), rtcSecond: $("rtcSecond"), btnRtcSet: $("btnRtcSet"), btnRtcSyncPhone: $("btnRtcSyncPhone"), rtcStatus: $("rtcStatus"),
+  scheduleDate: $("scheduleDate"), scheduleList: $("scheduleList"), scheduleAddTime: $("scheduleAddTime"), scheduleAddRepeat: $("scheduleAddRepeat"), scheduleAddText: $("scheduleAddText"), btnScheduleAdd: $("btnScheduleAdd"), btnScheduleSave: $("btnScheduleSave"), scheduleStatus: $("scheduleStatus"),
+  bgVol: $("bgVol"), insertVol: $("insertVol"), bgVolVal: $("bgVolVal"), insertVolVal: $("insertVolVal"), backlight: $("backlight"), backlightTime: $("backlightTime"), btnSaveDisplay: $("btnSaveDisplay"), displayStatus: $("displayStatus"),
+  apSsid: $("apSsid"), apPassword: $("apPassword"), apChannel: $("apChannel"), btnSaveAp: $("btnSaveAp"),
+  staSsid: $("staSsid"), staPassword: $("staPassword"), btnSaveSta: $("btnSaveSta"),
+  hostMac: $("hostMac"), btnSaveHostMac: $("btnSaveHostMac"), selfMac: $("selfMac"), btnCopySelfMac: $("btnCopySelfMac"), wirelessStatus: $("wirelessStatus"),
+  batteryStatus: $("batteryStatus")
+};
 
-function setStatus(el, text, isError = false) {
-  el.textContent = text || "";
-  el.classList.toggle("error", !!isError);
+const pad2 = (n) => String(n).padStart(2, "0");
+const toInt = (v, d = 0) => { const n = parseInt(String(v ?? "").trim(), 10); return Number.isFinite(n) ? n : d; };
+const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
+const setStatus = (node, text, err = false) => { if (!node) return; node.textContent = text || ""; node.classList.toggle("error", !!err); node.classList.toggle("ok", !err && !!text); };
+const autoGrow = (ta) => { if (!ta) return; ta.style.height = "auto"; ta.style.height = `${Math.min(ta.scrollHeight + 2, 260)}px`; };
+
+async function copyText(t) {
+  try { if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(t); return true; } } catch (_) {}
+  const ta = document.createElement("textarea"); ta.value = t; ta.style.position = "fixed"; ta.style.opacity = "0"; document.body.appendChild(ta);
+  ta.focus(); ta.select(); let ok = false; try { ok = document.execCommand("copy"); } catch (_) {} document.body.removeChild(ta); return ok;
 }
 
-async function copyText(text) {
-  try {
-    if (navigator.clipboard && window.isSecureContext) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch (err) {}
-
-  const ta = document.createElement("textarea");
-  ta.value = text;
-  ta.style.position = "fixed";
-  ta.style.opacity = "0";
-  document.body.appendChild(ta);
-  ta.focus();
-  ta.select();
-  let ok = false;
-  try {
-    ok = document.execCommand("copy");
-  } catch (err) {
-    ok = false;
-  }
-  document.body.removeChild(ta);
-  return ok;
+function switchPush(mode) {
+  const m = mode === "msg";
+  el.tabMsg.classList.toggle("active", m); el.tabImg.classList.toggle("active", !m);
+  el.panelMsg.classList.toggle("active", m); el.panelImg.classList.toggle("active", !m);
 }
 
-function parseIntInputWithFallback(input, fallback, min, max) {
-  const raw = (input.value || "").trim();
-  const parsed = Number.parseInt(raw, 10);
-  let value = Number.isFinite(parsed) ? parsed : fallback;
-  if (Number.isFinite(min)) value = Math.max(min, value);
-  if (Number.isFinite(max)) value = Math.min(max, value);
-  input.value = String(value);
-  return value;
+function loadMsgLocal() {
+  try { st.msgHistory = JSON.parse(localStorage.getItem(LS.hist) || "[]").filter((x) => typeof x === "string" && x.trim()); } catch (_) { st.msgHistory = []; }
+  el.msgPrefixEnable.checked = localStorage.getItem(LS.pfxOn) === "1";
+  el.msgPrefix.value = localStorage.getItem(LS.pfxText) || "";
+  renderMsgHistory();
 }
-
-function clearImagePreview() {
-  if (!imgPreviewCanvas) return;
-  const ctx = imgPreviewCanvas.getContext("2d");
-  ctx.fillStyle = "#000000";
-  ctx.fillRect(0, 0, imgPreviewCanvas.width, imgPreviewCanvas.height);
+function saveMsgLocal() {
+  localStorage.setItem(LS.hist, JSON.stringify(st.msgHistory.slice(0, 30)));
+  localStorage.setItem(LS.pfxOn, el.msgPrefixEnable.checked ? "1" : "0");
+  localStorage.setItem(LS.pfxText, el.msgPrefix.value || "");
 }
-
-function getPortalRootUrl() {
-  return `${window.location.protocol}//${window.location.host}/`;
+function renderMsgHistory() {
+  el.msgHistory.innerHTML = "";
+  const first = document.createElement("option"); first.value = ""; first.textContent = "历史发送（选择回填）"; el.msgHistory.appendChild(first);
+  st.msgHistory.forEach((m) => { const o = document.createElement("option"); o.value = m; o.textContent = m.length > 50 ? `${m.slice(0, 50)}...` : m; el.msgHistory.appendChild(o); });
 }
-
-function isLikelyCaptivePortalMiniBrowser() {
-  const ua = (navigator.userAgent || "").toLowerCase();
-  return ua.includes("captivenetworksupport")
-    || ua.includes("wifilogin")
-    || ua.includes("captive")
-    || ua.includes("micromessenger")
-    || ua.includes("wv");
-}
-
-function setupPortalBrowserHint() {
-  const url = getPortalRootUrl();
-  if (portalUrlInput) portalUrlInput.value = url;
-
-  if (portalBrowserHint) {
-    portalBrowserHint.textContent = isLikelyCaptivePortalMiniBrowser()
-      ? "Current page may be in captive Wi-Fi mini browser where file picker can be blocked. Copy URL and open it in a full browser."
-      : "If file picker does not open in captive Wi-Fi popup, copy URL and open it in a full browser.";
-  }
-}
-
-function loadImageFromFile(file) {
-  return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(file);
-    const img = new Image();
-    img.onload = () => {
-      URL.revokeObjectURL(url);
-      resolve(img);
-    };
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error("image decode failed"));
-    };
-    img.src = url;
-  });
-}
-
-function imageDataToRgb565ArrayBuffer(imageData) {
-  const src = imageData.data;
-  const pixelCount = imageData.width * imageData.height;
-  const out = new ArrayBuffer(pixelCount * 2);
-  const view = new DataView(out);
-  let srcOffset = 0;
-  for (let i = 0; i < pixelCount; i++) {
-    const r = src[srcOffset];
-    const g = src[srcOffset + 1];
-    const b = src[srcOffset + 2];
-    const rgb565 = ((r & 0xf8) << 8) | ((g & 0xfc) << 3) | (b >> 3);
-    // Swap bytes in conversion stage to match TFT pushImage default byte order.
-    const swapped = ((rgb565 & 0xff) << 8) | ((rgb565 >> 8) & 0xff);
-    view.setUint16(i * 2, swapped, true);
-    srcOffset += 4;
-  }
-  return out;
-}
-
-async function prepareImageBufferFromSelectedFile() {
-  if (!selectedImageFile) {
-    preparedImageBuffer = null;
-    clearImagePreview();
-    return;
-  }
-
-  const file = selectedImageFile;
-  const lowerName = (file.name || "").toLowerCase();
-  const looksLikeImage = file.type.startsWith("image/");
-  const extOk = lowerName.endsWith(".png")
-    || lowerName.endsWith(".jpg")
-    || lowerName.endsWith(".jpeg")
-    || lowerName.endsWith(".gif");
-  if (!looksLikeImage && !extOk) {
-    preparedImageBuffer = null;
-    setStatus(imgStatus, "Only PNG/JPG/GIF is supported", true);
-    return;
-  }
-  if (file.size > IMAGE_FILE_MAX_BYTES) {
-    preparedImageBuffer = null;
-    setStatus(imgStatus, "Image file must be <= 10MB", true);
-    return;
-  }
-
-  const targetW = parseIntInputWithFallback(imgTargetWidthInput, 320, 1, 320);
-  const targetH = parseIntInputWithFallback(imgTargetHeightInput, 140, 1, 240);
-  const cropOffsetY = parseIntInputWithFallback(imgCropOffsetYInput, 0, -2000, 2000);
-
-  try {
-    const img = await loadImageFromFile(file);
-    const canvas = imgPreviewCanvas;
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-
-    canvas.width = targetW;
-    canvas.height = targetH;
-    ctx.fillStyle = "#000000";
-    ctx.fillRect(0, 0, targetW, targetH);
-    ctx.imageSmoothingEnabled = true;
-
-    if (img.width >= targetW && img.height >= targetH) {
-      const scale = Math.max(targetW / img.width, targetH / img.height);
-      const drawW = img.width * scale;
-      const drawH = img.height * scale;
-      const drawX = (targetW - drawW) * 0.5;
-      const minDrawY = targetH - drawH;
-      const maxDrawY = 0;
-      let drawY = (targetH - drawH) * 0.5 + cropOffsetY;
-      if (drawY < minDrawY) drawY = minDrawY;
-      if (drawY > maxDrawY) drawY = maxDrawY;
-      ctx.drawImage(img, drawX, drawY, drawW, drawH);
-    } else {
-      const drawX = Math.floor((targetW - img.width) * 0.5);
-      const drawY = Math.floor((targetH - img.height) * 0.5);
-      ctx.drawImage(img, drawX, drawY, img.width, img.height);
-    }
-
-    preparedImageBuffer = imageDataToRgb565ArrayBuffer(ctx.getImageData(0, 0, targetW, targetH));
-    setStatus(
-      imgStatus,
-      `Prepared ${targetW}x${targetH} RGB565 (${preparedImageBuffer.byteLength} bytes), source ${img.width}x${img.height}, cropOffsetY=${cropOffsetY}`
-    );
-  } catch (err) {
-    preparedImageBuffer = null;
-    setStatus(imgStatus, `Prepare image failed: ${err.message}`, true);
-  }
-}
-
-async function sendPreparedImage() {
-  if (!preparedImageBuffer) {
-    setStatus(imgStatus, "Please choose an image first", true);
-    return;
-  }
-
-  const targetW = parseIntInputWithFallback(imgTargetWidthInput, 320, 1, 320);
-  const targetH = parseIntInputWithFallback(imgTargetHeightInput, 140, 1, 240);
-  const centerX = parseIntInputWithFallback(imgCenterXInput, 160, -1024, 1024);
-  const centerY = parseIntInputWithFallback(imgCenterYInput, 155, -1024, 1024);
-
-  const expectedBytes = targetW * targetH * 2;
-  if (preparedImageBuffer.byteLength !== expectedBytes) {
-    setStatus(imgStatus, "Target size changed. Please reselect image.", true);
-    return;
-  }
-
-  try {
-    const params = new URLSearchParams();
-    params.set("width", String(targetW));
-    params.set("height", String(targetH));
-    params.set("centerX", String(centerX));
-    params.set("centerY", String(centerY));
-
-    const form = new FormData();
-    const blob = new Blob([preparedImageBuffer], { type: "application/octet-stream" });
-    form.append("file", blob, "frame.rgb565");
-
-    const resp = await fetch(`/api/image?${params.toString()}`, {
-      method: "POST",
-      body: form
-    });
-    const raw = await resp.text();
-    if (!resp.ok) throw new Error(raw || `HTTP ${resp.status}`);
-
-    const data = JSON.parse(raw);
-    setStatus(
-      imgStatus,
-      `Image sent: ${data.width}x${data.height}, center=(${data.centerX},${data.centerY})`
-    );
-    await refreshStatus();
-  } catch (err) {
-    setStatus(imgStatus, `Send image failed: ${err.message}`, true);
-  }
-}
-
-function clearPreparedImage() {
-  selectedImageFile = null;
-  preparedImageBuffer = null;
-  if (imgFileInput) imgFileInput.value = "";
-  clearImagePreview();
-  setStatus(imgStatus, "Image cleared");
-}
-
-async function loadCsv() {
-  try {
-    const resp = await fetch("/api/csv");
-    const text = await resp.text();
-    if (!resp.ok) throw new Error(text || `HTTP ${resp.status}`);
-    csvBox.value = text;
-    setStatus(csvStatus, "Loaded /data.csv");
-  } catch (err) {
-    setStatus(csvStatus, `Load failed: ${err.message}`, true);
-  }
-}
-
-async function saveCsv() {
-  try {
-    const body = new FormData();
-    body.append("content", csvBox.value);
-    const resp = await fetch("/api/csv", { method: "POST", body });
-    const text = await resp.text();
-    if (!resp.ok) throw new Error(text || `HTTP ${resp.status}`);
-    setStatus(csvStatus, text || "Saved");
-  } catch (err) {
-    setStatus(csvStatus, `Save failed: ${err.message}`, true);
-  }
+function recordMsg(text) {
+  const t = String(text || "").trim(); if (!t) return;
+  st.msgHistory = [t, ...st.msgHistory.filter((x) => x !== t)].slice(0, 30); saveMsgLocal(); renderMsgHistory();
 }
 
 async function sendMsg() {
+  let text = String(el.msgInput.value || "").replace(/\r?\n+/g, " ").trim();
+  if (!text) return setStatus(el.msgStatus, "请输入消息", true);
+  const pfx = String(el.msgPrefix.value || "").replace(/\r?\n+/g, " ").trim();
+  if (el.msgPrefixEnable.checked && pfx) text = `${pfx} ${text}`.trim();
   try {
-    const body = new FormData();
-    body.append("text", msgBox.value);
-    const resp = await fetch("/api/send", { method: "POST", body });
-    const text = await resp.text();
-    if (!resp.ok) throw new Error(text || `HTTP ${resp.status}`);
-    setStatus(msgStatus, text || "Queued");
-    msgBox.value = "";
-    await refreshStatus();
-  } catch (err) {
-    setStatus(msgStatus, `Send failed: ${err.message}`, true);
-  }
+    const b = new FormData(); b.append("text", text); b.append("immediate", el.msgImmediate.checked ? "1" : "0");
+    const r = await fetch("/api/send", { method: "POST", body: b }); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`);
+    recordMsg(text); el.msgInput.value = ""; setStatus(el.msgStatus, raw || "发送成功");
+  } catch (e) { setStatus(el.msgStatus, `发送失败: ${e.message}`, true); }
 }
 
-async function refreshStatus() {
-  try {
-    const resp = await fetch("/api/status");
-    const data = await resp.json();
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    setStatus(
-      msgStatus,
-      `WebQueue: ${data.queue} | HostQueue: ${data.hostQueue} | CSV reload pending: ${data.csvReloadPending} | Image pending: ${data.imagePending} | AP: ${data.apSsid || "-"} CH:${data.apChannel || "-"}`
-    );
-    selfMacInput.value = data.selfMac || "";
-    if (typeof data.instantRefreshNoKey === "boolean" && document.activeElement !== instantRefreshNoKey) {
-      instantRefreshNoKey.checked = data.instantRefreshNoKey;
-    }
-    const editingBg = document.activeElement === bgVolumeSlider;
-    const editingInsert = document.activeElement === insertVolumeSlider;
-    if (!editingBg && !editingInsert) {
-      const insertVolume = Number.isFinite(data.insertVolume) ? data.insertVolume : data.volume;
-      const bgVolume = Number.isFinite(data.bgVolume) ? data.bgVolume : data.volume;
-      if (Number.isFinite(insertVolume) || Number.isFinite(bgVolume)) {
-        setVolumeUi(insertVolume, bgVolume);
-      }
-    }
-  } catch (err) {
-    setStatus(msgStatus, `Status failed: ${err.message}`, true);
-  }
+function portalRoot() { return `${location.protocol}//${location.host}/`; }
+function clearPreview() { const c = el.imgPreview.getContext("2d"); c.fillStyle = "#000"; c.fillRect(0, 0, el.imgPreview.width, el.imgPreview.height); }
+function fileToImage(f) { return new Promise((res, rej) => { const u = URL.createObjectURL(f); const i = new Image(); i.onload = () => { URL.revokeObjectURL(u); res(i); }; i.onerror = () => { URL.revokeObjectURL(u); rej(new Error("图片解码失败")); }; i.src = u; }); }
+function to565(imgData) {
+  const s = imgData.data; const n = imgData.width * imgData.height; const out = new ArrayBuffer(n * 2); const dv = new DataView(out);
+  for (let i = 0, j = 0; i < n; i += 1, j += 4) { const r = s[j], g = s[j + 1], b = s[j + 2]; const v = ((r & 0xf8) << 8) | ((g & 0xfc) << 3) | (b >> 3); const sw = ((v & 0xff) << 8) | ((v >> 8) & 0xff); dv.setUint16(i * 2, sw, true); }
+  return out;
 }
 
-async function loadRefreshMode() {
+async function prepImage() {
+  if (!st.imageFile) { st.imageBuf = null; clearPreview(); return; }
   try {
-    const resp = await fetch("/api/refreshmode");
-    const data = await resp.json();
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    instantRefreshNoKey.checked = !!data.instantRefreshNoKey;
-    setStatus(refreshModeStatus, instantRefreshNoKey.checked
-      ? "Instant refresh enabled"
-      : "Wait key press for queued web messages");
-  } catch (err) {
-    setStatus(refreshModeStatus, `Refresh mode load failed: ${err.message}`, true);
-  }
+    const w = clamp(toInt(el.imgWidth.value, 320), 1, 320), h = clamp(toInt(el.imgHeight.value, 140), 1, 240), oy = clamp(toInt(el.imgOffsetY.value, 0), -200, 200);
+    const img = await fileToImage(st.imageFile); const fit = el.imgFitMode.value; el.imgPreview.width = w; el.imgPreview.height = h;
+    const ctx = el.imgPreview.getContext("2d", { willReadFrequently: true }); ctx.fillStyle = "#000"; ctx.fillRect(0, 0, w, h);
+    if (fit === "center") { const sc = Math.min(w / img.width, h / img.height, 1); const dw = img.width * sc, dh = img.height * sc; ctx.drawImage(img, (w - dw) / 2, (h - dh) / 2 + oy, dw, dh); }
+    else { const sc = Math.max(w / img.width, h / img.height); const dw = img.width * sc, dh = img.height * sc; let dy = (h - dh) / 2 + oy; dy = Math.max(h - dh, Math.min(0, dy)); ctx.drawImage(img, (w - dw) / 2, dy, dw, dh); }
+    st.imageBuf = to565(ctx.getImageData(0, 0, w, h)); setStatus(el.imgStatus, `已准备 ${w}x${h}`);
+  } catch (e) { st.imageBuf = null; setStatus(el.imgStatus, `图片处理失败: ${e.message}`, true); }
 }
 
-async function saveRefreshMode() {
+async function sendImage() {
+  if (!st.imageBuf) return setStatus(el.imgStatus, "请先选择图片", true);
+  const w = clamp(toInt(el.imgWidth.value, 320), 1, 320), h = clamp(toInt(el.imgHeight.value, 140), 1, 240);
+  if (st.imageBuf.byteLength !== w * h * 2) return setStatus(el.imgStatus, "尺寸变化，请重选图片", true);
   try {
-    const body = new FormData();
-    body.append("instantRefreshNoKey", instantRefreshNoKey.checked ? "1" : "0");
-    const resp = await fetch("/api/refreshmode", { method: "POST", body });
-    const raw = await resp.text();
-    if (!resp.ok) throw new Error(raw || `HTTP ${resp.status}`);
-    const data = JSON.parse(raw);
-    instantRefreshNoKey.checked = !!data.instantRefreshNoKey;
-    setStatus(refreshModeStatus, instantRefreshNoKey.checked
-      ? "Instant refresh saved"
-      : "Key-gated refresh saved");
-  } catch (err) {
-    setStatus(refreshModeStatus, `Refresh mode save failed: ${err.message}`, true);
-  }
+    const p = new URLSearchParams(); p.set("width", w); p.set("height", h); p.set("centerX", clamp(toInt(el.imgCenterX.value, 160), -1024, 1024)); p.set("centerY", clamp(toInt(el.imgCenterY.value, 155), -1024, 1024));
+    const b = new FormData(); b.append("file", new Blob([st.imageBuf], { type: "application/octet-stream" }), "frame.rgb565");
+    const r = await fetch(`/api/image?${p.toString()}`, { method: "POST", body: b }); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`);
+    const d = JSON.parse(raw); setStatus(el.imgStatus, `发送成功 ${d.width}x${d.height}`);
+  } catch (e) { setStatus(el.imgStatus, `发送失败: ${e.message}`, true); }
+}
+function parseCmdLine(line) {
+  const c = line.indexOf(","); if (c < 0) return null;
+  let t = line.slice(c + 1).trim(); if (t.startsWith('"') && t.endsWith('"') && t.length >= 2) t = t.slice(1, -1).replace(/""/g, '"');
+  return t.replace(/\r/g, "").trim();
+}
+function cmdToLine(text, id) { return `${id},"${String(text || "").replace(/\r?\n+/g, " ").replace(/"/g, '""')}"`; }
+
+function renderCmdList() {
+  el.cmdList.innerHTML = "";
+  if (!st.commands.length) { const p = document.createElement("p"); p.className = "status"; p.textContent = "指令库为空"; el.cmdList.appendChild(p); return; }
+  st.commands.forEach((txt, idx) => {
+    const wrap = document.createElement("div"); wrap.className = "list-item";
+    const head = document.createElement("div"); head.className = "item-head";
+    const n = document.createElement("div"); n.textContent = `#${idx + 1}`;
+    const del = document.createElement("button"); del.className = "del"; del.type = "button"; del.textContent = "-";
+    del.addEventListener("click", () => { st.commands.splice(idx, 1); renderCmdList(); });
+    head.append(n, del);
+    const ta = document.createElement("textarea"); ta.rows = 2; ta.value = txt; autoGrow(ta);
+    ta.addEventListener("input", () => { st.commands[idx] = ta.value; autoGrow(ta); });
+    ta.addEventListener("blur", () => { if (!String(ta.value || "").trim()) { st.commands.splice(idx, 1); renderCmdList(); } });
+    wrap.append(head, ta); el.cmdList.appendChild(wrap);
+  });
 }
 
-async function loadHostMac() {
+async function loadCommands() {
   try {
-    const resp = await fetch("/api/hostmac");
-    const data = await resp.json();
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    hostMacInput.value = data.hostMac || "";
-    setStatus(hostMacStatus, data.enabled
-      ? `Host MAC filter enabled: ${data.hostMac}`
-      : "Host MAC filter disabled (accept all)");
-  } catch (err) {
-    setStatus(hostMacStatus, `Host MAC load failed: ${err.message}`, true);
+    const r = await fetch("/api/csv"); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`);
+    st.commands = raw.split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith("#")).map(parseCmdLine).filter((x) => typeof x === "string" && x.trim());
+    renderCmdList(); setStatus(el.cmdStatus, "指令库已加载");
+  } catch (e) { setStatus(el.cmdStatus, `加载失败: ${e.message}`, true); }
+}
+
+async function saveCommands() {
+  try {
+    const lines = st.commands.map((t) => String(t || "").replace(/\r?\n+/g, " ").trim()).filter(Boolean).map((t, i) => cmdToLine(t, i + 1));
+    const b = new FormData(); b.append("content", lines.join("\n") + (lines.length ? "\n" : ""));
+    const r = await fetch("/api/csv", { method: "POST", body: b }); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`);
+    setStatus(el.cmdStatus, raw || "保存成功");
+  } catch (e) { setStatus(el.cmdStatus, `保存失败: ${e.message}`, true); }
+}
+
+function splitSchedule(line) {
+  const cols = []; let s = 0;
+  for (let i = 0; i < 11; i += 1) { const c = line.indexOf(",", s); if (c < 0) { cols.push(line.slice(s).trim()); s = line.length; break; } cols.push(line.slice(s, c).trim()); s = c + 1; }
+  if (cols.length < 11) return null; const tail = line.slice(s).trim(); if (tail) cols.push(tail); return cols;
+}
+function parseScheduleMessageCell(cell) {
+  let t = String(cell || "").trim();
+  if (t.startsWith("\"") && t.endsWith("\"") && t.length >= 2) {
+    t = t.slice(1, -1).replace(/""/g, "\"");
   }
+  return t.replace(/\r?\n+/g, " ").trim();
+}
+function encodeScheduleMessageCell(text) {
+  const t = String(text || "").replace(/\r?\n+/g, " ").trim();
+  return `"${t.replace(/"/g, "\"\"")}"`;
+}
+const weekMon = (d) => (d.getDay() === 0 ? 7 : d.getDay());
+function schRepeat(it) { if (it.d) return "daily"; if (it.w) return "weekly"; if (it.m) return "monthly"; if (it.y) return "yearly"; return "none"; }
+function setSchRepeat(it, type, day) {
+  it.d = it.m = it.w = it.y = false;
+  if (type === "daily") it.d = true;
+  if (type === "weekly") { it.w = true; it.week = weekMon(day); }
+  if (type === "monthly") it.m = true;
+  if (type === "yearly") it.y = true;
+  if (type === "none") { it.Y = day.getFullYear(); it.M = day.getMonth() + 1; it.D = day.getDate(); }
+}
+function schPrefix(it) { if (it.d) return "日重复"; if (it.w) return "周重复"; if (it.m) return "月重复"; if (it.y) return "年重复"; return "不重复"; }
+function schTime(it) { return `${pad2(it.h)}:${pad2(it.i)}:${pad2(it.s)}`; }
+
+function parseSchedules(text) {
+  const out = [];
+  text.split(/\r?\n/).forEach((raw, idx) => {
+    const line = raw.trim(); if (!line || line.startsWith("#") || line.startsWith(";")) return;
+    const c = splitSchedule(line); if (!c) return;
+    const Y = toInt(c[0], -1), M = toInt(c[1], -1), D = toInt(c[2], -1), h = toInt(c[3], 0), i = toInt(c[4], 0), s = toInt(c[5], 0);
+    if (Y < 2000 || Y > 2099 || M < 1 || M > 12 || D < 1 || D > 31 || h < 0 || h > 23 || i < 0 || i > 59 || s < 0 || s > 59) return;
+    const dt = new Date(Y, M - 1, D);
+    const wkRaw = toInt(c[6], 0);
+    const wk = (wkRaw >= 1 && wkRaw <= 7) ? wkRaw : weekMon(dt);
+    out.push({ id: `sc_${Date.now()}_${idx}_${Math.random().toString(16).slice(2, 6)}`, Y, M, D, h, i, s, week: wk, d: toInt(c[7], 0) !== 0, m: toInt(c[8], 0) !== 0, w: toInt(c[9], 0) !== 0, y: toInt(c[10], 0) !== 0, text: parseScheduleMessageCell(c[11] || "") });
+  });
+  return out;
+}
+
+function schedulesToCsv(list) {
+  const lines = ["#YEAR,MOUTH,DAY,HOUR,MIN,SEC,WEEK,IsDayRange,IsMouthRange,IsWeekRange,IsYearRange,ScheduleMessage"];
+  [...list].sort((a, b) => (a.Y - b.Y) || (a.M - b.M) || (a.D - b.D) || (a.h - b.h) || (a.i - b.i) || (a.s - b.s)).forEach((it) => {
+    const line = `${it.Y},${it.M},${it.D},${it.h},${it.i},${it.s},${it.week},${it.d ? 1 : 0},${it.m ? 1 : 0},${it.w ? 1 : 0},${it.y ? 1 : 0},${encodeScheduleMessageCell(it.text)}`;
+    lines.push(line);
+  });
+  return `${lines.join("\n")}\n`;
+}
+
+function pickDay() {
+  const v = el.scheduleDate.value; if (!v) return new Date();
+  const p = v.split("-").map((x) => parseInt(x, 10)); if (p.length !== 3 || p.some((n) => !Number.isFinite(n))) return new Date();
+  return new Date(p[0], p[1] - 1, p[2]);
+}
+function schMatch(it, day) {
+  const Y = day.getFullYear(), M = day.getMonth() + 1, D = day.getDate(), w = weekMon(day);
+  if (it.d) return true; if (it.w && it.week === w) return true; if (it.m && it.D === D) return true; if (it.y && it.M === M && it.D === D) return true;
+  return it.Y === Y && it.M === M && it.D === D;
+}
+function schPast(it, day) {
+  const n = new Date(); const t0 = new Date(n.getFullYear(), n.getMonth(), n.getDate()); const d0 = new Date(day.getFullYear(), day.getMonth(), day.getDate());
+  if (d0 < t0) return true; if (d0 > t0) return false;
+  return (it.h * 3600 + it.i * 60 + it.s) < (n.getHours() * 3600 + n.getMinutes() * 60 + n.getSeconds());
+}
+function renderSchedules() {
+  el.scheduleList.innerHTML = "";
+  const day = pickDay();
+  const shown = st.schedules.filter((it) => schMatch(it, day)).sort((a, b) => (a.h - b.h) || (a.i - b.i) || (a.s - b.s));
+  if (!shown.length) { const p = document.createElement("p"); p.className = "status"; p.textContent = "当日无日程"; el.scheduleList.appendChild(p); return; }
+
+  shown.forEach((it) => {
+    const wrap = document.createElement("div"); wrap.className = "list-item"; if (schPast(it, day)) wrap.classList.add("is-past");
+    const head = document.createElement("div"); head.className = "item-head";
+    const lab = document.createElement("div"); lab.className = "item-repeat"; lab.textContent = schPrefix(it);
+    const del = document.createElement("button"); del.className = "del"; del.type = "button"; del.textContent = "-";
+    del.addEventListener("click", () => { st.schedules = st.schedules.filter((x) => x.id !== it.id); renderSchedules(); });
+    head.append(lab, del);
+
+    const row = document.createElement("div"); row.className = "item-row";
+    const ti = document.createElement("input"); ti.type = "time"; ti.step = "1"; ti.value = schTime(it);
+    ti.addEventListener("change", () => { const [h, m, s] = ti.value.split(":").map((v) => toInt(v, 0)); it.h = clamp(h, 0, 23); it.i = clamp(m, 0, 59); it.s = clamp(s, 0, 59); renderSchedules(); });
+
+    const rp = document.createElement("select");
+    [["none", "不重复"], ["daily", "每日重复"], ["weekly", "每周重复"], ["monthly", "每月重复"], ["yearly", "每年重复"]].forEach(([v, t]) => { const o = document.createElement("option"); o.value = v; o.textContent = t; rp.appendChild(o); });
+    rp.value = schRepeat(it);
+    rp.addEventListener("change", () => { setSchRepeat(it, rp.value, day); renderSchedules(); });
+
+    const tx = document.createElement("textarea"); tx.rows = 2; tx.placeholder = "内容（可选）"; tx.value = it.text || ""; autoGrow(tx);
+    tx.addEventListener("input", () => { it.text = tx.value.replace(/\r?\n+/g, " ").trim(); autoGrow(tx); });
+
+    row.append(ti, rp, tx); wrap.append(head, row); el.scheduleList.appendChild(wrap);
+  });
+}
+
+async function loadSchedules() {
+  try {
+    const r = await fetch("/api/schedule"); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`);
+    st.schedules = parseSchedules(raw); renderSchedules(); setStatus(el.scheduleStatus, "日程表已加载");
+  } catch (e) { setStatus(el.scheduleStatus, `加载失败: ${e.message}`, true); }
+}
+
+async function saveSchedules() {
+  try {
+    const b = new FormData(); b.append("content", schedulesToCsv(st.schedules));
+    const r = await fetch("/api/schedule", { method: "POST", body: b }); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`);
+    setStatus(el.scheduleStatus, raw || "日程已保存");
+  } catch (e) { setStatus(el.scheduleStatus, `保存失败: ${e.message}`, true); }
+}
+
+function addSchedule() {
+  const d = pickDay(); const [h, m, s] = (el.scheduleAddTime.value || "09:00:00").split(":").map((x) => toInt(x, 0));
+  const it = { id: `sc_${Date.now()}_${Math.random().toString(16).slice(2, 6)}`, Y: d.getFullYear(), M: d.getMonth() + 1, D: d.getDate(), h: clamp(h, 0, 23), i: clamp(m, 0, 59), s: clamp(s, 0, 59), week: weekMon(d), d: false, m: false, w: false, y: false, text: String(el.scheduleAddText.value || "").replace(/\r?\n+/g, " ").trim() };
+  setSchRepeat(it, el.scheduleAddRepeat.value, d); st.schedules.push(it); el.scheduleAddText.value = ""; renderSchedules(); setStatus(el.scheduleStatus, "已添加（记得保存）");
+}
+
+function rtcPayload() {
+  const b = new FormData();
+  b.append("year", String(clamp(toInt(el.rtcYear.value, 2026), 2000, 2099)));
+  b.append("month", String(clamp(toInt(el.rtcMonth.value, 1), 1, 12)));
+  b.append("day", String(clamp(toInt(el.rtcDay.value, 1), 1, 31)));
+  b.append("hour", String(clamp(toInt(el.rtcHour.value, 0), 0, 23)));
+  b.append("minute", String(clamp(toInt(el.rtcMinute.value, 0), 0, 59)));
+  b.append("second", String(clamp(toInt(el.rtcSecond.value, 0), 0, 59)));
+  return b;
+}
+function rtcFill(d) { el.rtcYear.value = d.year; el.rtcMonth.value = d.month; el.rtcDay.value = d.day; el.rtcHour.value = d.hour; el.rtcMinute.value = d.minute; el.rtcSecond.value = d.second; }
+function rtcText(d) { return `当前RTC: ${d.year}-${pad2(d.month)}-${pad2(d.day)} ${pad2(d.hour)}:${pad2(d.minute)}:${pad2(d.second)} (W${d.week})`; }
+
+async function loadRtc() {
+  try { const r = await fetch("/api/rtc"); const d = await r.json(); if (!r.ok) throw new Error(`HTTP ${r.status}`); if (!d.ok) throw new Error("RTC读取失败"); el.rtcNow.textContent = rtcText(d); rtcFill(d); }
+  catch (e) { setStatus(el.rtcStatus, `RTC读取失败: ${e.message}`, true); }
+}
+async function rtcSet() {
+  try { const r = await fetch("/api/rtc/set", { method: "POST", body: rtcPayload() }); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`); const d = JSON.parse(raw); if (!d.ok) throw new Error("写后读失败"); el.rtcNow.textContent = rtcText(d); rtcFill(d); setStatus(el.rtcStatus, "RTC设置成功"); }
+  catch (e) { setStatus(el.rtcStatus, `RTC设置失败: ${e.message}`, true); }
+}
+async function rtcSyncPhone() {
+  const n = new Date(); el.rtcYear.value = n.getFullYear(); el.rtcMonth.value = n.getMonth() + 1; el.rtcDay.value = n.getDate(); el.rtcHour.value = n.getHours(); el.rtcMinute.value = n.getMinutes(); el.rtcSecond.value = n.getSeconds();
+  try { const r = await fetch("/api/rtc/sync-phone", { method: "POST", body: rtcPayload() }); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`); const d = JSON.parse(raw); if (!d.ok) throw new Error("写后读失败"); el.rtcNow.textContent = rtcText(d); rtcFill(d); setStatus(el.rtcStatus, "已同步手机时间"); }
+  catch (e) { setStatus(el.rtcStatus, `同步失败: ${e.message}`, true); }
+}
+
+function setVolUi(i, b) {
+  i = clamp(toInt(i, 20), 0, 100); b = clamp(toInt(b, 20), 0, 100);
+  el.insertVol.value = String(i); el.bgVol.value = String(b); el.insertVolVal.textContent = `${i}%`; el.bgVolVal.textContent = `${b}%`;
+}
+async function pushVol(persist) {
+  const b = new FormData(); b.append("insertVolume", String(clamp(toInt(el.insertVol.value, 20), 0, 100))); b.append("bgVolume", String(clamp(toInt(el.bgVol.value, 20), 0, 100))); b.append("persist", persist ? "1" : "0");
+  const r = await fetch("/api/volume", { method: "POST", body: b }); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`); return JSON.parse(raw);
+}
+async function loadDisplayAudio() {
+  try {
+    const [vr, fr] = await Promise.all([fetch("/api/volume"), fetch("/api/effects")]); const vd = await vr.json(); const fd = await fr.json();
+    if (vr.ok) setVolUi(Number.isFinite(vd.insertVolume) ? vd.insertVolume : vd.volume, Number.isFinite(vd.bgVolume) ? vd.bgVolume : vd.volume);
+    if (fr.ok) { el.backlight.value = String(fd.backlight ?? 1); el.backlightTime.value = String(fd.backlightTime ?? -1); }
+    setStatus(el.displayStatus, "显示与音量参数已同步");
+  } catch (e) { setStatus(el.displayStatus, `加载失败: ${e.message}`, true); }
+}
+async function saveDisplay() {
+  try {
+    const b = new FormData(); b.append("backlight", String(parseFloat(el.backlight.value || "1"))); b.append("backlightTime", String(toInt(el.backlightTime.value, -1)));
+    const r = await fetch("/api/effects", { method: "POST", body: b }); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`); const d = JSON.parse(raw);
+    setStatus(el.displayStatus, `保存成功: 亮度=${d.backlight}, 息屏=${d.backlightTime}s`);
+  } catch (e) { setStatus(el.displayStatus, `保存失败: ${e.message}`, true); }
+}
+async function loadWireless() {
+  try {
+    const [sr, ar, tr, hr] = await Promise.all([fetch("/api/status"), fetch("/api/apconfig"), fetch("/api/staconfig"), fetch("/api/hostmac")]);
+    const s = await sr.json(), a = await ar.json(), t = await tr.json(), h = await hr.json();
+    if (ar.ok) { el.apSsid.value = a.ssid || ""; el.apPassword.value = ""; el.apChannel.value = String(a.channel || 1); }
+    if (tr.ok) { el.staSsid.value = t.ssid || ""; el.staPassword.value = ""; }
+    if (hr.ok) el.hostMac.value = h.hostMac || "";
+    if (sr.ok) { el.selfMac.value = s.selfMac || ""; setStatus(el.wirelessStatus, `队列: Web ${s.queue} / Host ${s.hostQueue} | AP=${s.apSsid || "-"} CH=${s.apChannel || "-"}`); }
+  } catch (e) { setStatus(el.wirelessStatus, `加载无线信息失败: ${e.message}`, true); }
+}
+
+async function saveAp() {
+  try {
+    const b = new FormData(); b.append("ssid", el.apSsid.value.trim()); b.append("password", el.apPassword.value); b.append("channel", el.apChannel.value.trim());
+    const r = await fetch("/api/apconfig", { method: "POST", body: b }); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`); const d = JSON.parse(raw);
+    setStatus(el.wirelessStatus, `AP设置已保存: ${d.ssid} CH${d.channel}`); el.apPassword.value = "";
+  } catch (e) { setStatus(el.wirelessStatus, `AP设置保存失败: ${e.message}`, true); }
+}
+
+async function saveSta() {
+  try {
+    const b = new FormData(); b.append("ssid", el.staSsid.value.trim()); b.append("password", el.staPassword.value);
+    const r = await fetch("/api/staconfig", { method: "POST", body: b }); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`); const d = JSON.parse(raw);
+    setStatus(el.wirelessStatus, `联网设置已保存: ${d.ssid}`); el.staPassword.value = "";
+  } catch (e) { setStatus(el.wirelessStatus, `联网设置保存失败: ${e.message}`, true); }
 }
 
 async function saveHostMac() {
   try {
-    const body = new FormData();
-    body.append("hostMac", hostMacInput.value.trim());
-    const resp = await fetch("/api/hostmac", { method: "POST", body });
-    const raw = await resp.text();
-    if (!resp.ok) throw new Error(raw || `HTTP ${resp.status}`);
-    const data = JSON.parse(raw);
-    hostMacInput.value = data.hostMac || "";
-    setStatus(hostMacStatus, data.enabled
-      ? `Host MAC saved: ${data.hostMac}`
-      : "Host MAC filter disabled");
-  } catch (err) {
-    setStatus(hostMacStatus, `Host MAC save failed: ${err.message}`, true);
-  }
+    const b = new FormData(); b.append("hostMac", el.hostMac.value.trim());
+    const r = await fetch("/api/hostmac", { method: "POST", body: b }); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`); const d = JSON.parse(raw);
+    setStatus(el.wirelessStatus, d.enabled ? `HostMAC已设置: ${d.hostMac}` : "HostMAC过滤已关闭");
+  } catch (e) { setStatus(el.wirelessStatus, `HostMAC保存失败: ${e.message}`, true); }
 }
 
-async function loadApConfig() {
+async function loadBattery() {
   try {
-    const resp = await fetch("/api/apconfig");
-    const data = await resp.json();
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    apSsidInput.value = data.ssid || "";
-    apPasswordInput.value = "";
-    apChannelInput.value = String(data.channel || 1);
-    setStatus(apConfigStatus, data.passwordSet
-      ? "AP password is set on device"
-      : "Open AP (no password)");
-  } catch (err) {
-    setStatus(apConfigStatus, `AP config load failed: ${err.message}`, true);
-  }
+    const r = await fetch("/api/battery"); const d = await r.json(); if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    if (!d.ok) return setStatus(el.batteryStatus, "未接入电池检测硬件", true);
+    setStatus(el.batteryStatus, `电量: ${d.percent}%`);
+  } catch (e) { setStatus(el.batteryStatus, `读取失败: ${e.message}`, true); }
 }
 
-async function loadEffects() {
-  try {
-    const resp = await fetch("/api/effects");
-    const data = await resp.json();
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+function bind() {
+  el.tabMsg.addEventListener("click", () => switchPush("msg"));
+  el.tabImg.addEventListener("click", () => switchPush("img"));
+  el.msgHistory.addEventListener("change", () => { if (el.msgHistory.value) el.msgInput.value = el.msgHistory.value; });
+  el.msgPrefixEnable.addEventListener("change", saveMsgLocal); el.msgPrefix.addEventListener("input", saveMsgLocal);
+  el.btnSendMsg.addEventListener("click", sendMsg); el.btnClearMsg.addEventListener("click", () => { el.msgInput.value = ""; el.msgInput.focus(); });
 
-    wrongProb3Input.value = String(data.wrongProb3 ?? 25);
-    wrongProb5Input.value = String(data.wrongProb5 ?? 12);
-    enableReprintInput.checked = !!data.enableReprint;
-    backlightInput.value = String(data.backlight ?? 1);
-    backlightTimeInput.value = String(data.backlightTime ?? -1);
+  el.btnCopyPortalUrl.addEventListener("click", async () => setStatus(el.imgStatus, (await copyText(el.portalUrl.value || portalRoot())) ? "地址已复制" : "复制失败", false));
+  el.imgFile.addEventListener("change", async (ev) => { st.imageFile = ev.target.files && ev.target.files[0] ? ev.target.files[0] : null; await prepImage(); });
+  [el.imgOffsetY, el.imgFitMode, el.imgWidth, el.imgHeight].forEach((x) => { x.addEventListener("input", prepImage); x.addEventListener("change", prepImage); });
+  el.btnSendImg.addEventListener("click", sendImage);
+  el.btnClearImg.addEventListener("click", () => { st.imageFile = null; st.imageBuf = null; el.imgFile.value = ""; clearPreview(); setStatus(el.imgStatus, "已清除图片"); });
 
-    setStatus(
-      effectsStatus,
-      `Loaded: P3=${wrongProb3Input.value} P5=${wrongProb5Input.value} Reprint=${enableReprintInput.checked ? "on" : "off"} Backlight=${backlightInput.value} BacklightTime=${backlightTimeInput.value}`
-    );
-  } catch (err) {
-    setStatus(effectsStatus, `Effects load failed: ${err.message}`, true);
-  }
+  el.btnCmdAdd.addEventListener("click", () => { const t = String(el.cmdAddInput.value || "").trim(); if (!t) return; st.commands.push(t); el.cmdAddInput.value = ""; renderCmdList(); setStatus(el.cmdStatus, "已添加（记得保存）"); });
+  el.btnCmdSave.addEventListener("click", saveCommands);
+
+  el.scheduleDate.addEventListener("change", renderSchedules); el.btnScheduleAdd.addEventListener("click", addSchedule); el.btnScheduleSave.addEventListener("click", saveSchedules);
+  el.btnRtcSet.addEventListener("click", rtcSet); el.btnRtcSyncPhone.addEventListener("click", rtcSyncPhone);
+
+  el.insertVol.addEventListener("input", () => { setVolUi(el.insertVol.value, el.bgVol.value); if (st.volTimer) clearTimeout(st.volTimer); st.volTimer = setTimeout(async () => { st.volTimer = null; try { const d = await pushVol(false); setVolUi(d.insertVolume, d.bgVolume); } catch (_) {} }, 120); });
+  el.bgVol.addEventListener("input", () => { setVolUi(el.insertVol.value, el.bgVol.value); if (st.volTimer) clearTimeout(st.volTimer); st.volTimer = setTimeout(async () => { st.volTimer = null; try { const d = await pushVol(false); setVolUi(d.insertVolume, d.bgVolume); } catch (_) {} }, 120); });
+  el.insertVol.addEventListener("change", async () => { try { const d = await pushVol(true); setVolUi(d.insertVolume, d.bgVolume); } catch (e) { setStatus(el.displayStatus, `音量保存失败: ${e.message}`, true); } });
+  el.bgVol.addEventListener("change", async () => { try { const d = await pushVol(true); setVolUi(d.insertVolume, d.bgVolume); } catch (e) { setStatus(el.displayStatus, `音量保存失败: ${e.message}`, true); } });
+
+  el.btnSaveDisplay.addEventListener("click", saveDisplay);
+  el.btnSaveAp.addEventListener("click", saveAp);
+  el.btnSaveSta.addEventListener("click", saveSta);
+  el.btnSaveHostMac.addEventListener("click", saveHostMac);
+  el.btnCopySelfMac.addEventListener("click", async () => {
+    const t = String(el.selfMac.value || "").trim(); if (!t) return setStatus(el.wirelessStatus, "MAC为空", true);
+    setStatus(el.wirelessStatus, (await copyText(t)) ? "MAC已复制" : "复制失败");
+  });
 }
 
-async function saveEffects() {
-  const wrong3 = Number.parseInt((wrongProb3Input.value || "").trim(), 10);
-  const wrong5 = Number.parseInt((wrongProb5Input.value || "").trim(), 10);
-  const backlight = Number.parseFloat((backlightInput.value || "").trim());
-  const backlightTime = Number.parseInt((backlightTimeInput.value || "").trim(), 10);
-
-  if (!Number.isFinite(wrong3) || wrong3 < 0 || wrong3 > 100) {
-    setStatus(effectsStatus, "P3 must be 0-100", true);
-    return;
-  }
-  if (!Number.isFinite(wrong5) || wrong5 < 0 || wrong5 > 100) {
-    setStatus(effectsStatus, "P5 must be 0-100", true);
-    return;
-  }
-  if (!Number.isFinite(backlight) || backlight < 0 || backlight > 1) {
-    setStatus(effectsStatus, "Backlight must be 0.0-1.0", true);
-    return;
-  }
-  if (!Number.isFinite(backlightTime)) {
-    setStatus(effectsStatus, "BacklightTime must be integer", true);
-    return;
-  }
-
-  try {
-    const body = new FormData();
-    body.append("wrongProb3", String(wrong3));
-    body.append("wrongProb5", String(wrong5));
-    body.append("enableReprint", enableReprintInput.checked ? "1" : "0");
-    body.append("backlight", String(backlight));
-    body.append("backlightTime", String(backlightTime));
-
-    const resp = await fetch("/api/effects", { method: "POST", body });
-    const raw = await resp.text();
-    if (!resp.ok) throw new Error(raw || `HTTP ${resp.status}`);
-    const data = JSON.parse(raw);
-
-    wrongProb3Input.value = String(data.wrongProb3);
-    wrongProb5Input.value = String(data.wrongProb5);
-    enableReprintInput.checked = !!data.enableReprint;
-    backlightInput.value = String(data.backlight);
-    backlightTimeInput.value = String(data.backlightTime);
-
-    setStatus(
-      effectsStatus,
-      `Saved: P3=${data.wrongProb3} P5=${data.wrongProb5} Reprint=${data.enableReprint ? "on" : "off"} Backlight=${data.backlight} BacklightTime=${data.backlightTime}`
-    );
-  } catch (err) {
-    setStatus(effectsStatus, `Effects save failed: ${err.message}`, true);
-  }
+async function boot() {
+  switchPush("msg"); bind(); loadMsgLocal();
+  el.portalUrl.value = portalRoot();
+  const n = new Date(); el.scheduleDate.value = `${n.getFullYear()}-${pad2(n.getMonth() + 1)}-${pad2(n.getDate())}`;
+  clearPreview(); autoGrow(el.cmdAddInput); el.cmdAddInput.addEventListener("input", () => autoGrow(el.cmdAddInput));
+  await Promise.all([loadCommands(), loadSchedules(), loadRtc(), loadDisplayAudio(), loadWireless(), loadBattery()]);
+  setInterval(loadWireless, 1500);
+  setInterval(loadRtc, 5000);
 }
 
-async function saveApConfig() {
-  try {
-    const body = new FormData();
-    body.append("ssid", apSsidInput.value.trim());
-    body.append("password", apPasswordInput.value);
-    body.append("channel", apChannelInput.value.trim());
-    const resp = await fetch("/api/apconfig", { method: "POST", body });
-    const raw = await resp.text();
-    if (!resp.ok) throw new Error(raw || `HTTP ${resp.status}`);
-    const data = JSON.parse(raw);
-    setStatus(apConfigStatus, `Saved: SSID=${data.ssid} CH=${data.channel}. Reboot required.`);
-    apPasswordInput.value = "";
-    await refreshStatus();
-  } catch (err) {
-    setStatus(apConfigStatus, `AP config save failed: ${err.message}`, true);
-  }
-}
-
-function clampPercent(value, fallback = 0) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return fallback;
-  return Math.max(0, Math.min(100, Math.round(n)));
-}
-
-function setVolumeUi(insertValue, bgValue) {
-  const insert = clampPercent(insertValue, clampPercent(insertVolumeSlider.value, 20));
-  const bg = clampPercent(bgValue, clampPercent(bgVolumeSlider.value, 20));
-  insertVolumeSlider.value = String(insert);
-  bgVolumeSlider.value = String(bg);
-  insertVolumeValue.textContent = `${insert}%`;
-  bgVolumeValue.textContent = `${bg}%`;
-}
-
-async function loadVolume() {
-  try {
-    const resp = await fetch("/api/volume");
-    const data = await resp.json();
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const insertVolume = Number.isFinite(data.insertVolume) ? data.insertVolume : data.volume;
-    const bgVolume = Number.isFinite(data.bgVolume) ? data.bgVolume : data.volume;
-    setVolumeUi(insertVolume, bgVolume);
-    setStatus(volumeStatus, "Volume synced (insert + background)");
-  } catch (err) {
-    setStatus(volumeStatus, `Volume load failed: ${err.message}`, true);
-  }
-}
-
-async function pushVolumeWithPersist(insertValue, bgValue, persist) {
-  try {
-    const insert = clampPercent(insertValue, 0);
-    const bg = clampPercent(bgValue, 0);
-    const body = new FormData();
-    body.append("insertVolume", String(insert));
-    body.append("bgVolume", String(bg));
-    body.append("persist", persist ? "1" : "0");
-    const resp = await fetch("/api/volume", { method: "POST", body });
-    const raw = await resp.text();
-    if (!resp.ok) throw new Error(raw || `HTTP ${resp.status}`);
-    const data = JSON.parse(raw);
-    setVolumeUi(data.insertVolume, data.bgVolume);
-    setStatus(volumeStatus, persist
-      ? `Saved: Insert ${data.insertVolume}% | BG ${data.bgVolume}%`
-      : `Preview: Insert ${data.insertVolume}% | BG ${data.bgVolume}%`);
-  } catch (err) {
-    setStatus(volumeStatus, `Volume apply failed: ${err.message}`, true);
-  }
-}
-
-function scheduleVolumePush() {
-  if (volumePushTimer) {
-    clearTimeout(volumePushTimer);
-  }
-  volumePushTimer = setTimeout(() => {
-    pushVolumeWithPersist(insertVolumeSlider.value, bgVolumeSlider.value, false);
-    volumePushTimer = null;
-  }, 120);
-}
-
-document.getElementById("btnLoadCsv").addEventListener("click", loadCsv);
-document.getElementById("btnSaveCsv").addEventListener("click", saveCsv);
-document.getElementById("btnSendMsg").addEventListener("click", sendMsg);
-document.getElementById("btnClearMsg").addEventListener("click", () => {
-  msgBox.value = "";
-  msgBox.focus();
-});
-instantRefreshNoKey.addEventListener("change", saveRefreshMode);
-bgVolumeSlider.addEventListener("input", () => {
-  setVolumeUi(insertVolumeSlider.value, bgVolumeSlider.value);
-  scheduleVolumePush();
-});
-insertVolumeSlider.addEventListener("input", () => {
-  setVolumeUi(insertVolumeSlider.value, bgVolumeSlider.value);
-  scheduleVolumePush();
-});
-bgVolumeSlider.addEventListener("change", () => {
-  setVolumeUi(insertVolumeSlider.value, bgVolumeSlider.value);
-  pushVolumeWithPersist(insertVolumeSlider.value, bgVolumeSlider.value, true);
-});
-insertVolumeSlider.addEventListener("change", () => {
-  setVolumeUi(insertVolumeSlider.value, bgVolumeSlider.value);
-  pushVolumeWithPersist(insertVolumeSlider.value, bgVolumeSlider.value, true);
-});
-document.getElementById("btnSaveHostMac").addEventListener("click", saveHostMac);
-document.getElementById("btnSaveApConfig").addEventListener("click", saveApConfig);
-document.getElementById("btnSaveEffects").addEventListener("click", saveEffects);
-document.getElementById("btnSendImage").addEventListener("click", sendPreparedImage);
-document.getElementById("btnClearImage").addEventListener("click", clearPreparedImage);
-btnCopyPortalUrl.addEventListener("click", async () => {
-  const ok = await copyText(getPortalRootUrl());
-  setStatus(portalBrowserHint, ok ? "Portal URL copied" : "Copy URL failed", !ok);
-});
-imgFileInput.addEventListener("change", async (ev) => {
-  const file = ev.target.files && ev.target.files[0] ? ev.target.files[0] : null;
-  selectedImageFile = file;
-  if (!file) {
-    preparedImageBuffer = null;
-    clearImagePreview();
-    setStatus(imgStatus, "");
-    return;
-  }
-  await prepareImageBufferFromSelectedFile();
-});
-imgTargetWidthInput.addEventListener("change", prepareImageBufferFromSelectedFile);
-imgTargetHeightInput.addEventListener("change", prepareImageBufferFromSelectedFile);
-imgCropOffsetYInput.addEventListener("change", prepareImageBufferFromSelectedFile);
-document.getElementById("btnCopySelfMac").addEventListener("click", async () => {
-  const mac = (selfMacInput.value || "").trim();
-  if (!mac) {
-    setStatus(selfMacStatus, "MAC is empty", true);
-    return;
-  }
-  const ok = await copyText(mac);
-  setStatus(selfMacStatus, ok ? "MAC copied" : "Copy failed", !ok);
-});
-
-setInterval(refreshStatus, 1000);
-loadCsv();
-loadVolume();
-loadRefreshMode();
-loadHostMac();
-loadApConfig();
-loadEffects();
-setupPortalBrowserHint();
-clearImagePreview();
-refreshStatus();
+boot();

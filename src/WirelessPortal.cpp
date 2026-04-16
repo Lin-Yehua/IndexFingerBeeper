@@ -15,6 +15,7 @@
 #include "AppGlobals.h"
 #include "EspNowMessage.h"
 #include "UsbAppMode.h"
+#include "Ds1302Rtc.h"
 
 namespace {
 
@@ -243,6 +244,16 @@ bool parseFloatString(const String &raw, float &outValue) {
 
   outValue = parsed;
   return true;
+}
+
+int64_t daysFromCivil(int year, unsigned month, unsigned day) {
+  year -= (month <= 2U) ? 1 : 0;
+  const int era = (year >= 0 ? year : year - 399) / 400;
+  const unsigned yoe = static_cast<unsigned>(year - era * 400);
+  const int monthAdj = static_cast<int>(month) + ((month > 2U) ? -3 : 9);
+  const unsigned doy = static_cast<unsigned>((153 * monthAdj + 2) / 5 + static_cast<int>(day) - 1);
+  const unsigned doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;
+  return static_cast<int64_t>(era) * 146097LL + static_cast<int64_t>(doe) - 719468LL;
 }
 
 void resetImageUploadStateLocked() {
@@ -1036,6 +1047,211 @@ bool saveDataCsvText(const String &content) {
   return true;
 }
 
+String readScheduleCsvText() {
+  if (!fatMounted) return "";
+  fs::File f = FFat.open("/schedule.csv", FILE_READ);
+  if (!f) return "";
+  String content = f.readString();
+  f.close();
+  return content;
+}
+
+bool saveScheduleCsvText(const String &content) {
+  if (!fatMounted) return false;
+  fs::File f = FFat.open("/schedule.csv", "w");
+  if (!f) return false;
+  const size_t written = f.print(content);
+  f.close();
+  return written == content.length();
+}
+
+void loadStaConfigFromSettingIni(String &outSsid, String &outPassword) {
+  outSsid = "";
+  outPassword = "";
+  if (!fatMounted) return;
+
+  fs::File f = FFat.open("/setting.ini", FILE_READ);
+  if (!f) return;
+
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (!line.length()) continue;
+    if (line.startsWith("#") || line.startsWith(";")) continue;
+
+    const int eq = line.indexOf('=');
+    if (eq <= 0) continue;
+    String key = line.substring(0, eq);
+    String value = line.substring(eq + 1);
+    key.trim();
+    key.toLowerCase();
+    value = stripIniValue(value);
+
+    if (key == "netssid") {
+      outSsid = value;
+    } else if (key == "netpassword") {
+      outPassword = value;
+    }
+  }
+  f.close();
+}
+
+bool persistStaConfigToSettingIni(const String &ssidRaw, const String &passwordRaw) {
+  if (!fatMounted) return false;
+
+  String ssid = ssidRaw;
+  String password = passwordRaw;
+  ssid.trim();
+  password.trim();
+
+  if (!ssid.length()) return false;
+  if (ssid.length() > 32) return false;
+  if (password.length() && (password.length() < 8 || password.length() > 63)) return false;
+
+  String original;
+  if (FFat.exists("/setting.ini")) {
+    fs::File rf = FFat.open("/setting.ini", FILE_READ);
+    if (!rf) return false;
+    original = rf.readString();
+    rf.close();
+  }
+
+  bool foundSsid = false;
+  bool foundPassword = false;
+  String output;
+  output.reserve(original.length() + 128);
+
+  int start = 0;
+  while (start <= original.length()) {
+    const int end = original.indexOf('\n', start);
+    String line = (end >= 0) ? original.substring(start, end) : original.substring(start);
+
+    String trimmed = line;
+    trimmed.trim();
+    if (trimmed.length() && !trimmed.startsWith("#") && !trimmed.startsWith(";")) {
+      const int eq = trimmed.indexOf('=');
+      if (eq > 0) {
+        String key = trimmed.substring(0, eq);
+        key.trim();
+        key.toLowerCase();
+        if (key == "netssid") {
+          line = "NetSSID = \"" + ssid + "\";";
+          foundSsid = true;
+        } else if (key == "netpassword") {
+          line = "NetPassword = \"" + password + "\";";
+          foundPassword = true;
+        }
+      }
+    }
+
+    output += line;
+    if (end >= 0) {
+      output += '\n';
+      start = end + 1;
+    } else {
+      break;
+    }
+  }
+
+  if (!foundSsid) {
+    if (output.length() && output[output.length() - 1] != '\n') output += '\n';
+    output += "NetSSID = \"" + ssid + "\";\n";
+  }
+  if (!foundPassword) {
+    if (output.length() && output[output.length() - 1] != '\n') output += '\n';
+    output += "NetPassword = \"" + password + "\";\n";
+  }
+
+  fs::File wf = FFat.open("/setting.ini", "w");
+  if (!wf) return false;
+  const size_t written = wf.print(output);
+  wf.close();
+  return written == output.length();
+}
+
+String rtcDateTimeJson() {
+  Ds1302DateTime dt;
+  if (!rtc.readDateTime(dt) || !ds1302IsValidDateTime(dt)) {
+    return "{\"ok\":false}";
+  }
+
+  int week = static_cast<int>((daysFromCivil(static_cast<int>(dt.year),
+                                             static_cast<unsigned>(dt.month),
+                                             static_cast<unsigned>(dt.day)) +
+                               3LL) %
+                              7LL);
+  if (week < 0) week += 7;
+  week += 1;
+  String out = "{\"ok\":true,\"year\":";
+  out += String(static_cast<unsigned int>(dt.year));
+  out += ",\"month\":";
+  out += String(static_cast<unsigned int>(dt.month));
+  out += ",\"day\":";
+  out += String(static_cast<unsigned int>(dt.day));
+  out += ",\"hour\":";
+  out += String(static_cast<unsigned int>(dt.hour));
+  out += ",\"minute\":";
+  out += String(static_cast<unsigned int>(dt.minute));
+  out += ",\"second\":";
+  out += String(static_cast<unsigned int>(dt.second));
+  out += ",\"week\":";
+  out += String(static_cast<unsigned int>(week));
+  out += "}";
+  return out;
+}
+
+bool parseRtcDateTimeFromRequest(Ds1302DateTime &out, String &errorOut) {
+  int year = 0;
+  int month = 0;
+  int day = 0;
+  int hour = 0;
+  int minute = 0;
+  int second = 0;
+
+  const String yearRaw = gWebServer->arg("year");
+  const String monthRaw = gWebServer->arg("month");
+  const String dayRaw = gWebServer->arg("day");
+  const String hourRaw = gWebServer->arg("hour");
+  const String minuteRaw = gWebServer->arg("minute");
+  const String secondRaw = gWebServer->arg("second");
+  if (!parseIntString(yearRaw, year) || year < 2000 || year > 2099) {
+    errorOut = "invalid year";
+    return false;
+  }
+  if (!parseIntString(monthRaw, month) || month < 1 || month > 12) {
+    errorOut = "invalid month";
+    return false;
+  }
+  if (!parseIntString(dayRaw, day) || day < 1 || day > 31) {
+    errorOut = "invalid day";
+    return false;
+  }
+  if (!parseIntString(hourRaw, hour) || hour < 0 || hour > 23) {
+    errorOut = "invalid hour";
+    return false;
+  }
+  if (!parseIntString(minuteRaw, minute) || minute < 0 || minute > 59) {
+    errorOut = "invalid minute";
+    return false;
+  }
+  if (!parseIntString(secondRaw, second) || second < 0 || second > 59) {
+    errorOut = "invalid second";
+    return false;
+  }
+
+  out.year = static_cast<uint16_t>(year);
+  out.month = static_cast<uint8_t>(month);
+  out.day = static_cast<uint8_t>(day);
+  out.hour = static_cast<uint8_t>(hour);
+  out.minute = static_cast<uint8_t>(minute);
+  out.second = static_cast<uint8_t>(second);
+  if (!ds1302IsValidDateTime(out)) {
+    errorOut = "datetime out of range";
+    return false;
+  }
+  return true;
+}
+
 bool enqueueMessageToQueue(QueueHandle_t queue, const String &textRaw, String &errorOut) {
   if (!queue) {
     errorOut = "queue not ready";
@@ -1409,6 +1625,42 @@ void registerRoutes() {
     gWebServer->send(200, "application/json", statusJson());
   });
 
+  gWebServer->on("/api/rtc", HTTP_GET, []() {
+    gWebServer->send(200, "application/json", rtcDateTimeJson());
+  });
+
+  gWebServer->on("/api/rtc/set", HTTP_POST, []() {
+    Ds1302DateTime dt;
+    String err;
+    if (!parseRtcDateTimeFromRequest(dt, err)) {
+      gWebServer->send(400, "text/plain", err);
+      return;
+    }
+    if (!rtc.writeDateTime(dt)) {
+      gWebServer->send(500, "text/plain", "DS1302 write failed");
+      return;
+    }
+    gWebServer->send(200, "application/json", rtcDateTimeJson());
+  });
+
+  gWebServer->on("/api/rtc/sync-phone", HTTP_POST, []() {
+    Ds1302DateTime dt;
+    String err;
+    if (!parseRtcDateTimeFromRequest(dt, err)) {
+      gWebServer->send(400, "text/plain", err);
+      return;
+    }
+    if (!rtc.writeDateTime(dt)) {
+      gWebServer->send(500, "text/plain", "DS1302 write failed");
+      return;
+    }
+    gWebServer->send(200, "application/json", rtcDateTimeJson());
+  });
+
+  gWebServer->on("/api/battery", HTTP_GET, []() {
+    gWebServer->send(200, "application/json", "{\"ok\":false,\"message\":\"battery sensor not configured\"}");
+  });
+
   gWebServer->on("/api/volume", HTTP_GET, []() {
     String out = "{\"insertVolume\":";
     out += String(insertVolumePercent());
@@ -1780,6 +2032,53 @@ void registerRoutes() {
     gWebServer->send(200, "application/json", out);
   });
 
+  gWebServer->on("/api/staconfig", HTTP_GET, []() {
+    String staSsid;
+    String staPassword;
+    loadStaConfigFromSettingIni(staSsid, staPassword);
+
+    String out = "{\"ssid\":\"";
+    out += staSsid;
+    out += "\",\"passwordSet\":";
+    out += staPassword.length() ? "true" : "false";
+    out += "}";
+    gWebServer->send(200, "application/json", out);
+  });
+
+  gWebServer->on("/api/staconfig", HTTP_POST, []() {
+    String ssid = gWebServer->arg("ssid");
+    String password = gWebServer->arg("password");
+    if (!ssid.length() && gWebServer->hasArg("plain")) {
+      ssid = gWebServer->arg("plain");
+    }
+    ssid.trim();
+    password.trim();
+
+    if (!ssid.length()) {
+      gWebServer->send(400, "text/plain", "ssid is empty");
+      return;
+    }
+    if (ssid.length() > 32) {
+      gWebServer->send(400, "text/plain", "ssid too long");
+      return;
+    }
+    if (password.length() && (password.length() < 8 || password.length() > 63)) {
+      gWebServer->send(400, "text/plain", "password must be empty or 8-63 chars");
+      return;
+    }
+    if (!persistStaConfigToSettingIni(ssid, password)) {
+      gWebServer->send(500, "text/plain", "save /setting.ini failed");
+      return;
+    }
+
+    String out = "{\"ssid\":\"";
+    out += ssid;
+    out += "\",\"passwordSet\":";
+    out += password.length() ? "true" : "false";
+    out += "}";
+    gWebServer->send(200, "application/json", out);
+  });
+
   gWebServer->on("/api/csv", HTTP_GET, []() {
     if (!fatMounted) {
       gWebServer->send(503, "text/plain", "FAT not mounted");
@@ -1805,13 +2104,45 @@ void registerRoutes() {
     gWebServer->send(200, "text/plain", "saved /data.csv, reload scheduled");
   });
 
+  gWebServer->on("/api/schedule", HTTP_GET, []() {
+    if (!fatMounted) {
+      gWebServer->send(503, "text/plain", "FAT not mounted");
+      return;
+    }
+    gWebServer->send(200, "text/plain", readScheduleCsvText());
+  });
+
+  gWebServer->on("/api/schedule", HTTP_POST, []() {
+    String content = gWebServer->arg("content");
+    if (!content.length() && gWebServer->hasArg("plain")) {
+      content = gWebServer->arg("plain");
+    }
+    if (!saveScheduleCsvText(content)) {
+      gWebServer->send(500, "text/plain", "save failed");
+      return;
+    }
+    gWebServer->send(200, "text/plain", "saved /schedule.csv");
+  });
+
   gWebServer->on("/api/send", HTTP_POST, []() {
     String error;
     String text = gWebServer->arg("text");
     if (!text.length() && gWebServer->hasArg("plain")) {
       text = gWebServer->arg("plain");
     }
-    const bool immediateMode = gInstantRefreshNoKey;
+    bool immediateMode = gInstantRefreshNoKey;
+    String immediateArg = gWebServer->arg("immediate");
+    if (!immediateArg.length() && gWebServer->hasArg("instant")) {
+      immediateArg = gWebServer->arg("instant");
+    }
+    if (immediateArg.length()) {
+      bool parsed = immediateMode;
+      if (!parseBoolString(immediateArg, parsed)) {
+        gWebServer->send(400, "text/plain", "invalid immediate");
+        return;
+      }
+      immediateMode = parsed;
+    }
     const bool ok = immediateMode
                         ? enqueueImmediateMessage(text, error)
                         : enqueueRegularMessage(text, error);
