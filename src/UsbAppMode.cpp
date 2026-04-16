@@ -3082,6 +3082,8 @@ void onApStaInit(AppLoopMode mode)
 {
   waitStaFetcherIdle(1000);
   resetStaHttpClient();
+  // Force a clean restart so switching back from STA-only always re-creates AP.
+  wirelessPortalStop();
   gStaOnlinePhase = StaOnlinePhase::kPromptWaitShort;
   gStaRetryCount = 0;
   gStaAttemptStartMs = 0;
