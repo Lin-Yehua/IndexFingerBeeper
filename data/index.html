@@ -152,9 +152,10 @@
       <label class="label">插入音量 <span id="insertVolVal" class="mono">20%</span></label>
       <input id="insertVol" type="range" min="0" max="100" value="20">
 
-      <div class="grid2 compact">
+      <div class="grid3 compact">
         <label>亮度(0-1)<input id="backlight" type="number" min="0" max="1" step="0.01"></label>
         <label>息屏秒数(-1不息屏)<input id="backlightTime" type="number" step="1"></label>
+        <label>背光关闭延时秒数(>=0)<input id="backlightCloseTime" type="number" min="0" step="1"></label>
       </div>
 
       <div class="btn-row">
@@ -175,6 +176,7 @@
       <div class="grid2">
         <label>联网SSID<input id="staSsid" type="text" maxlength="32"></label>
         <label>联网密码<input id="staPassword" type="text" maxlength="63"></label>
+        <label>网站指定(Net)<input id="staNet" type="text" maxlength="255" placeholder="http://example.com/random"></label>
         <div class="align-end"><button id="btnSaveSta" type="button">保存联网设置</button></div>
       </div>
 

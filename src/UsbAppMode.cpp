@@ -25,9 +25,13 @@
 static bool ensureStaQueueMutex();
 static void clearStaMessageQueue();
 static bool pushStaMessageQueue(const String &message);
-static bool loadStaCredentialsFromSettingIni(String &outSsid, String &outPassword);
+static bool loadStaCredentialsFromSettingIni(String &outSsid, String &outPassword, String &outNet);
 static void ensureStaFetcherTaskStarted();
 static void beginStaConnectAttempt();
+static bool parseAppModeFromIniValue(String value, AppLoopMode &outMode);
+static const char *appModeToIniValue(AppLoopMode mode);
+static bool loadAppModeFromSettingIni(AppLoopMode &outMode);
+static bool persistAppModeToSettingIni(AppLoopMode mode);
 void waitWakeKeyReleaseBeforeSleep();
 bool saveSleepSnapshotToFat();
 void markSleepRtcContextForSleep();
@@ -37,7 +41,7 @@ bool handleRtcMaintenanceWake();
 namespace {
 
 constexpr uint8_t kBacklightDutyOff = 0;
-constexpr uint32_t kBacklightDimToOffMs = 20000UL;
+constexpr int kDefaultBacklightCloseTimeSec = 20;
 constexpr uint32_t kBacklightTaskTickMs = 100UL;
 constexpr uint32_t kBootAnimPollMs = 10UL;
 constexpr uint32_t kBootAnimMaxWaitMs = 12000UL;
@@ -52,7 +56,7 @@ constexpr size_t kSleepPortalQueueMax = 128;
 constexpr size_t kSleepStaQueueMax = 20;
 constexpr size_t kMaxReminderTimes = 128;
 constexpr char kSleepSnapshotPath[] = "/sleep_state.bin";
-constexpr const char *kDefaultReminderMessage = u8"日程提醒时间到了";
+constexpr const char *kDefaultReminderMessage = u8"这个时候你似乎有什么事要干";
 constexpr uint32_t kSleepFileMagic = 0x53534E50UL;      // "SSNP"
 constexpr uint16_t kSleepFileVersion = 1;
 constexpr uint32_t kSleepRtcCtxMagic = 0x54534654UL;    // "TSFT"
@@ -205,6 +209,11 @@ bool wakeBacklightByKeyIfNeeded() {
   return wakeOnly;
 }
 
+uint32_t backlightCloseDelayMs() {
+  const int closeSec = (gBacklightCloseTimeSec < 0) ? 0 : gBacklightCloseTimeSec;
+  return static_cast<uint32_t>(closeSec) * 1000UL;
+}
+
 bool staOnlySleepTimeoutReached() {
   int backlightTimeSec = -1;
   uint32_t lastActivity = 0;
@@ -218,7 +227,7 @@ bool staOnlySleepTimeoutReached() {
   if (stateNow != kBacklightOff || backlightTimeSec < 0) return false;
 
   const uint32_t dimMs = static_cast<uint32_t>(backlightTimeSec) * 1000UL;
-  const uint32_t offAtMs = lastActivity + dimMs + kBacklightDimToOffMs;
+  const uint32_t offAtMs = lastActivity + dimMs + backlightCloseDelayMs();
   const uint32_t nowMs = millis();
   return (nowMs - offAtMs) >= kStaOnlySleepAfterOffMs;
 }
@@ -257,8 +266,9 @@ void backlightTask(void *param) {
     BacklightState desired = kBacklightBright;
     if (backlightTimeSec >= 0) {
       const uint32_t dimMs = static_cast<uint32_t>(backlightTimeSec) * 1000UL;
+      const uint32_t closeDelayMs = backlightCloseDelayMs();
       const uint32_t elapsedMs = nowMs - lastActivity;
-      if (elapsedMs >= dimMs + kBacklightDimToOffMs) {
+      if (elapsedMs >= dimMs + closeDelayMs) {
         desired = kBacklightOff;
       } else if (elapsedMs >= dimMs) {
         desired = kBacklightDim;
@@ -571,6 +581,7 @@ void applyAudioGainsFromSettingIni() {
   static constexpr bool kDefaultEnableReprint = true;
   static constexpr float kDefaultBacklightLevel = 1.0f;
   static constexpr int kDefaultBacklightTimeSec = -1;
+  static constexpr int kDefaultBacklightCloseTime = kDefaultBacklightCloseTimeSec;
 
   gInsertGain = kDefaultInsertGain;
   gBgGain = kDefaultBgGain;
@@ -579,6 +590,7 @@ void applyAudioGainsFromSettingIni() {
   gWrongProb5 = kDefaultWrongProb5;
   gEnableReprint = kDefaultEnableReprint;
   gBacklightTimeSec = kDefaultBacklightTimeSec;
+  gBacklightCloseTimeSec = kDefaultBacklightCloseTime;
 
   fs::File f = FFat.open("/setting.ini", FILE_READ);
   if (!f) {
@@ -593,6 +605,7 @@ void applyAudioGainsFromSettingIni() {
   bool gotReprint = false;
   bool gotBacklight = false;
   bool gotBacklightTime = false;
+  bool gotBacklightCloseTime = false;
   while (f.available()) {
     String line = f.readStringUntil('\n');
     line.trim();
@@ -636,6 +649,10 @@ void applyAudioGainsFromSettingIni() {
     } else if (key == "backlighttime") {
       gBacklightTimeSec = value.toInt();
       gotBacklightTime = true;
+    } else if (key == "backlightclosetime") {
+      const int parsedCloseSec = static_cast<int>(value.toInt());
+      gBacklightCloseTimeSec = (parsedCloseSec < 0) ? 0 : parsedCloseSec;
+      gotBacklightCloseTime = true;
     }
   }
   f.close();
@@ -647,15 +664,17 @@ void applyAudioGainsFromSettingIni() {
   if (!gotReprint) Serial.printf("[APP] EnableReprint missing, default=%d\n", gEnableReprint ? 1 : 0);
   if (!gotBacklight) Serial.printf("[APP] BackLight missing, default=%.3f\n", gBacklightLevel);
   if (!gotBacklightTime) Serial.printf("[APP] BacklightTime missing, default=%d\n", gBacklightTimeSec);
+  if (!gotBacklightCloseTime) Serial.printf("[APP] BacklightCloseTime missing, default=%d\n", gBacklightCloseTimeSec);
   Serial.printf("[APP] gains: insert=%.3f bg=%.3f backlight=%.3f\n",
                 gInsertGain,
                 gBgGain,
                 gBacklightLevel);
-  Serial.printf("[APP] glitch: p3=%d p5=%d reprint=%d backlightTime=%d\n",
+  Serial.printf("[APP] glitch: p3=%d p5=%d reprint=%d backlightTime=%d closeTime=%d\n",
                 gWrongProb3,
                 gWrongProb5,
                 gEnableReprint ? 1 : 0,
-                gBacklightTimeSec);
+                gBacklightTimeSec,
+                gBacklightCloseTimeSec);
 }
 
 void unmountFat() {
@@ -943,6 +962,7 @@ enum class StaOnlinePhase : uint8_t {
 static StaOnlinePhase gStaOnlinePhase = StaOnlinePhase::kPromptWaitShort;
 static String gStaNetSsid;
 static String gStaNetPassword;
+static String gStaNetApi;
 static uint8_t gStaRetryCount = 0;
 static uint32_t gStaAttemptStartMs = 0;
 static constexpr uint32_t kStaAttemptTimeoutMs = 10000UL;
@@ -970,7 +990,7 @@ static constexpr const char *kApPromptMsg =
 static constexpr const char *kStaonlyPromptMsg =
     u8"模式：省电 | 无线功能已禁用";
 
-static constexpr const char *kStaCloudApiUrl = "http://115.190.145.254:8080/random";
+static constexpr const char *kStaCloudApiUrlDefault = "http://115.190.145.254:8080/random";
 static constexpr size_t kStaPrefetchDepth = 20;
 static_assert(kStaPrefetchDepth == kSleepStaQueueMax,
               "kSleepStaQueueMax must match kStaPrefetchDepth");
@@ -1694,7 +1714,7 @@ bool applySleepSnapshot(const SleepSnapshotData &snapshot) {
   }
 
   if (gAppLoopMode == APP_MODE_STA_ONLINE) {
-    (void)loadStaCredentialsFromSettingIni(gStaNetSsid, gStaNetPassword);
+    (void)loadStaCredentialsFromSettingIni(gStaNetSsid, gStaNetPassword, gStaNetApi);
     ensureStaFetcherTaskStarted();
     if (gStaOnlinePhase == StaOnlinePhase::kConnecting && gStaNetSsid.length()) {
       WiFi.mode(WIFI_STA);
@@ -1703,6 +1723,7 @@ bool applySleepSnapshot(const SleepSnapshotData &snapshot) {
   } else {
     gStaNetSsid = "";
     gStaNetPassword = "";
+    gStaNetApi = kStaCloudApiUrlDefault;
   }
 
   gBacklightTimeSec = snapshot.header.backlightTimeSec;
@@ -1995,7 +2016,10 @@ static bool fetchStaMessageFromCloud(String &outMessage) {
   outMessage = "";
   if (WiFi.status() != WL_CONNECTED) return false;
 
-  String apiUrl = kStaCloudApiUrl;
+  String apiUrl = gStaNetApi;
+  if (!apiUrl.length()) {
+    apiUrl = kStaCloudApiUrlDefault;
+  }
   apiUrl.trim();
   String apiUrlLower = apiUrl;
   apiUrlLower.toLowerCase();
@@ -2137,9 +2161,139 @@ static String trimIniValue(String value) {
   return value;
 }
 
-static bool loadStaCredentialsFromSettingIni(String &outSsid, String &outPassword) {
+static bool parseAppModeFromIniValue(String value, AppLoopMode &outMode) {
+  value.trim();
+  value.toLowerCase();
+  value.replace("-", "_");
+  value.replace(" ", "");
+
+  if (value == "ap_config" || value == "ap_sta" || value == "ap") {
+    outMode = APP_MODE_AP_STA;
+    return true;
+  }
+  if (value == "sta_online" || value == "staonline") {
+    outMode = APP_MODE_STA_ONLINE;
+    return true;
+  }
+  if (value == "sta_only" || value == "staonly") {
+    outMode = APP_MODE_STA_ONLY;
+    return true;
+  }
+  return false;
+}
+
+static const char *appModeToIniValue(AppLoopMode mode) {
+  switch (mode) {
+    case APP_MODE_AP_STA:
+      return "AP_Config";
+    case APP_MODE_STA_ONLINE:
+      return "STA_Online";
+    case APP_MODE_STA_ONLY:
+      return "STA_Only";
+    default:
+      return "AP_Config";
+  }
+}
+
+static bool loadAppModeFromSettingIni(AppLoopMode &outMode) {
+  outMode = APP_MODE_AP_STA;
+  if (!fatMounted) return false;
+
+  fs::File f = FFat.open("/setting.ini", FILE_READ);
+  if (!f) return false;
+
+  bool found = false;
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (!line.length()) continue;
+    if (line.startsWith("#") || line.startsWith(";")) continue;
+
+    const int eq = line.indexOf('=');
+    if (eq <= 0) continue;
+
+    String key = line.substring(0, eq);
+    String value = line.substring(eq + 1);
+    key.trim();
+    key.toLowerCase();
+    value = trimIniValue(value);
+
+    if (key == "mode") {
+      AppLoopMode parsed = APP_MODE_AP_STA;
+      if (parseAppModeFromIniValue(value, parsed)) {
+        outMode = parsed;
+        found = true;
+      } else {
+        Serial.printf("[BOOT] invalid Mode in /setting.ini: %s\n", value.c_str());
+      }
+    }
+  }
+  f.close();
+  return found;
+}
+
+static bool persistAppModeToSettingIni(AppLoopMode mode) {
+  if (!fatMounted) return false;
+
+  String original;
+  if (FFat.exists("/setting.ini")) {
+    fs::File rf = FFat.open("/setting.ini", FILE_READ);
+    if (!rf) return false;
+    original = rf.readString();
+    rf.close();
+  }
+
+  bool foundMode = false;
+  const String modeLine = String("Mode = ") + appModeToIniValue(mode) + ";";
+  String output;
+  output.reserve(original.length() + 32);
+
+  int start = 0;
+  while (start <= original.length()) {
+    const int end = original.indexOf('\n', start);
+    String line = (end >= 0) ? original.substring(start, end) : original.substring(start);
+
+    String trimmed = line;
+    trimmed.trim();
+    if (trimmed.length() && !trimmed.startsWith("#") && !trimmed.startsWith(";")) {
+      const int eq = trimmed.indexOf('=');
+      if (eq > 0) {
+        String key = trimmed.substring(0, eq);
+        key.trim();
+        key.toLowerCase();
+        if (key == "mode") {
+          line = modeLine;
+          foundMode = true;
+        }
+      }
+    }
+
+    output += line;
+    if (end >= 0) {
+      output += '\n';
+      start = end + 1;
+    } else {
+      break;
+    }
+  }
+
+  if (!foundMode) {
+    if (output.length() && output[output.length() - 1] != '\n') output += '\n';
+    output += modeLine;
+    output += '\n';
+  }
+
+  fs::File wf = FFat.open("/setting.ini", "w");
+  if (!wf) return false;
+  const size_t written = wf.print(output);
+  wf.close();
+  return written == output.length();
+}
+
+static bool loadStaCredentialsFromSettingIni(String &outSsid, String &outPassword, String &outNet) {
   outSsid = "";
   outPassword = "";
+  outNet = kStaCloudApiUrlDefault;
 
   fs::File f = FFat.open("/setting.ini", FILE_READ);
   if (!f) {
@@ -2166,6 +2320,14 @@ static bool loadStaCredentialsFromSettingIni(String &outSsid, String &outPasswor
       outSsid = value;
     } else if (key == "netpassword") {
       outPassword = value;
+    } else if (key == "net") {
+      String netLower = value;
+      netLower.toLowerCase();
+      if (netLower.startsWith("http://") || netLower.startsWith("https://")) {
+        outNet = value;
+      } else if (value.length()) {
+        Serial.printf("[STA] invalid Net in /setting.ini: %s\n", value.c_str());
+      }
     }
   }
   f.close();
@@ -2290,6 +2452,11 @@ static void switchAppMode(AppLoopMode mode) {
   if (gAppLoopMode == mode) return;
   gAppLoopMode = mode;
   gAppModeEnterPending = true;
+  if (!persistAppModeToSettingIni(mode)) {
+    Serial.println("[MODE] save Mode to /setting.ini failed");
+  } else {
+    Serial.printf("[MODE] switched -> %s\n", appModeToIniValue(mode));
+  }
 }
 
 static void dispatchModeEnterIfNeeded() {
@@ -2322,6 +2489,18 @@ void setAppModeInitCallback(AppLoopMode mode, AppModeEnterCallback callback) {
 
 AppLoopMode getAppLoopMode() {
   return gAppLoopMode;
+}
+
+void applyStartupModeFromSettingIni() {
+  AppLoopMode startupMode = gAppLoopMode;
+  if (loadAppModeFromSettingIni(startupMode)) {
+    gAppLoopMode = startupMode;
+    Serial.printf("[BOOT] startup Mode=%s\n", appModeToIniValue(gAppLoopMode));
+  } else {
+    Serial.printf("[BOOT] startup Mode fallback=%s\n", appModeToIniValue(gAppLoopMode));
+  }
+  gAppModeEnterPending = true;
+  dispatchModeEnterIfNeeded();
 }
 
 
@@ -2907,6 +3086,7 @@ void onApStaInit(AppLoopMode mode)
   gStaNtpLastAttemptMs = 0;
   gStaNetSsid = "";
   gStaNetPassword = "";
+  gStaNetApi = kStaCloudApiUrlDefault;
   clearStaMessageQueue();
   if (!wirelessPortalStart()) {
     Serial.println("[AP] wirelessPortalStart failed on AP init");
@@ -2942,12 +3122,13 @@ void onStaOnlineInit(AppLoopMode mode)
   gStaOnlinePhase = StaOnlinePhase::kPromptWaitShort;
   clearStaMessageQueue();
 
-  const bool loaded = loadStaCredentialsFromSettingIni(gStaNetSsid, gStaNetPassword);
+  const bool loaded = loadStaCredentialsFromSettingIni(gStaNetSsid, gStaNetPassword, gStaNetApi);
   if (!loaded) {
     Serial.println("[STA] NetSSID missing in /setting.ini");
   } else {
     Serial.printf("[STA] target ssid: %s\\n", gStaNetSsid.c_str());
   }
+  Serial.printf("[STA] target net: %s\\n", gStaNetApi.c_str());
 
   ensureStaFetcherTaskStarted();
   playStaMessage(kStaPromptMsg);
@@ -2967,6 +3148,7 @@ void onStaOnlyInit(AppLoopMode mode)
   gStaFetchInProgress = false;
   gStaNtpSyncedThisSession = false;
   gStaNtpLastAttemptMs = 0;
+  gStaNetApi = kStaCloudApiUrlDefault;
   clearStaMessageQueue();
   WiFi.disconnect(true, false);
   if (!wirelessPortalStartEspNowOnly()) {

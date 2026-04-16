@@ -35,6 +35,7 @@ void processAppLoop();
 void setAppModeEnterCallback(AppModeEnterCallback callback);
 void setAppModeInitCallback(AppLoopMode mode, AppModeEnterCallback callback);
 AppLoopMode getAppLoopMode();
+void applyStartupModeFromSettingIni();
 void runBootAnimationTaskStart();
 void runBootAnimationTaskWait();
 void runBootAnimationTaskAndWait();

@@ -19,7 +19,7 @@
 
 namespace {
 
-constexpr char kDefaultApSsid[] = u8"\u9075\u4ECE\u90FD\u5E02\u610F\u5FD7";
+constexpr char kDefaultApSsid[] = u8"魔法哔哔机";
 constexpr char kDefaultApPassword[] = "12345678";
 constexpr uint8_t kDefaultApChannel = 1;
 constexpr uint8_t kApChannelMin = 1;
@@ -551,6 +551,49 @@ String stripIniValue(String value) {
   return value;
 }
 
+String jsonEscape(const String &value) {
+  String escaped;
+  escaped.reserve(value.length() + 8);
+  for (size_t i = 0; i < value.length(); ++i) {
+    const char c = value[i];
+    switch (c) {
+      case '\"':
+        escaped += "\\\"";
+        break;
+      case '\\':
+        escaped += "\\\\";
+        break;
+      case '\b':
+        escaped += "\\b";
+        break;
+      case '\f':
+        escaped += "\\f";
+        break;
+      case '\n':
+        escaped += "\\n";
+        break;
+      case '\r':
+        escaped += "\\r";
+        break;
+      case '\t':
+        escaped += "\\t";
+        break;
+      default: {
+        const uint8_t uc = static_cast<uint8_t>(c);
+        if (uc < 0x20U) {
+          char buf[7] = {0};
+          snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned int>(uc));
+          escaped += buf;
+        } else {
+          escaped += c;
+        }
+        break;
+      }
+    }
+  }
+  return escaped;
+}
+
 String formatMacString(const uint8_t mac[6]) {
   char buf[18] = {0};
   snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
@@ -1065,9 +1108,10 @@ bool saveScheduleCsvText(const String &content) {
   return written == content.length();
 }
 
-void loadStaConfigFromSettingIni(String &outSsid, String &outPassword) {
+void loadStaConfigFromSettingIni(String &outSsid, String &outPassword, String &outNet) {
   outSsid = "";
   outPassword = "";
+  outNet = "";
   if (!fatMounted) return;
 
   fs::File f = FFat.open("/setting.ini", FILE_READ);
@@ -1091,22 +1135,31 @@ void loadStaConfigFromSettingIni(String &outSsid, String &outPassword) {
       outSsid = value;
     } else if (key == "netpassword") {
       outPassword = value;
+    } else if (key == "net") {
+      outNet = value;
     }
   }
   f.close();
 }
 
-bool persistStaConfigToSettingIni(const String &ssidRaw, const String &passwordRaw) {
+bool persistStaConfigToSettingIni(const String &ssidRaw, const String &passwordRaw, const String &netRaw) {
   if (!fatMounted) return false;
 
   String ssid = ssidRaw;
   String password = passwordRaw;
+  String net = netRaw;
   ssid.trim();
   password.trim();
+  net.trim();
 
   if (!ssid.length()) return false;
   if (ssid.length() > 32) return false;
   if (password.length() && (password.length() < 8 || password.length() > 63)) return false;
+  if (net.length()) {
+    String netLower = net;
+    netLower.toLowerCase();
+    if (!netLower.startsWith("http://") && !netLower.startsWith("https://")) return false;
+  }
 
   String original;
   if (FFat.exists("/setting.ini")) {
@@ -1118,8 +1171,9 @@ bool persistStaConfigToSettingIni(const String &ssidRaw, const String &passwordR
 
   bool foundSsid = false;
   bool foundPassword = false;
+  bool foundNet = false;
   String output;
-  output.reserve(original.length() + 128);
+  output.reserve(original.length() + 192);
 
   int start = 0;
   while (start <= original.length()) {
@@ -1140,6 +1194,9 @@ bool persistStaConfigToSettingIni(const String &ssidRaw, const String &passwordR
         } else if (key == "netpassword") {
           line = "NetPassword = \"" + password + "\";";
           foundPassword = true;
+        } else if (key == "net") {
+          line = "Net = \"" + net + "\";";
+          foundNet = true;
         }
       }
     }
@@ -1160,6 +1217,10 @@ bool persistStaConfigToSettingIni(const String &ssidRaw, const String &passwordR
   if (!foundPassword) {
     if (output.length() && output[output.length() - 1] != '\n') output += '\n';
     output += "NetPassword = \"" + password + "\";\n";
+  }
+  if (!foundNet) {
+    if (output.length() && output[output.length() - 1] != '\n') output += '\n';
+    output += "Net = \"" + net + "\";\n";
   }
 
   fs::File wf = FFat.open("/setting.ini", "w");
@@ -1376,12 +1437,14 @@ bool persistEffectSettingsToSettingIni(int wrongProb3,
                                        int wrongProb5,
                                        bool enableReprint,
                                        float backlightLevel,
-                                       int backlightTimeSec) {
+                                       int backlightTimeSec,
+                                       int backlightCloseTimeSec) {
   if (!fatMounted) return false;
 
   wrongProb3 = constrain(wrongProb3, 0, 100);
   wrongProb5 = constrain(wrongProb5, 0, 100);
   backlightLevel = clampGain(backlightLevel);
+  if (backlightCloseTimeSec < 0) backlightCloseTimeSec = 0;
 
   String original;
   if (FFat.exists("/setting.ini")) {
@@ -1396,8 +1459,9 @@ bool persistEffectSettingsToSettingIni(int wrongProb3,
   bool foundReprint = false;
   bool foundBacklight = false;
   bool foundBacklightTime = false;
+  bool foundBacklightCloseTime = false;
   String output;
-  output.reserve(original.length() + 160);
+  output.reserve(original.length() + 200);
 
   int start = 0;
   while (start <= original.length()) {
@@ -1427,6 +1491,9 @@ bool persistEffectSettingsToSettingIni(int wrongProb3,
         } else if (key == "backlighttime") {
           line = "BacklightTime = " + String(backlightTimeSec) + ";";
           foundBacklightTime = true;
+        } else if (key == "backlightclosetime") {
+          line = "BacklightCloseTime = " + String(backlightCloseTimeSec) + ";";
+          foundBacklightCloseTime = true;
         }
       }
     }
@@ -1459,6 +1526,10 @@ bool persistEffectSettingsToSettingIni(int wrongProb3,
   if (!foundBacklightTime) {
     if (output.length() && output[output.length() - 1] != '\n') output += '\n';
     output += "BacklightTime = " + String(backlightTimeSec) + ";\n";
+  }
+  if (!foundBacklightCloseTime) {
+    if (output.length() && output[output.length() - 1] != '\n') output += '\n';
+    output += "BacklightCloseTime = " + String(backlightCloseTimeSec) + ";\n";
   }
 
   fs::File wf = FFat.open("/setting.ini", "w");
@@ -1512,10 +1583,10 @@ String statusJson() {
   out += ",\"instantRefreshNoKey\":";
   out += gInstantRefreshNoKey ? "true" : "false";
   out += ",\"hostMac\":\"";
-  out += gHostMacFilterEnabled ? String(gHostMacFilterText) : "";
+  out += jsonEscape(gHostMacFilterEnabled ? String(gHostMacFilterText) : "");
   out += "\"";
   out += ",\"apSsid\":\"";
-  out += String(gApSsid);
+  out += jsonEscape(String(gApSsid));
   out += "\",\"apChannel\":";
   out += String(static_cast<unsigned int>(gApChannel));
   out += ",\"apPasswordSet\":";
@@ -1534,6 +1605,8 @@ String statusJson() {
   out += String(clampGain(gBacklightLevel), 3);
   out += ",\"backlightTime\":";
   out += String(gBacklightTimeSec);
+  out += ",\"backlightCloseTime\":";
+  out += String(gBacklightCloseTimeSec);
   out += ",\"imagePending\":";
   out += imagePending ? "true" : "false";
   out += ",\"imageWidth\":";
@@ -1546,13 +1619,13 @@ String statusJson() {
   out += String(imageCenterY);
   out += ",\"selfMac\":\"";
   // Keep selfMac stable for ESP-NOW targeting: always use STA MAC.
-  out += staMac;
+  out += jsonEscape(staMac);
   out += "\"";
   out += ",\"selfStaMac\":\"";
-  out += staMac;
+  out += jsonEscape(staMac);
   out += "\"";
   out += ",\"selfApMac\":\"";
-  out += apMac;
+  out += jsonEscape(apMac);
   out += "\"";
   out += "}";
   return out;
@@ -1806,6 +1879,8 @@ void registerRoutes() {
     out += String(clampGain(gBacklightLevel), 3);
     out += ",\"backlightTime\":";
     out += String(gBacklightTimeSec);
+    out += ",\"backlightCloseTime\":";
+    out += String(gBacklightCloseTimeSec);
     out += "}";
     gWebServer->send(200, "application/json", out);
   });
@@ -1816,6 +1891,7 @@ void registerRoutes() {
     bool nextEnableReprint = gEnableReprint;
     float nextBacklightLevel = gBacklightLevel;
     int nextBacklightTime = gBacklightTimeSec;
+    int nextBacklightCloseTime = gBacklightCloseTimeSec;
     bool hasAny = false;
 
     String wrong3Raw = gWebServer->arg("wrongProb3");
@@ -1878,6 +1954,21 @@ void registerRoutes() {
       hasAny = true;
     }
 
+    String backlightCloseRaw = gWebServer->arg("backlightCloseTime");
+    if (!backlightCloseRaw.length() && gWebServer->hasArg("BacklightCloseTime")) {
+      backlightCloseRaw = gWebServer->arg("BacklightCloseTime");
+    }
+    backlightCloseRaw.trim();
+    if (backlightCloseRaw.length()) {
+      int parsed = 0;
+      if (!parseIntString(backlightCloseRaw, parsed) || parsed < 0) {
+        gWebServer->send(400, "text/plain", "invalid backlightCloseTime");
+        return;
+      }
+      nextBacklightCloseTime = parsed;
+      hasAny = true;
+    }
+
     String backlightLevelRaw = gWebServer->arg("backlight");
     if (!backlightLevelRaw.length() && gWebServer->hasArg("BackLight")) {
       backlightLevelRaw = gWebServer->arg("BackLight");
@@ -1903,12 +1994,14 @@ void registerRoutes() {
     gEnableReprint = nextEnableReprint;
     setBacklightLevel(nextBacklightLevel);
     setBacklightTimeSeconds(nextBacklightTime);
+    gBacklightCloseTimeSec = nextBacklightCloseTime;
 
     if (!persistEffectSettingsToSettingIni(gWrongProb3,
                                            gWrongProb5,
                                            gEnableReprint,
                                            gBacklightLevel,
-                                           gBacklightTimeSec)) {
+                                           gBacklightTimeSec,
+                                           gBacklightCloseTimeSec)) {
       gWebServer->send(500, "text/plain", "settings applied but save /setting.ini failed");
       return;
     }
@@ -1923,13 +2016,15 @@ void registerRoutes() {
     out += String(clampGain(gBacklightLevel), 3);
     out += ",\"backlightTime\":";
     out += String(gBacklightTimeSec);
+    out += ",\"backlightCloseTime\":";
+    out += String(gBacklightCloseTimeSec);
     out += "}";
     gWebServer->send(200, "application/json", out);
   });
 
   gWebServer->on("/api/hostmac", HTTP_GET, []() {
     String out = "{\"hostMac\":\"";
-    out += gHostMacFilterEnabled ? String(gHostMacFilterText) : "";
+    out += jsonEscape(gHostMacFilterEnabled ? String(gHostMacFilterText) : "");
     out += "\",\"enabled\":";
     out += gHostMacFilterEnabled ? "true" : "false";
     out += "}";
@@ -1956,7 +2051,7 @@ void registerRoutes() {
     }
 
     String out = "{\"hostMac\":\"";
-    out += gHostMacFilterEnabled ? String(gHostMacFilterText) : "";
+    out += jsonEscape(gHostMacFilterEnabled ? String(gHostMacFilterText) : "");
     out += "\",\"enabled\":";
     out += gHostMacFilterEnabled ? "true" : "false";
     out += "}";
@@ -1965,7 +2060,9 @@ void registerRoutes() {
 
   gWebServer->on("/api/apconfig", HTTP_GET, []() {
     String out = "{\"ssid\":\"";
-    out += String(gApSsid);
+    out += jsonEscape(String(gApSsid));
+    out += "\",\"password\":\"";
+    out += jsonEscape(String(gApPassword));
     out += "\",\"passwordSet\":";
     out += gApPassword[0] ? "true" : "false";
     out += ",\"channel\":";
@@ -2023,7 +2120,9 @@ void registerRoutes() {
     gApChannel = nextChannel;
 
     String out = "{\"ssid\":\"";
-    out += String(gApSsid);
+    out += jsonEscape(String(gApSsid));
+    out += "\",\"password\":\"";
+    out += jsonEscape(String(gApPassword));
     out += "\",\"passwordSet\":";
     out += gApPassword[0] ? "true" : "false";
     out += ",\"channel\":";
@@ -2035,24 +2134,42 @@ void registerRoutes() {
   gWebServer->on("/api/staconfig", HTTP_GET, []() {
     String staSsid;
     String staPassword;
-    loadStaConfigFromSettingIni(staSsid, staPassword);
+    String staNet;
+    loadStaConfigFromSettingIni(staSsid, staPassword, staNet);
 
     String out = "{\"ssid\":\"";
-    out += staSsid;
+    out += jsonEscape(staSsid);
+    out += "\",\"password\":\"";
+    out += jsonEscape(staPassword);
     out += "\",\"passwordSet\":";
     out += staPassword.length() ? "true" : "false";
-    out += "}";
+    out += ",\"net\":\"";
+    out += jsonEscape(staNet);
+    out += "\"}";
     gWebServer->send(200, "application/json", out);
   });
 
   gWebServer->on("/api/staconfig", HTTP_POST, []() {
     String ssid = gWebServer->arg("ssid");
     String password = gWebServer->arg("password");
+    const bool hasNetArg = gWebServer->hasArg("net") || gWebServer->hasArg("Net");
+    String net = gWebServer->arg("net");
+    if (!net.length() && gWebServer->hasArg("Net")) {
+      net = gWebServer->arg("Net");
+    }
     if (!ssid.length() && gWebServer->hasArg("plain")) {
       ssid = gWebServer->arg("plain");
     }
     ssid.trim();
     password.trim();
+    net.trim();
+    if (!hasNetArg) {
+      String currentSsid;
+      String currentPassword;
+      String currentNet;
+      loadStaConfigFromSettingIni(currentSsid, currentPassword, currentNet);
+      net = currentNet;
+    }
 
     if (!ssid.length()) {
       gWebServer->send(400, "text/plain", "ssid is empty");
@@ -2066,16 +2183,28 @@ void registerRoutes() {
       gWebServer->send(400, "text/plain", "password must be empty or 8-63 chars");
       return;
     }
-    if (!persistStaConfigToSettingIni(ssid, password)) {
+    if (net.length()) {
+      String netLower = net;
+      netLower.toLowerCase();
+      if (!netLower.startsWith("http://") && !netLower.startsWith("https://")) {
+        gWebServer->send(400, "text/plain", "net must start with http:// or https://");
+        return;
+      }
+    }
+    if (!persistStaConfigToSettingIni(ssid, password, net)) {
       gWebServer->send(500, "text/plain", "save /setting.ini failed");
       return;
     }
 
     String out = "{\"ssid\":\"";
-    out += ssid;
+    out += jsonEscape(ssid);
+    out += "\",\"password\":\"";
+    out += jsonEscape(password);
     out += "\",\"passwordSet\":";
     out += password.length() ? "true" : "false";
-    out += "}";
+    out += ",\"net\":\"";
+    out += jsonEscape(net);
+    out += "\"}";
     gWebServer->send(200, "application/json", out);
   });
 

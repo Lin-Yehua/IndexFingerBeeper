@@ -29,7 +29,7 @@ void setup() {
     if (enterAppMode()) {
       if (initProjectResources()) {
         if (!appRestoreFromDeepSleepSnapshot()) {
-          wirelessPortalStart();
+          applyStartupModeFromSettingIni();
         }
       }
     }
@@ -73,7 +73,7 @@ void setup() {
       Serial.println("[BOOT] USB not detected -> APP mode");
       if (enterAppMode()) {
         if (initProjectResources()) {
-          wirelessPortalStart();
+          applyStartupModeFromSettingIni();
         }
       }
     }

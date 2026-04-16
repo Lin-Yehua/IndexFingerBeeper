@@ -21,9 +21,9 @@ const el = {
   cmdList: $("cmdList"), cmdAddInput: $("cmdAddInput"), btnCmdAdd: $("btnCmdAdd"), btnCmdSave: $("btnCmdSave"), cmdStatus: $("cmdStatus"),
   rtcNow: $("rtcNow"), rtcYear: $("rtcYear"), rtcMonth: $("rtcMonth"), rtcDay: $("rtcDay"), rtcHour: $("rtcHour"), rtcMinute: $("rtcMinute"), rtcSecond: $("rtcSecond"), btnRtcSet: $("btnRtcSet"), btnRtcSyncPhone: $("btnRtcSyncPhone"), rtcStatus: $("rtcStatus"),
   scheduleDate: $("scheduleDate"), scheduleList: $("scheduleList"), scheduleAddTime: $("scheduleAddTime"), scheduleAddRepeat: $("scheduleAddRepeat"), scheduleAddText: $("scheduleAddText"), btnScheduleAdd: $("btnScheduleAdd"), btnScheduleSave: $("btnScheduleSave"), scheduleStatus: $("scheduleStatus"),
-  bgVol: $("bgVol"), insertVol: $("insertVol"), bgVolVal: $("bgVolVal"), insertVolVal: $("insertVolVal"), backlight: $("backlight"), backlightTime: $("backlightTime"), btnSaveDisplay: $("btnSaveDisplay"), displayStatus: $("displayStatus"),
+  bgVol: $("bgVol"), insertVol: $("insertVol"), bgVolVal: $("bgVolVal"), insertVolVal: $("insertVolVal"), backlight: $("backlight"), backlightTime: $("backlightTime"), backlightCloseTime: $("backlightCloseTime"), btnSaveDisplay: $("btnSaveDisplay"), displayStatus: $("displayStatus"),
   apSsid: $("apSsid"), apPassword: $("apPassword"), apChannel: $("apChannel"), btnSaveAp: $("btnSaveAp"),
-  staSsid: $("staSsid"), staPassword: $("staPassword"), btnSaveSta: $("btnSaveSta"),
+  staSsid: $("staSsid"), staPassword: $("staPassword"), staNet: $("staNet"), btnSaveSta: $("btnSaveSta"),
   hostMac: $("hostMac"), btnSaveHostMac: $("btnSaveHostMac"), selfMac: $("selfMac"), btnCopySelfMac: $("btnCopySelfMac"), wirelessStatus: $("wirelessStatus"),
   batteryStatus: $("batteryStatus")
 };
@@ -33,6 +33,43 @@ const toInt = (v, d = 0) => { const n = parseInt(String(v ?? "").trim(), 10); re
 const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
 const setStatus = (node, text, err = false) => { if (!node) return; node.textContent = text || ""; node.classList.toggle("error", !!err); node.classList.toggle("ok", !err && !!text); };
 const autoGrow = (ta) => { if (!ta) return; ta.style.height = "auto"; ta.style.height = `${ta.scrollHeight + 2}px`; };
+
+async function fetchJsonSafe(url, label) {
+  const r = await fetch(url);
+  const raw = await r.text();
+  if (!raw || !raw.trim()) {
+    throw new Error(`${label} 返回空响应 (HTTP ${r.status})`);
+  }
+  let d = null;
+  try {
+    d = JSON.parse(raw);
+  } catch (e) {
+    const snippet = raw.length > 120 ? `${raw.slice(0, 120)}...` : raw;
+    throw new Error(`${label} 返回非JSON: ${e.message} | 内容: ${snippet}`);
+  }
+  if (!r.ok) {
+    const detail = d && (d.message || d.error) ? (d.message || d.error) : raw;
+    throw new Error(`${label} HTTP ${r.status}: ${detail}`);
+  }
+  return d;
+}
+
+const delayMs = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function fetchJsonSafeRetry(url, label, attempts = 2) {
+  let lastErr = null;
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      return await fetchJsonSafe(url, label);
+    } catch (e) {
+      lastErr = e;
+      if (i + 1 < attempts) {
+        await delayMs(120);
+      }
+    }
+  }
+  throw lastErr || new Error(`${label} 请求失败`);
+}
 
 async function copyText(t) {
   try { if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(t); return true; } } catch (_) {}
@@ -174,6 +211,7 @@ async function saveCommands() {
     const lines = st.commands.map((t) => String(t || "").replace(/\r?\n+/g, " ").trim()).filter(Boolean).map((t, i) => cmdToLine(t, i + 1));
     const b = new FormData(); b.append("content", lines.join("\n") + (lines.length ? "\n" : ""));
     const r = await fetch("/api/csv", { method: "POST", body: b }); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`);
+    await loadCommands();
     setStatus(el.cmdStatus, raw || "保存成功");
   } catch (e) { setStatus(el.cmdStatus, `保存失败: ${e.message}`, true); }
 }
@@ -287,6 +325,7 @@ async function saveSchedules() {
   try {
     const b = new FormData(); b.append("content", schedulesToCsv(st.schedules));
     const r = await fetch("/api/schedule", { method: "POST", body: b }); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`);
+    await loadSchedules();
     setStatus(el.scheduleStatus, raw || "日程已保存");
   } catch (e) { setStatus(el.scheduleStatus, `保存失败: ${e.message}`, true); }
 }
@@ -336,25 +375,34 @@ async function loadDisplayAudio() {
   try {
     const [vr, fr] = await Promise.all([fetch("/api/volume"), fetch("/api/effects")]); const vd = await vr.json(); const fd = await fr.json();
     if (vr.ok) setVolUi(Number.isFinite(vd.insertVolume) ? vd.insertVolume : vd.volume, Number.isFinite(vd.bgVolume) ? vd.bgVolume : vd.volume);
-    if (fr.ok) { el.backlight.value = String(fd.backlight ?? 1); el.backlightTime.value = String(fd.backlightTime ?? -1); }
+    if (fr.ok) { el.backlight.value = String(fd.backlight ?? 1); el.backlightTime.value = String(fd.backlightTime ?? -1); el.backlightCloseTime.value = String(fd.backlightCloseTime ?? 20); }
     setStatus(el.displayStatus, "显示与音量参数已同步");
   } catch (e) { setStatus(el.displayStatus, `加载失败: ${e.message}`, true); }
 }
 async function saveDisplay() {
   try {
-    const b = new FormData(); b.append("backlight", String(parseFloat(el.backlight.value || "1"))); b.append("backlightTime", String(toInt(el.backlightTime.value, -1)));
+    const b = new FormData(); b.append("backlight", String(parseFloat(el.backlight.value || "1"))); b.append("backlightTime", String(toInt(el.backlightTime.value, -1))); b.append("backlightCloseTime", String(toInt(el.backlightCloseTime.value, 20)));
     const r = await fetch("/api/effects", { method: "POST", body: b }); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`); const d = JSON.parse(raw);
-    setStatus(el.displayStatus, `保存成功: 亮度=${d.backlight}, 息屏=${d.backlightTime}s`);
+    await loadDisplayAudio();
+    setStatus(el.displayStatus, `保存成功: 亮度=${d.backlight}, 息屏=${d.backlightTime}s, 关闭延时=${d.backlightCloseTime}s`);
   } catch (e) { setStatus(el.displayStatus, `保存失败: ${e.message}`, true); }
 }
 async function loadWireless() {
   try {
-    const [sr, ar, tr, hr] = await Promise.all([fetch("/api/status"), fetch("/api/apconfig"), fetch("/api/staconfig"), fetch("/api/hostmac")]);
-    const s = await sr.json(), a = await ar.json(), t = await tr.json(), h = await hr.json();
-    if (ar.ok) { el.apSsid.value = a.ssid || ""; el.apChannel.value = String(a.channel || 1); }
-    if (tr.ok) { el.staSsid.value = t.ssid || ""; }
-    if (hr.ok) el.hostMac.value = h.hostMac || "";
-    if (sr.ok) { el.selfMac.value = s.selfMac || ""; setStatus(el.wirelessStatus, `队列: Web ${s.queue} / Host ${s.hostQueue} | AP=${s.apSsid || "-"} CH=${s.apChannel || "-"}`); }
+    const s = await fetchJsonSafeRetry("/api/status", "状态接口(/api/status)");
+    const a = await fetchJsonSafeRetry("/api/apconfig", "AP配置接口(/api/apconfig)");
+    const t = await fetchJsonSafeRetry("/api/staconfig", "联网配置接口(/api/staconfig)");
+    const h = await fetchJsonSafeRetry("/api/hostmac", "HostMAC接口(/api/hostmac)");
+    const active = document.activeElement;
+    if (active !== el.apSsid) el.apSsid.value = a.ssid || "";
+    if (active !== el.apPassword) el.apPassword.value = a.password || "";
+    if (active !== el.apChannel) el.apChannel.value = String(a.channel || 1);
+    if (active !== el.staSsid) el.staSsid.value = t.ssid || "";
+    if (active !== el.staPassword) el.staPassword.value = t.password || "";
+    if (active !== el.staNet) el.staNet.value = t.net || "";
+    el.hostMac.value = h.hostMac || "";
+    el.selfMac.value = s.selfMac || "";
+    setStatus(el.wirelessStatus, `队列: Web ${s.queue} / Host ${s.hostQueue} | AP=${s.apSsid || "-"} CH=${s.apChannel || "-"}`);
   } catch (e) { setStatus(el.wirelessStatus, `加载无线信息失败: ${e.message}`, true); }
 }
 
@@ -362,15 +410,17 @@ async function saveAp() {
   try {
     const b = new FormData(); b.append("ssid", el.apSsid.value.trim()); b.append("password", el.apPassword.value); b.append("channel", el.apChannel.value.trim());
     const r = await fetch("/api/apconfig", { method: "POST", body: b }); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`); const d = JSON.parse(raw);
+    await loadWireless();
     setStatus(el.wirelessStatus, `AP设置已保存: ${d.ssid} CH${d.channel}`);
   } catch (e) { setStatus(el.wirelessStatus, `AP设置保存失败: ${e.message}`, true); }
 }
 
 async function saveSta() {
   try {
-    const b = new FormData(); b.append("ssid", el.staSsid.value.trim()); b.append("password", el.staPassword.value);
+    const b = new FormData(); b.append("ssid", el.staSsid.value.trim()); b.append("password", el.staPassword.value); b.append("net", el.staNet.value.trim());
     const r = await fetch("/api/staconfig", { method: "POST", body: b }); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`); const d = JSON.parse(raw);
-    setStatus(el.wirelessStatus, `联网设置已保存: ${d.ssid}`);
+    await loadWireless();
+    setStatus(el.wirelessStatus, `联网设置已保存: ${d.ssid} -> ${d.net || "-"}`);
   } catch (e) { setStatus(el.wirelessStatus, `联网设置保存失败: ${e.message}`, true); }
 }
 
@@ -378,6 +428,7 @@ async function saveHostMac() {
   try {
     const b = new FormData(); b.append("hostMac", el.hostMac.value.trim());
     const r = await fetch("/api/hostmac", { method: "POST", body: b }); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`); const d = JSON.parse(raw);
+    await loadWireless();
     setStatus(el.wirelessStatus, d.enabled ? `HostMAC已设置: ${d.hostMac}` : "HostMAC过滤已关闭");
   } catch (e) { setStatus(el.wirelessStatus, `HostMAC保存失败: ${e.message}`, true); }
 }
@@ -445,8 +496,8 @@ async function boot() {
   const n = new Date(); el.scheduleDate.value = `${n.getFullYear()}-${pad2(n.getMonth() + 1)}-${pad2(n.getDate())}`;
   clearPreview();
   await Promise.all([loadCommands(), loadSchedules(), loadRtc(), loadDisplayAudio(), loadWireless(), loadBattery()]);
-  setInterval(loadWireless, 1500);
   setInterval(loadRtc, 5000);
+  setInterval(loadBattery, 5000);
 }
 
 boot();
