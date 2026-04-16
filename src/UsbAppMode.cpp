@@ -6,6 +6,8 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
+#include <algorithm>
+#include <limits>
 #include <vector>
 #include <ctype.h>
 #include "esp_system.h"
@@ -15,8 +17,22 @@
 #include "UsbAppMode.h"
 #include "DisplayEffects.h"
 #include "WirelessPortal.h"
+#include "Ds1302Rtc.h"
 #include "Index_B.h"
 #include "Key_Drv.h"
+
+static bool ensureStaQueueMutex();
+static void clearStaMessageQueue();
+static bool pushStaMessageQueue(const String &message);
+static bool loadStaCredentialsFromSettingIni(String &outSsid, String &outPassword);
+static void ensureStaFetcherTaskStarted();
+static void beginStaConnectAttempt();
+void waitWakeKeyReleaseBeforeSleep();
+bool saveSleepSnapshotToFat();
+void markSleepRtcContextForSleep();
+[[noreturn]] void enterDeepSleepNow(uint32_t wakeSec);
+bool handleRtcMaintenanceWake();
+
 namespace {
 
 constexpr uint8_t kBacklightDutyOff = 0;
@@ -25,6 +41,52 @@ constexpr uint32_t kBacklightTaskTickMs = 100UL;
 constexpr uint32_t kBootAnimPollMs = 10UL;
 constexpr uint32_t kBootAnimMaxWaitMs = 12000UL;
 constexpr uint32_t kStaOnlySleepAfterOffMs = 60000UL;
+constexpr gpio_num_t kWakeKeyGpio = GPIO_NUM_2;
+constexpr uint32_t kRtcWakeDefaultSec = 60U;
+constexpr uint32_t kRtcWakeMaxSec = 30U * 60U;
+constexpr uint32_t kRtcMismatchToleranceSec = 2U;
+constexpr uint32_t kReminderTriggerWindowSec = 2U;
+constexpr size_t kSleepTextMaxLen = 240;
+constexpr size_t kSleepPortalQueueMax = 128;
+constexpr size_t kSleepStaQueueMax = 20;
+constexpr size_t kMaxReminderTimes = 16;
+constexpr char kSleepSnapshotPath[] = "/sleep_state.bin";
+constexpr const char *kDefaultReminderMessage = u8"日程提醒时间到了";
+constexpr uint32_t kSleepFileMagic = 0x53534E50UL;      // "SSNP"
+constexpr uint16_t kSleepFileVersion = 1;
+constexpr uint32_t kSleepRtcCtxMagic = 0x54534654UL;    // "TSFT"
+constexpr uint16_t kSleepRtcCtxVersion = 1;
+
+struct SleepRtcContext {
+  uint32_t magic = 0;
+  uint16_t version = 0;
+  uint8_t snapshotValid = 0;
+  uint8_t appMode = 0;
+  uint32_t nextWakeSec = 0;
+  uint8_t pendingReminder = 0;
+  uint64_t expectedUnix = 0;
+  char reminderMessage[kSleepTextMaxLen + 1] = {0};
+};
+
+struct SleepSnapshotHeader {
+  uint32_t magic = 0;
+  uint16_t version = 0;
+  uint8_t appMode = 0;
+  uint8_t runState = 0;
+  uint8_t firstFlag = 0;
+  uint8_t staPhase = 0;
+  int32_t csvCount = 0;
+  uint8_t staRetryCount = 0;
+  uint8_t staQueueCount = 0;
+  uint8_t regularQueueCount = 0;
+  uint8_t hostQueueCount = 0;
+  uint8_t hasImmediate = 0;
+  int32_t backlightTimeSec = -1;
+  char lastDisplayed[kSleepTextMaxLen + 1] = {0};
+  char immediateMessage[kSleepTextMaxLen + 1] = {0};
+};
+
+RTC_DATA_ATTR SleepRtcContext gSleepRtcCtx;
 
 enum BacklightState : uint8_t {
   kBacklightBright = 0,
@@ -41,6 +103,53 @@ bool gBootAnimRunning = false;
 bool gBootAnimUsbDetected = false;
 bool gSimheiFontPreloaded = false;
 bool gSettingsPreloadedAtBoot = false;
+char gLastDisplayedText[kSleepTextMaxLen + 1] = {0};
+
+void sanitizeMessageForSnapshot(const String &in, char out[kSleepTextMaxLen + 1]) {
+  if (!out) return;
+  String normalized = in;
+  normalized.replace("\r", " ");
+  normalized.replace("\n", " ");
+  normalized.trim();
+  if (normalized.length() > kSleepTextMaxLen) {
+    normalized.remove(kSleepTextMaxLen);
+  }
+  normalized.toCharArray(out, kSleepTextMaxLen + 1);
+  out[kSleepTextMaxLen] = '\0';
+}
+
+void rememberLastDisplayedText(const char *text) {
+  if (!text) return;
+  String normalized = text;
+  sanitizeMessageForSnapshot(normalized, gLastDisplayedText);
+}
+
+bool writeExact(fs::File &f, const void *data, size_t len) {
+  if (!data || len == 0) return len == 0;
+  return f.write(static_cast<const uint8_t *>(data), len) == len;
+}
+
+bool readExact(fs::File &f, void *data, size_t len) {
+  if (!data || len == 0) return len == 0;
+  return f.read(static_cast<uint8_t *>(data), len) == static_cast<int>(len);
+}
+
+void clearSleepRtcContext() {
+  gSleepRtcCtx.magic = 0;
+  gSleepRtcCtx.version = 0;
+  gSleepRtcCtx.snapshotValid = 0;
+  gSleepRtcCtx.appMode = 0;
+  gSleepRtcCtx.nextWakeSec = 0;
+  gSleepRtcCtx.pendingReminder = 0;
+  gSleepRtcCtx.expectedUnix = 0;
+  gSleepRtcCtx.reminderMessage[0] = '\0';
+}
+
+bool hasValidSleepRtcContext() {
+  return gSleepRtcCtx.magic == kSleepRtcCtxMagic &&
+         gSleepRtcCtx.version == kSleepRtcCtxVersion &&
+         gSleepRtcCtx.snapshotValid != 0;
+}
 
 float clampUnitFloat(float value) {
   if (value != value) return 1.0f;  // NaN fallback
@@ -115,17 +224,19 @@ bool staOnlySleepTimeoutReached() {
 
 [[noreturn]] void enterStaOnlyDeepSleep() {
   Serial.println("[STA_ONLY] backlight off for 60s, entering deep sleep");
+  const bool snapshotOk = saveSleepSnapshotToFat();
+  if (snapshotOk) {
+    markSleepRtcContextForSleep();
+  } else {
+    Serial.println("[SLEEP] snapshot save failed, fallback to plain sleep");
+    clearSleepRtcContext();
+  }
   mixer.stopBG();
   mixer.stopInsert();
   wirelessPortalStop();
   WiFi.mode(WIFI_OFF);
-  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
-  esp_sleep_enable_ext0_wakeup(GPIO_NUM_2, 0);  // Key pin LOW wakes the device.
-  delay(20);
-  esp_deep_sleep_start();
-  while (true) {
-    delay(1000);
-  }
+  waitWakeKeyReleaseBeforeSleep();
+  enterDeepSleepNow(kRtcWakeDefaultSec);
 }
 
 void backlightTask(void *param) {
@@ -709,6 +820,7 @@ static void playMessageWithGlitch(const char *text) {
   if (!text || !text[0]) return;
   static int8_t sBbEndExists = -1;
 
+  rememberLastDisplayedText(text);
   notifyBacklightActivity();
   mixer.playBG("/BG.wav");
   mixer.playInsert("/BGstart.wav");
@@ -852,13 +964,15 @@ static constexpr const char *kStaDisconnectedMsg =
     u8"WIFI已断开，按键重新连接";
 
 static constexpr const char *kApPromptMsg =
-    u8"模式：离线配置 | 连接热点以设置";
+    u8"模式：正常 | 热点已启动";
 
 static constexpr const char *kStaonlyPromptMsg =
-    u8"模式：省电";
+    u8"模式：省电 | 无线功能已禁用";
 
 static constexpr const char *kStaCloudApiUrl = "http://115.190.145.254:8080/random";
 static constexpr size_t kStaPrefetchDepth = 20;
+static_assert(kStaPrefetchDepth == kSleepStaQueueMax,
+              "kSleepStaQueueMax must match kStaPrefetchDepth");
 static constexpr uint32_t kStaQueueEmptyHintCooldownMs = 1800UL;
 static constexpr uint32_t kStaFetchFailCooldownMs = 1000UL;
 static constexpr uint32_t kStaFetcherTickMs = 200UL;
@@ -877,6 +991,614 @@ static WiFiClientSecure gStaHttpsClient;
 static bool gStaHttpsClientReady = false;
 static SemaphoreHandle_t gStaMsgQueueMutex = nullptr;
 static TaskHandle_t gStaFetcherTaskHandle = nullptr;
+
+struct SleepSnapshotData {
+  SleepSnapshotHeader header;
+  std::vector<String> staQueue;
+  std::vector<String> regularQueue;
+  std::vector<String> hostQueue;
+};
+
+uint64_t absDiffU64(uint64_t a, uint64_t b) {
+  return (a >= b) ? (a - b) : (b - a);
+}
+
+int64_t daysFromCivil(int year, unsigned month, unsigned day) {
+  year -= (month <= 2U) ? 1 : 0;
+  const int era = (year >= 0 ? year : year - 399) / 400;
+  const unsigned yoe = static_cast<unsigned>(year - era * 400);
+  const int monthAdj = static_cast<int>(month) + ((month > 2U) ? -3 : 9);
+  const unsigned doy = static_cast<unsigned>((153 * monthAdj + 2) / 5 + static_cast<int>(day) - 1);
+  const unsigned doe = yoe * 365U + yoe / 4U - yoe / 100U + doy;
+  return static_cast<int64_t>(era) * 146097LL + static_cast<int64_t>(doe) - 719468LL;
+}
+
+bool ds1302DateTimeToUnix(const Ds1302DateTime &dt, uint64_t &outUnix) {
+  if (!ds1302IsValidDateTime(dt)) return false;
+  const int64_t days = daysFromCivil(static_cast<int>(dt.year), dt.month, dt.day);
+  const int64_t seconds = days * 86400LL + static_cast<int64_t>(dt.hour) * 3600LL +
+                          static_cast<int64_t>(dt.minute) * 60LL + static_cast<int64_t>(dt.second);
+  if (seconds < 0) return false;
+  outUnix = static_cast<uint64_t>(seconds);
+  return true;
+}
+
+bool readRtcUnix(uint64_t &outUnix) {
+  Ds1302DateTime dt;
+  if (!rtc.readDateTime(dt)) return false;
+  if (!ds1302IsValidDateTime(dt)) return false;
+  return ds1302DateTimeToUnix(dt, outUnix);
+}
+
+struct ReminderSchedule {
+  uint32_t secondsOfDay[kMaxReminderTimes] = {0};
+  size_t count = 0;
+  char message[kSleepTextMaxLen + 1] = {0};
+};
+
+String normalizeIniValue(String value) {
+  value.trim();
+  const int hashPos = value.indexOf('#');
+  if (hashPos >= 0) {
+    value = value.substring(0, hashPos);
+  }
+  value.trim();
+  while (value.length() > 0 && value[value.length() - 1] == ';') {
+    value.remove(value.length() - 1);
+    value.trim();
+  }
+  if (value.length() >= 2) {
+    const char first = value[0];
+    const char last = value[value.length() - 1];
+    if ((first == '"' && last == '"') || (first == '\'' && last == '\'')) {
+      value = value.substring(1, value.length() - 1);
+      value.trim();
+    }
+  }
+  return value;
+}
+
+bool parseReminderClockToken(String token, uint32_t &outSeconds) {
+  token.trim();
+  if (!token.length()) return false;
+
+  int hour = -1;
+  int minute = -1;
+  int second = 0;
+  int matched = sscanf(token.c_str(), "%d:%d:%d", &hour, &minute, &second);
+  if (matched != 3) {
+    second = 0;
+    matched = sscanf(token.c_str(), "%d:%d", &hour, &minute);
+    if (matched != 2) return false;
+  }
+
+  if (hour < 0 || hour > 23) return false;
+  if (minute < 0 || minute > 59) return false;
+  if (second < 0 || second > 59) return false;
+
+  outSeconds = static_cast<uint32_t>(hour * 3600 + minute * 60 + second);
+  return true;
+}
+
+void addReminderSeconds(ReminderSchedule &schedule, uint32_t secondsOfDay) {
+  if (schedule.count >= kMaxReminderTimes) return;
+  for (size_t i = 0; i < schedule.count; ++i) {
+    if (schedule.secondsOfDay[i] == secondsOfDay) return;
+  }
+  schedule.secondsOfDay[schedule.count++] = secondsOfDay;
+}
+
+void parseReminderTimesList(const String &rawList, ReminderSchedule &schedule) {
+  String normalized = rawList;
+  normalized.replace("|", ",");
+  normalized.replace(";", ",");
+  normalized.replace(" ", ",");
+
+  int start = 0;
+  while (start <= normalized.length()) {
+    const int end = normalized.indexOf(',', start);
+    String token = (end >= 0) ? normalized.substring(start, end) : normalized.substring(start);
+    uint32_t sec = 0;
+    if (parseReminderClockToken(token, sec)) {
+      addReminderSeconds(schedule, sec);
+    }
+    if (end < 0) break;
+    start = end + 1;
+  }
+}
+
+void sortReminderSchedule(ReminderSchedule &schedule) {
+  if (schedule.count < 2) return;
+  std::sort(schedule.secondsOfDay, schedule.secondsOfDay + schedule.count);
+}
+
+bool loadReminderSchedule(ReminderSchedule &outSchedule) {
+  outSchedule.count = 0;
+  sanitizeMessageForSnapshot(String(kDefaultReminderMessage), outSchedule.message);
+
+  bool mountedTemp = false;
+  if (!fatMounted) {
+    if (!mountFat()) {
+      return false;
+    }
+    mountedTemp = true;
+  }
+
+  fs::File f = FFat.open("/setting.ini", FILE_READ);
+  if (!f) {
+    if (mountedTemp) {
+      unmountFat();
+    }
+    return false;
+  }
+
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (!line.length()) continue;
+    if (line.startsWith("#") || line.startsWith(";")) continue;
+    const int eq = line.indexOf('=');
+    if (eq <= 0) continue;
+
+    String key = line.substring(0, eq);
+    key.trim();
+    key.toLowerCase();
+    String value = normalizeIniValue(line.substring(eq + 1));
+
+    if (key == "remindertimes" || key == "scheduletimes" || key == "alarmtimes") {
+      parseReminderTimesList(value, outSchedule);
+    } else if (key == "remindermessage" || key == "schedulemessage" || key == "alarmmessage") {
+      sanitizeMessageForSnapshot(value, outSchedule.message);
+    }
+  }
+  f.close();
+  sortReminderSchedule(outSchedule);
+
+  if (mountedTemp) {
+    unmountFat();
+  }
+  return outSchedule.count > 0;
+}
+
+bool computeNextReminderDelta(const ReminderSchedule &schedule,
+                              uint64_t nowUnix,
+                              uint32_t &outDeltaSec) {
+  if (schedule.count == 0) return false;
+  const uint32_t nowSecOfDay = static_cast<uint32_t>(nowUnix % 86400ULL);
+  uint32_t bestDelta = std::numeric_limits<uint32_t>::max();
+
+  for (size_t i = 0; i < schedule.count; ++i) {
+    const uint32_t target = schedule.secondsOfDay[i];
+    const uint32_t delta = (target >= nowSecOfDay)
+                               ? (target - nowSecOfDay)
+                               : (86400U - nowSecOfDay + target);
+    if (delta < bestDelta) {
+      bestDelta = delta;
+    }
+  }
+  if (bestDelta == std::numeric_limits<uint32_t>::max()) {
+    return false;
+  }
+  outDeltaSec = bestDelta;
+  return true;
+}
+
+uint32_t chooseRtcRefillStepSec(uint64_t diffSec) {
+  if (diffSec >= 1800ULL) return 1800U;
+  if (diffSec >= 600ULL) return 600U;
+  if (diffSec >= 300ULL) return 300U;
+  if (diffSec >= 60ULL) return 60U;
+  return 10U;
+}
+
+void appendSnapshotMessage(std::vector<String> &out, const String &raw, size_t cap) {
+  if (out.size() >= cap) return;
+  String normalized = raw;
+  normalized.replace("\r", " ");
+  normalized.replace("\n", " ");
+  normalized.trim();
+  if (!normalized.length()) return;
+  if (normalized.length() > kSleepTextMaxLen) {
+    normalized.remove(kSleepTextMaxLen);
+  }
+  out.push_back(normalized);
+}
+
+bool writeFixedMessage(fs::File &f, const String &msg) {
+  char fixed[kSleepTextMaxLen + 1] = {0};
+  sanitizeMessageForSnapshot(msg, fixed);
+  return writeExact(f, fixed, sizeof(fixed));
+}
+
+bool readFixedMessage(fs::File &f, String &out) {
+  char fixed[kSleepTextMaxLen + 1] = {0};
+  if (!readExact(f, fixed, sizeof(fixed))) return false;
+  fixed[kSleepTextMaxLen] = '\0';
+  out = String(fixed);
+  out.trim();
+  return true;
+}
+
+void restorePortalQueuesFromCapture(const std::vector<String> &regularQueue,
+                                    bool hasImmediate,
+                                    const String &immediateMessage,
+                                    const std::vector<String> &hostQueue) {
+  for (const String &msg : regularQueue) {
+    (void)wirelessPortalPushMessageForRestore(msg);
+  }
+  if (hasImmediate) {
+    (void)wirelessPortalPushImmediateMessageForRestore(immediateMessage);
+  }
+  for (const String &msg : hostQueue) {
+    (void)wirelessPortalPushHostMessageForRestore(msg);
+  }
+}
+
+bool saveSleepSnapshotToFat() {
+  if (!fatMounted) {
+    Serial.println("[SLEEP] FAT not mounted, skip snapshot");
+    return false;
+  }
+
+  SleepSnapshotHeader header;
+  header.magic = kSleepFileMagic;
+  header.version = kSleepFileVersion;
+  header.appMode = static_cast<uint8_t>(gAppLoopMode);
+  header.runState = RUNSTATE;
+  header.firstFlag = firstFlag ? 1U : 0U;
+  header.staPhase = static_cast<uint8_t>(gStaOnlinePhase);
+  header.csvCount = csvCount;
+  header.staRetryCount = gStaRetryCount;
+  header.backlightTimeSec = gBacklightTimeSec;
+  sanitizeMessageForSnapshot(String(gLastDisplayedText), header.lastDisplayed);
+
+  std::vector<String> staQueue;
+  staQueue.reserve(kSleepStaQueueMax);
+  if (ensureStaQueueMutex() &&
+      xSemaphoreTake(gStaMsgQueueMutex, pdMS_TO_TICKS(200)) == pdTRUE) {
+    const size_t count = std::min(gStaMsgQueueSize, kSleepStaQueueMax);
+    for (size_t i = 0; i < count; ++i) {
+      const size_t idx = (gStaMsgQueueHead + i) % kStaPrefetchDepth;
+      appendSnapshotMessage(staQueue, gStaMsgQueue[idx], kSleepStaQueueMax);
+    }
+    xSemaphoreGive(gStaMsgQueueMutex);
+  }
+
+  std::vector<String> regularQueue;
+  std::vector<String> hostQueue;
+  regularQueue.reserve(kSleepPortalQueueMax);
+  hostQueue.reserve(kSleepPortalQueueMax);
+  String tmp;
+  while (regularQueue.size() < kSleepPortalQueueMax && wirelessPortalPopMessage(tmp)) {
+    appendSnapshotMessage(regularQueue, tmp, kSleepPortalQueueMax);
+  }
+  while (hostQueue.size() < kSleepPortalQueueMax && wirelessPortalPopHostMessage(tmp)) {
+    appendSnapshotMessage(hostQueue, tmp, kSleepPortalQueueMax);
+  }
+  String immediateMessage;
+  const bool hasImmediate = wirelessPortalPopImmediateMessage(immediateMessage);
+  if (hasImmediate) {
+    sanitizeMessageForSnapshot(immediateMessage, header.immediateMessage);
+    header.hasImmediate = 1U;
+  }
+
+  header.staQueueCount = static_cast<uint8_t>(staQueue.size());
+  header.regularQueueCount = static_cast<uint8_t>(regularQueue.size());
+  header.hostQueueCount = static_cast<uint8_t>(hostQueue.size());
+
+  fs::File f = FFat.open(kSleepSnapshotPath, "w");
+  if (!f) {
+    restorePortalQueuesFromCapture(regularQueue, hasImmediate, immediateMessage, hostQueue);
+    Serial.println("[SLEEP] open snapshot file failed");
+    return false;
+  }
+
+  bool ok = writeExact(f, &header, sizeof(header));
+  if (ok) {
+    ok = writeExact(f, csvArray, sizeof(csvArray));
+  }
+  if (ok) {
+    for (const String &msg : staQueue) {
+      if (!writeFixedMessage(f, msg)) {
+        ok = false;
+        break;
+      }
+    }
+  }
+  if (ok) {
+    for (const String &msg : regularQueue) {
+      if (!writeFixedMessage(f, msg)) {
+        ok = false;
+        break;
+      }
+    }
+  }
+  if (ok) {
+    for (const String &msg : hostQueue) {
+      if (!writeFixedMessage(f, msg)) {
+        ok = false;
+        break;
+      }
+    }
+  }
+  f.close();
+
+  if (!ok) {
+    (void)FFat.remove(kSleepSnapshotPath);
+    restorePortalQueuesFromCapture(regularQueue, hasImmediate, immediateMessage, hostQueue);
+    Serial.println("[SLEEP] snapshot write failed");
+    return false;
+  }
+
+  Serial.printf("[SLEEP] snapshot saved mode=%u staQ=%u webQ=%u hostQ=%u\n",
+                static_cast<unsigned int>(header.appMode),
+                static_cast<unsigned int>(header.staQueueCount),
+                static_cast<unsigned int>(header.regularQueueCount),
+                static_cast<unsigned int>(header.hostQueueCount));
+  return true;
+}
+
+bool loadSleepSnapshotFromFat(SleepSnapshotData &outData) {
+  if (!fatMounted) return false;
+  fs::File f = FFat.open(kSleepSnapshotPath, FILE_READ);
+  if (!f) return false;
+
+  SleepSnapshotHeader header;
+  if (!readExact(f, &header, sizeof(header))) {
+    f.close();
+    return false;
+  }
+  if (header.magic != kSleepFileMagic || header.version != kSleepFileVersion) {
+    f.close();
+    return false;
+  }
+  if (header.staQueueCount > kSleepStaQueueMax ||
+      header.regularQueueCount > kSleepPortalQueueMax ||
+      header.hostQueueCount > kSleepPortalQueueMax) {
+    f.close();
+    return false;
+  }
+  if (!readExact(f, csvArray, sizeof(csvArray))) {
+    f.close();
+    return false;
+  }
+
+  outData.header = header;
+  outData.staQueue.clear();
+  outData.regularQueue.clear();
+  outData.hostQueue.clear();
+  outData.staQueue.reserve(header.staQueueCount);
+  outData.regularQueue.reserve(header.regularQueueCount);
+  outData.hostQueue.reserve(header.hostQueueCount);
+
+  String item;
+  for (uint8_t i = 0; i < header.staQueueCount; ++i) {
+    if (!readFixedMessage(f, item)) {
+      f.close();
+      return false;
+    }
+    appendSnapshotMessage(outData.staQueue, item, kSleepStaQueueMax);
+  }
+  for (uint8_t i = 0; i < header.regularQueueCount; ++i) {
+    if (!readFixedMessage(f, item)) {
+      f.close();
+      return false;
+    }
+    appendSnapshotMessage(outData.regularQueue, item, kSleepPortalQueueMax);
+  }
+  for (uint8_t i = 0; i < header.hostQueueCount; ++i) {
+    if (!readFixedMessage(f, item)) {
+      f.close();
+      return false;
+    }
+    appendSnapshotMessage(outData.hostQueue, item, kSleepPortalQueueMax);
+  }
+
+  f.close();
+  return true;
+}
+
+AppLoopMode decodeSnapshotMode(uint8_t rawMode) {
+  switch (rawMode) {
+    case APP_MODE_AP_STA:
+    case APP_MODE_STA_ONLINE:
+    case APP_MODE_STA_ONLY:
+      return static_cast<AppLoopMode>(rawMode);
+    default:
+      return APP_MODE_AP_STA;
+  }
+}
+
+StaOnlinePhase decodeSnapshotStaPhase(uint8_t rawPhase) {
+  switch (rawPhase) {
+    case static_cast<uint8_t>(StaOnlinePhase::kPromptWaitShort):
+    case static_cast<uint8_t>(StaOnlinePhase::kConnecting):
+    case static_cast<uint8_t>(StaOnlinePhase::kFailWaitShort):
+    case static_cast<uint8_t>(StaOnlinePhase::kConnected):
+    case static_cast<uint8_t>(StaOnlinePhase::kDisconnectedWaitShort):
+      return static_cast<StaOnlinePhase>(rawPhase);
+    default:
+      return StaOnlinePhase::kPromptWaitShort;
+  }
+}
+
+bool applySleepSnapshot(const SleepSnapshotData &snapshot) {
+  gAppLoopMode = decodeSnapshotMode(snapshot.header.appMode);
+  gAppModeEnterPending = false;
+
+  RUNSTATE = snapshot.header.runState;
+  firstFlag = snapshot.header.firstFlag != 0;
+  csvCount = snapshot.header.csvCount;
+  if (csvCount < 0) csvCount = 0;
+  if (csvCount > kCsvArrayCapacity) csvCount = kCsvArrayCapacity;
+
+  gStaOnlinePhase = decodeSnapshotStaPhase(snapshot.header.staPhase);
+  gStaRetryCount = snapshot.header.staRetryCount;
+  gStaAttemptStartMs = millis();
+  gStaLastQueueEmptyHintMs = 0;
+  gStaNextFetchAllowedMs = 0;
+  gStaFetchInProgress = false;
+
+  wirelessPortalStop();
+  bool portalOk = false;
+  if (gAppLoopMode == APP_MODE_STA_ONLY) {
+    WiFi.disconnect(true, false);
+    portalOk = wirelessPortalStartEspNowOnly();
+  } else {
+    portalOk = wirelessPortalStart();
+  }
+  if (!portalOk) {
+    Serial.println("[SLEEP] restore portal start failed");
+  }
+
+  clearStaMessageQueue();
+  for (const String &msg : snapshot.staQueue) {
+    (void)pushStaMessageQueue(msg);
+  }
+
+  for (const String &msg : snapshot.regularQueue) {
+    (void)wirelessPortalPushMessageForRestore(msg);
+  }
+  if (snapshot.header.hasImmediate) {
+    (void)wirelessPortalPushImmediateMessageForRestore(String(snapshot.header.immediateMessage));
+  }
+  for (const String &msg : snapshot.hostQueue) {
+    (void)wirelessPortalPushHostMessageForRestore(msg);
+  }
+
+  if (gAppLoopMode == APP_MODE_STA_ONLINE) {
+    (void)loadStaCredentialsFromSettingIni(gStaNetSsid, gStaNetPassword);
+    ensureStaFetcherTaskStarted();
+    if (gStaOnlinePhase == StaOnlinePhase::kConnecting && gStaNetSsid.length()) {
+      WiFi.mode(WIFI_STA);
+      WiFi.begin(gStaNetSsid.c_str(), gStaNetPassword.c_str());
+    }
+  } else {
+    gStaNetSsid = "";
+    gStaNetPassword = "";
+  }
+
+  gBacklightTimeSec = snapshot.header.backlightTimeSec;
+  setBacklightTimeSeconds(gBacklightTimeSec);
+  notifyBacklightActivity();
+
+  rememberLastDisplayedText(snapshot.header.lastDisplayed);
+  if (snapshot.header.lastDisplayed[0]) {
+    playMessageWithGlitch(snapshot.header.lastDisplayed);
+  }
+
+  return true;
+}
+
+void markSleepRtcContextForSleep() {
+  gSleepRtcCtx.magic = kSleepRtcCtxMagic;
+  gSleepRtcCtx.version = kSleepRtcCtxVersion;
+  gSleepRtcCtx.snapshotValid = 1;
+  gSleepRtcCtx.appMode = static_cast<uint8_t>(gAppLoopMode);
+  gSleepRtcCtx.nextWakeSec = kRtcWakeDefaultSec;
+  gSleepRtcCtx.pendingReminder = 0;
+  gSleepRtcCtx.reminderMessage[0] = '\0';
+
+  uint64_t nowUnix = 0;
+  if (!readRtcUnix(nowUnix)) {
+    gSleepRtcCtx.expectedUnix = 0;
+    return;
+  }
+  gSleepRtcCtx.expectedUnix = nowUnix + static_cast<uint64_t>(kRtcWakeDefaultSec);
+}
+
+void waitWakeKeyReleaseBeforeSleep() {
+  pinMode(static_cast<uint8_t>(kWakeKeyGpio), INPUT_PULLUP);
+  const uint32_t started = millis();
+  while (digitalRead(static_cast<uint8_t>(kWakeKeyGpio)) == LOW) {
+    if ((millis() - started) > 2500U) break;
+    delay(10);
+  }
+}
+
+[[noreturn]] void enterDeepSleepNow(uint32_t wakeSec) {
+  if (wakeSec == 0) wakeSec = kRtcWakeDefaultSec;
+  if (wakeSec > kRtcWakeMaxSec) wakeSec = kRtcWakeMaxSec;
+
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+  esp_sleep_enable_ext0_wakeup(kWakeKeyGpio, 0);
+  esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(wakeSec) * 1000000ULL);
+  Serial.printf("[SLEEP] enter deep sleep ext0(gpio=%d) timer=%us\n",
+                static_cast<int>(kWakeKeyGpio),
+                static_cast<unsigned int>(wakeSec));
+  delay(20);
+  esp_deep_sleep_start();
+  while (true) {
+    delay(1000);
+  }
+}
+
+bool handleRtcMaintenanceWake() {
+  ledcWrite(0, 0);
+  rtc.begin();
+
+  gSleepRtcCtx.pendingReminder = 0;
+  gSleepRtcCtx.reminderMessage[0] = '\0';
+
+  uint32_t nextWakeSec = kRtcWakeDefaultSec;
+  uint64_t nowUnix = 0;
+  const bool rtcOk = readRtcUnix(nowUnix);
+
+  if (!rtcOk) {
+    nextWakeSec = 10U;
+    gSleepRtcCtx.expectedUnix = 0;
+    Serial.println("[SLEEP] RTC read invalid, no external time, quick retry");
+  } else {
+    ReminderSchedule schedule;
+    uint32_t nextReminderDelta = 0;
+    const bool hasSchedule = loadReminderSchedule(schedule);
+    if (hasSchedule && computeNextReminderDelta(schedule, nowUnix, nextReminderDelta)) {
+      if (nextReminderDelta <= kReminderTriggerWindowSec) {
+        gSleepRtcCtx.pendingReminder = 1;
+        memcpy(gSleepRtcCtx.reminderMessage,
+               schedule.message,
+               sizeof(gSleepRtcCtx.reminderMessage));
+        gSleepRtcCtx.reminderMessage[sizeof(gSleepRtcCtx.reminderMessage) - 1] = '\0';
+        gSleepRtcCtx.expectedUnix = nowUnix;
+        gSleepRtcCtx.nextWakeSec = 0;
+        Serial.printf("[SLEEP] reminder due now (delta=%u sec), continue boot\n",
+                      static_cast<unsigned int>(nextReminderDelta));
+        return true;
+      }
+
+      const uint32_t tierSec = chooseRtcRefillStepSec(nextReminderDelta);
+      nextWakeSec = std::min(nextReminderDelta, tierSec);
+      if (nextWakeSec == 0) {
+        nextWakeSec = 1;
+      }
+      nextWakeSec = std::min(nextWakeSec, kRtcWakeMaxSec);
+      gSleepRtcCtx.expectedUnix = nowUnix + static_cast<uint64_t>(nextWakeSec);
+      Serial.printf("[SLEEP] schedule pending delta=%u sec, tier=%u sec, next=%u sec\n",
+                    static_cast<unsigned int>(nextReminderDelta),
+                    static_cast<unsigned int>(tierSec),
+                    static_cast<unsigned int>(nextWakeSec));
+    } else {
+      const uint64_t targetUnix = gSleepRtcCtx.expectedUnix;
+      const uint64_t diffSec = (targetUnix == 0ULL) ? 0ULL : absDiffU64(nowUnix, targetUnix);
+      if (targetUnix != 0ULL && diffSec <= kRtcMismatchToleranceSec) {
+        nextWakeSec = kRtcWakeDefaultSec;
+      } else {
+        const uint32_t refillStep = chooseRtcRefillStepSec(diffSec == 0ULL ? kRtcWakeDefaultSec : diffSec);
+        nextWakeSec = std::min(refillStep, kRtcWakeMaxSec);
+      }
+      gSleepRtcCtx.expectedUnix = nowUnix + static_cast<uint64_t>(nextWakeSec);
+      Serial.printf("[SLEEP] no schedule, heartbeat next=%u sec\n",
+                    static_cast<unsigned int>(nextWakeSec));
+    }
+  }
+
+  gSleepRtcCtx.magic = kSleepRtcCtxMagic;
+  gSleepRtcCtx.version = kSleepRtcCtxVersion;
+  gSleepRtcCtx.snapshotValid = 1;
+  gSleepRtcCtx.nextWakeSec = nextWakeSec;
+  enterDeepSleepNow(nextWakeSec);
+  return false;
+}
 
 static bool ensureStaQueueMutex() {
   if (gStaMsgQueueMutex) return true;
@@ -1941,4 +2663,68 @@ void onStaOnlyInit(AppLoopMode mode)
     Serial.println("[STA_ONLY] wirelessPortalStartEspNowOnly failed");
   }
   playStaOnlyMessage(kStaonlyPromptMsg);
+}
+
+bool appHandleRtcMaintenanceWakeIfNeeded() {
+  if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_TIMER) {
+    return false;
+  }
+  if (!hasValidSleepRtcContext()) {
+    return false;
+  }
+  Serial.println("[SLEEP] timer wake detected, run RTC maintenance");
+  const bool shouldContinueBoot = handleRtcMaintenanceWake();
+  return !shouldContinueBoot;
+}
+
+bool appShouldFastResumeFromDeepSleep() {
+  const esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+  if (cause == ESP_SLEEP_WAKEUP_EXT0) {
+    return hasValidSleepRtcContext();
+  }
+  if (cause == ESP_SLEEP_WAKEUP_TIMER) {
+    return hasValidSleepRtcContext() && (gSleepRtcCtx.pendingReminder != 0);
+  }
+  return false;
+}
+
+bool appRestoreFromDeepSleepSnapshot() {
+  if (!appShouldFastResumeFromDeepSleep()) {
+    return false;
+  }
+  const bool timerReminderWake =
+      (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) &&
+      (gSleepRtcCtx.pendingReminder != 0);
+  char reminderMessage[kSleepTextMaxLen + 1] = {0};
+  if (timerReminderWake) {
+    memcpy(reminderMessage,
+           gSleepRtcCtx.reminderMessage,
+           sizeof(reminderMessage));
+    reminderMessage[sizeof(reminderMessage) - 1] = '\0';
+    if (!reminderMessage[0]) {
+      sanitizeMessageForSnapshot(String(kDefaultReminderMessage), reminderMessage);
+    }
+  }
+
+  SleepSnapshotData snapshot;
+  if (!loadSleepSnapshotFromFat(snapshot)) {
+    Serial.println("[SLEEP] snapshot not found or invalid, fallback normal app boot");
+    clearSleepRtcContext();
+    return false;
+  }
+  if (!applySleepSnapshot(snapshot)) {
+    Serial.println("[SLEEP] snapshot apply failed, fallback normal app boot");
+    clearSleepRtcContext();
+    return false;
+  }
+
+  if (timerReminderWake) {
+    playMessageWithGlitch(reminderMessage);
+    notifyBacklightActivity();
+  }
+
+  (void)FFat.remove(kSleepSnapshotPath);
+  clearSleepRtcContext();
+  Serial.println("[SLEEP] snapshot restored");
+  return true;
 }

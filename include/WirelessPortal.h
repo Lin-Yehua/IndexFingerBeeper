@@ -11,6 +11,9 @@ bool wirelessPortalPopImmediateMessage(String &outMessage);
 bool wirelessPortalHasPendingImmediateMessage();
 bool wirelessPortalPopHostMessage(String &outMessage);
 bool wirelessPortalHasPendingHostMessage();
+bool wirelessPortalPushMessageForRestore(const String &text);
+bool wirelessPortalPushImmediateMessageForRestore(const String &text);
+bool wirelessPortalPushHostMessageForRestore(const String &text);
 bool wirelessPortalConsumeCsvReloadRequest();
 bool wirelessPortalInstantRefreshNoKeyEnabled();
 bool wirelessPortalTakePendingImage(uint16_t *outPixels,

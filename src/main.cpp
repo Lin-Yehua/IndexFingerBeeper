@@ -10,57 +10,75 @@ void setup() {
   Serial.begin(115200);
   //delay(300);
   Serial.println("\n[BOOT] project + USB MSC + FAT CSV");
+  setAppModeInitCallback(APP_MODE_AP_STA,onApStaInit);
+  setAppModeInitCallback(APP_MODE_STA_ONLINE,onStaOnlineInit);
+  setAppModeInitCallback(APP_MODE_STA_ONLY,onStaOnlyInit);
+
   ledcSetup(0, 40000, 8);
   ledcAttachPin(14, 0);
   ledcWrite(0, 0);
-  runBootAnimationTaskStart();
-  msc.vendorID("ESP32");
-  msc.productID("S3_FAT_MSC");
-  msc.productRevision("1.0");
-  msc.onRead(onRead);
-  msc.onWrite(onWrite);
-  msc.onStartStop(onStartStop);
-  msc.mediaPresent(false);
-  rtc.begin();
+  (void)appHandleRtcMaintenanceWakeIfNeeded();
 
-  if (!openRawBackend()) {
-    Serial.println("[BOOT] raw FAT backend failed");
-    while (true) delay(1000);
-  }
-  if (!msc.begin(sectorCount, static_cast<uint16_t>(mscBlockSize))) {
-    Serial.println("[BOOT] MSC begin failed");
-    while (true) delay(1000);
-  }
-  closeRawBackend();
-
-  USB.onEvent(onUsbEvent);
-  USB.begin();
-  Serial.println("[BOOT] USB initialized");
-
-  runBootAnimationTaskWait();
-
-  const uint32_t t0 = millis();
-  while (millis() - t0 < 300) {
-    if (usbHostActive) break;
-    delay(10);
-  }
-
-  if (usbHostActive) {
-    Serial.println("[BOOT] USB detected -> USB mode");
-    enterUsbMode();
-  } else {
-    Serial.println("[BOOT] USB not detected -> APP mode");
+  const bool fastResume = appShouldFastResumeFromDeepSleep();
+  if (fastResume) {
+    Serial.println("[BOOT] deep-sleep key wake -> fast resume");
+    rtc.begin();
+    usbHostActive = false;
+    usbHostActivePrev = false;
+    usbModeActive = false;
     if (enterAppMode()) {
       if (initProjectResources()) {
-        wirelessPortalStart();
+        if (!appRestoreFromDeepSleepSnapshot()) {
+          wirelessPortalStart();
+        }
+      }
+    }
+  } else {
+    runBootAnimationTaskStart();
+    msc.vendorID("ESP32");
+    msc.productID("S3_FAT_MSC");
+    msc.productRevision("1.0");
+    msc.onRead(onRead);
+    msc.onWrite(onWrite);
+    msc.onStartStop(onStartStop);
+    msc.mediaPresent(false);
+    rtc.begin();
+
+    if (!openRawBackend()) {
+      Serial.println("[BOOT] raw FAT backend failed");
+      while (true) delay(1000);
+    }
+    if (!msc.begin(sectorCount, static_cast<uint16_t>(mscBlockSize))) {
+      Serial.println("[BOOT] MSC begin failed");
+      while (true) delay(1000);
+    }
+    closeRawBackend();
+
+    USB.onEvent(onUsbEvent);
+    USB.begin();
+    Serial.println("[BOOT] USB initialized");
+
+    runBootAnimationTaskWait();
+
+    const uint32_t t0 = millis();
+    while (millis() - t0 < 300) {
+      if (usbHostActive) break;
+      delay(10);
+    }
+
+    if (usbHostActive) {
+      Serial.println("[BOOT] USB detected -> USB mode");
+      enterUsbMode();
+    } else {
+      Serial.println("[BOOT] USB not detected -> APP mode");
+      if (enterAppMode()) {
+        if (initProjectResources()) {
+          wirelessPortalStart();
+        }
       }
     }
   }
   usbHostActivePrev = usbHostActive;
-
-  setAppModeInitCallback(APP_MODE_AP_STA,onApStaInit);
-  setAppModeInitCallback(APP_MODE_STA_ONLINE,onStaOnlineInit);
-  setAppModeInitCallback(APP_MODE_STA_ONLY,onStaOnlyInit);
 }
 
 void loop() 

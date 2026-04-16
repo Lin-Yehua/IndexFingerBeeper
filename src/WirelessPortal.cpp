@@ -2202,6 +2202,31 @@ bool wirelessPortalHasPendingHostMessage() {
   return uxQueueMessagesWaiting(gHostMessageQueue) > 0;
 }
 
+bool wirelessPortalPushMessageForRestore(const String &text) {
+  String error;
+  return enqueueRegularMessage(text, error);
+}
+
+bool wirelessPortalPushImmediateMessageForRestore(const String &text) {
+  String error;
+  return enqueueImmediateMessage(text, error);
+}
+
+bool wirelessPortalPushHostMessageForRestore(const String &text) {
+  if (!gHostMessageQueue) return false;
+
+  String normalized = text;
+  normalized.trim();
+  if (!normalized.length()) return false;
+  if (normalized.length() > kTextMaxLen) {
+    normalized.remove(kTextMaxLen);
+  }
+
+  WebQueuedMessage msg = {};
+  normalized.toCharArray(msg.text, sizeof(msg.text));
+  return xQueueSend(gHostMessageQueue, &msg, 0) == pdTRUE;
+}
+
 bool wirelessPortalConsumeCsvReloadRequest() {
   return takeCsvReloadRequested();
 }
