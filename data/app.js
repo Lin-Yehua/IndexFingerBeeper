@@ -282,7 +282,8 @@ function schMatch(it, day) {
 function schPast(it, day) {
   const n = new Date(); const t0 = new Date(n.getFullYear(), n.getMonth(), n.getDate()); const d0 = new Date(day.getFullYear(), day.getMonth(), day.getDate());
   if (d0 < t0) return true; if (d0 > t0) return false;
-  return (it.h * 60 + it.i) < (n.getHours() * 60 + n.getMinutes());
+  const due = new Date(n.getFullYear(), n.getMonth(), n.getDate(), it.h, it.i, 0, 0);
+  return n.getTime() >= due.getTime();
 }
 function isScheduleEditorBusy() {
   const a = document.activeElement;
