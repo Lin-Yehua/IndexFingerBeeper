@@ -950,6 +950,14 @@ static AppLoopMode gAppLoopMode = APP_MODE_AP_STA;
 static AppModeEnterCallback gAppModeEnterCallback = nullptr;
 static AppModeEnterCallback gAppModeInitCallbacks[3] = {nullptr, nullptr, nullptr};
 static bool gAppModeEnterPending = true;
+static bool gSkipStartupPromptOnce = true;
+
+static bool consumeStartupPromptSkip(AppLoopMode mode) {
+  if (!gSkipStartupPromptOnce) return false;
+  gSkipStartupPromptOnce = false;
+  Serial.printf("[BOOT] startup mode=%s, skip prompt once\n", appModeToIniValue(mode));
+  return true;
+}
 
 enum class StaOnlinePhase : uint8_t {
   kPromptWaitShort = 0,
@@ -3072,8 +3080,6 @@ void processAppLoop() {
 
 void onApStaInit(AppLoopMode mode)
 {
-  static bool FristBootFlag = true;
-  (void)mode;
   waitStaFetcherIdle(1000);
   resetStaHttpClient();
   gStaOnlinePhase = StaOnlinePhase::kPromptWaitShort;
@@ -3091,20 +3097,13 @@ void onApStaInit(AppLoopMode mode)
   if (!wirelessPortalStart()) {
     Serial.println("[AP] wirelessPortalStart failed on AP init");
   }
-  if (FristBootFlag)
-  {
-    FristBootFlag = false;
-  }
-  else
-  {
+  if (!consumeStartupPromptSkip(mode)) {
     playAPMessage(kApPromptMsg);
   }
-  
 }
 
 void onStaOnlineInit(AppLoopMode mode)
 {
-  (void)mode;
   waitStaFetcherIdle(1000);
   resetStaHttpClient();
   if (!wirelessPortalStart()) {
@@ -3131,12 +3130,15 @@ void onStaOnlineInit(AppLoopMode mode)
   Serial.printf("[STA] target net: %s\\n", gStaNetApi.c_str());
 
   ensureStaFetcherTaskStarted();
-  playStaMessage(kStaPromptMsg);
+  if (consumeStartupPromptSkip(mode)) {
+    beginStaConnectAttempt();
+  } else {
+    playStaMessage(kStaPromptMsg);
+  }
 }
 
 void onStaOnlyInit(AppLoopMode mode)
 {
-  (void)mode;
   waitStaFetcherIdle(1000);
   resetStaHttpClient();
   wirelessPortalStop();
@@ -3154,7 +3156,10 @@ void onStaOnlyInit(AppLoopMode mode)
   if (!wirelessPortalStartEspNowOnly()) {
     Serial.println("[STA_ONLY] wirelessPortalStartEspNowOnly failed");
   }
-  playStaOnlyMessage(kStaonlyPromptMsg);
+  if (!consumeStartupPromptSkip(mode)) {
+    get_Keycode();
+    playStaOnlyMessage(kStaonlyPromptMsg);
+  }
 }
 
 bool appHandleRtcMaintenanceWakeIfNeeded() {
