@@ -354,6 +354,15 @@ function rtcPayload() {
 }
 function rtcFill(d) { el.rtcYear.value = d.year; el.rtcMonth.value = d.month; el.rtcDay.value = d.day; el.rtcHour.value = d.hour; el.rtcMinute.value = d.minute; el.rtcSecond.value = d.second; }
 function rtcText(d) { return `当前RTC: ${d.year}-${pad2(d.month)}-${pad2(d.day)} ${pad2(d.hour)}:${pad2(d.minute)}:${pad2(d.second)} (W${d.week})`; }
+function isRtcInputEditing() {
+  const a = document.activeElement;
+  return a === el.rtcYear ||
+         a === el.rtcMonth ||
+         a === el.rtcDay ||
+         a === el.rtcHour ||
+         a === el.rtcMinute ||
+         a === el.rtcSecond;
+}
 
 async function loadRtc() {
   try {
@@ -362,7 +371,9 @@ async function loadRtc() {
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     if (!d.ok) throw new Error("RTC读取失败");
     el.rtcNow.textContent = rtcText(d);
-    rtcFill(d);
+    if (!isRtcInputEditing()) {
+      rtcFill(d);
+    }
     if (!isScheduleEditorBusy()) {
       renderSchedules();
     }
