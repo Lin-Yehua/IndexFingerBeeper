@@ -97,10 +97,33 @@ select {
   border-radius: 10px;
   background: #fff;
   color: var(--text);
+  caret-color: var(--brand);
+  transition: border-color 120ms ease, box-shadow 120ms ease, background-color 120ms ease;
 }
 
 textarea {
-  resize: vertical;
+  resize: none;
+  overflow: hidden;
+  line-height: 1.45;
+  min-height: 54px;
+}
+
+textarea:focus,
+textarea:focus-visible,
+input[type="text"]:focus,
+input[type="text"]:focus-visible,
+input[type="number"]:focus,
+input[type="number"]:focus-visible,
+input[type="date"]:focus,
+input[type="date"]:focus-visible,
+input[type="time"]:focus,
+input[type="time"]:focus-visible,
+select:focus,
+select:focus-visible {
+  outline: none;
+  border-color: #ff8e2b;
+  background: #fffdf8;
+  box-shadow: 0 0 0 3px rgba(255, 138, 43, 0.2);
 }
 
 button {

@@ -32,7 +32,7 @@ const pad2 = (n) => String(n).padStart(2, "0");
 const toInt = (v, d = 0) => { const n = parseInt(String(v ?? "").trim(), 10); return Number.isFinite(n) ? n : d; };
 const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
 const setStatus = (node, text, err = false) => { if (!node) return; node.textContent = text || ""; node.classList.toggle("error", !!err); node.classList.toggle("ok", !err && !!text); };
-const autoGrow = (ta) => { if (!ta) return; ta.style.height = "auto"; ta.style.height = `${Math.min(ta.scrollHeight + 2, 260)}px`; };
+const autoGrow = (ta) => { if (!ta) return; ta.style.height = "auto"; ta.style.height = `${ta.scrollHeight + 2}px`; };
 
 async function copyText(t) {
   try { if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(t); return true; } } catch (_) {}
@@ -47,7 +47,19 @@ function switchPush(mode) {
 }
 
 function loadMsgLocal() {
-  try { st.msgHistory = JSON.parse(localStorage.getItem(LS.hist) || "[]").filter((x) => typeof x === "string" && x.trim()); } catch (_) { st.msgHistory = []; }
+  try {
+    const raw = JSON.parse(localStorage.getItem(LS.hist) || "[]");
+    if (Array.isArray(raw)) {
+      st.msgHistory = raw.map((x) => {
+        if (typeof x === "string") return { msg: x.trim(), prefix: "" };
+        const msg = String(x?.msg || x?.message || "").trim();
+        const prefix = String(x?.prefix || "").trim();
+        return { msg, prefix };
+      }).filter((x) => x.msg);
+    } else {
+      st.msgHistory = [];
+    }
+  } catch (_) { st.msgHistory = []; }
   el.msgPrefixEnable.checked = localStorage.getItem(LS.pfxOn) === "1";
   el.msgPrefix.value = localStorage.getItem(LS.pfxText) || "";
   renderMsgHistory();
@@ -60,22 +72,36 @@ function saveMsgLocal() {
 function renderMsgHistory() {
   el.msgHistory.innerHTML = "";
   const first = document.createElement("option"); first.value = ""; first.textContent = "历史发送（选择回填）"; el.msgHistory.appendChild(first);
-  st.msgHistory.forEach((m) => { const o = document.createElement("option"); o.value = m; o.textContent = m.length > 50 ? `${m.slice(0, 50)}...` : m; el.msgHistory.appendChild(o); });
+  st.msgHistory.forEach((item, idx) => {
+    const o = document.createElement("option");
+    o.value = String(idx);
+    const head = item.prefix ? `[前缀:${item.prefix}] ` : "";
+    const shown = `${head}${item.msg}`;
+    o.textContent = shown.length > 58 ? `${shown.slice(0, 58)}...` : shown;
+    el.msgHistory.appendChild(o);
+  });
 }
-function recordMsg(text) {
-  const t = String(text || "").trim(); if (!t) return;
-  st.msgHistory = [t, ...st.msgHistory.filter((x) => x !== t)].slice(0, 30); saveMsgLocal(); renderMsgHistory();
+function recordMsg(msg, prefix) {
+  const m = String(msg || "").trim();
+  const p = String(prefix || "").trim();
+  if (!m) return;
+  st.msgHistory = [{ msg: m, prefix: p }, ...st.msgHistory.filter((x) => x.msg !== m || x.prefix !== p)].slice(0, 30);
+  saveMsgLocal();
+  renderMsgHistory();
 }
 
 async function sendMsg() {
-  let text = String(el.msgInput.value || "").replace(/\r?\n+/g, " ").trim();
-  if (!text) return setStatus(el.msgStatus, "请输入消息", true);
+  const rawMsg = String(el.msgInput.value || "").replace(/\r?\n+/g, " ").trim();
+  if (!rawMsg) return setStatus(el.msgStatus, "请输入消息", true);
   const pfx = String(el.msgPrefix.value || "").replace(/\r?\n+/g, " ").trim();
-  if (el.msgPrefixEnable.checked && pfx) text = `${pfx} ${text}`.trim();
+  const text = (el.msgPrefixEnable.checked && pfx) ? `${pfx}${rawMsg}` : rawMsg;
   try {
     const b = new FormData(); b.append("text", text); b.append("immediate", el.msgImmediate.checked ? "1" : "0");
     const r = await fetch("/api/send", { method: "POST", body: b }); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`);
-    recordMsg(text); el.msgInput.value = ""; setStatus(el.msgStatus, raw || "发送成功");
+    recordMsg(rawMsg, (el.msgPrefixEnable.checked && pfx) ? pfx : "");
+    el.msgInput.value = "";
+    autoGrow(el.msgInput);
+    setStatus(el.msgStatus, raw || "发送成功");
   } catch (e) { setStatus(el.msgStatus, `发送失败: ${e.message}`, true); }
 }
 
@@ -325,8 +351,8 @@ async function loadWireless() {
   try {
     const [sr, ar, tr, hr] = await Promise.all([fetch("/api/status"), fetch("/api/apconfig"), fetch("/api/staconfig"), fetch("/api/hostmac")]);
     const s = await sr.json(), a = await ar.json(), t = await tr.json(), h = await hr.json();
-    if (ar.ok) { el.apSsid.value = a.ssid || ""; el.apPassword.value = ""; el.apChannel.value = String(a.channel || 1); }
-    if (tr.ok) { el.staSsid.value = t.ssid || ""; el.staPassword.value = ""; }
+    if (ar.ok) { el.apSsid.value = a.ssid || ""; el.apChannel.value = String(a.channel || 1); }
+    if (tr.ok) { el.staSsid.value = t.ssid || ""; }
     if (hr.ok) el.hostMac.value = h.hostMac || "";
     if (sr.ok) { el.selfMac.value = s.selfMac || ""; setStatus(el.wirelessStatus, `队列: Web ${s.queue} / Host ${s.hostQueue} | AP=${s.apSsid || "-"} CH=${s.apChannel || "-"}`); }
   } catch (e) { setStatus(el.wirelessStatus, `加载无线信息失败: ${e.message}`, true); }
@@ -336,7 +362,7 @@ async function saveAp() {
   try {
     const b = new FormData(); b.append("ssid", el.apSsid.value.trim()); b.append("password", el.apPassword.value); b.append("channel", el.apChannel.value.trim());
     const r = await fetch("/api/apconfig", { method: "POST", body: b }); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`); const d = JSON.parse(raw);
-    setStatus(el.wirelessStatus, `AP设置已保存: ${d.ssid} CH${d.channel}`); el.apPassword.value = "";
+    setStatus(el.wirelessStatus, `AP设置已保存: ${d.ssid} CH${d.channel}`);
   } catch (e) { setStatus(el.wirelessStatus, `AP设置保存失败: ${e.message}`, true); }
 }
 
@@ -344,7 +370,7 @@ async function saveSta() {
   try {
     const b = new FormData(); b.append("ssid", el.staSsid.value.trim()); b.append("password", el.staPassword.value);
     const r = await fetch("/api/staconfig", { method: "POST", body: b }); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`); const d = JSON.parse(raw);
-    setStatus(el.wirelessStatus, `联网设置已保存: ${d.ssid}`); el.staPassword.value = "";
+    setStatus(el.wirelessStatus, `联网设置已保存: ${d.ssid}`);
   } catch (e) { setStatus(el.wirelessStatus, `联网设置保存失败: ${e.message}`, true); }
 }
 
@@ -367,9 +393,18 @@ async function loadBattery() {
 function bind() {
   el.tabMsg.addEventListener("click", () => switchPush("msg"));
   el.tabImg.addEventListener("click", () => switchPush("img"));
-  el.msgHistory.addEventListener("change", () => { if (el.msgHistory.value) el.msgInput.value = el.msgHistory.value; });
+  el.msgHistory.addEventListener("change", () => {
+    const idx = toInt(el.msgHistory.value, -1);
+    if (idx < 0 || idx >= st.msgHistory.length) return;
+    const picked = st.msgHistory[idx];
+    el.msgInput.value = picked.msg || "";
+    el.msgPrefix.value = picked.prefix || "";
+    el.msgPrefixEnable.checked = !!(picked.prefix && picked.prefix.length);
+    autoGrow(el.msgInput);
+    saveMsgLocal();
+  });
   el.msgPrefixEnable.addEventListener("change", saveMsgLocal); el.msgPrefix.addEventListener("input", saveMsgLocal);
-  el.btnSendMsg.addEventListener("click", sendMsg); el.btnClearMsg.addEventListener("click", () => { el.msgInput.value = ""; el.msgInput.focus(); });
+  el.btnSendMsg.addEventListener("click", sendMsg); el.btnClearMsg.addEventListener("click", () => { el.msgInput.value = ""; autoGrow(el.msgInput); el.msgInput.focus(); });
 
   el.btnCopyPortalUrl.addEventListener("click", async () => setStatus(el.imgStatus, (await copyText(el.portalUrl.value || portalRoot())) ? "地址已复制" : "复制失败", false));
   el.imgFile.addEventListener("change", async (ev) => { st.imageFile = ev.target.files && ev.target.files[0] ? ev.target.files[0] : null; await prepImage(); });
@@ -396,13 +431,19 @@ function bind() {
     const t = String(el.selfMac.value || "").trim(); if (!t) return setStatus(el.wirelessStatus, "MAC为空", true);
     setStatus(el.wirelessStatus, (await copyText(t)) ? "MAC已复制" : "复制失败");
   });
+
+  [el.msgInput, el.cmdAddInput, el.scheduleAddText].forEach((ta) => {
+    if (!ta) return;
+    autoGrow(ta);
+    ta.addEventListener("input", () => autoGrow(ta));
+  });
 }
 
 async function boot() {
   switchPush("msg"); bind(); loadMsgLocal();
   el.portalUrl.value = portalRoot();
   const n = new Date(); el.scheduleDate.value = `${n.getFullYear()}-${pad2(n.getMonth() + 1)}-${pad2(n.getDate())}`;
-  clearPreview(); autoGrow(el.cmdAddInput); el.cmdAddInput.addEventListener("input", () => autoGrow(el.cmdAddInput));
+  clearPreview();
   await Promise.all([loadCommands(), loadSchedules(), loadRtc(), loadDisplayAudio(), loadWireless(), loadBattery()]);
   setInterval(loadWireless, 1500);
   setInterval(loadRtc, 5000);
