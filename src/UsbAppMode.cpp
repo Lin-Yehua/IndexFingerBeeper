@@ -56,7 +56,7 @@ constexpr size_t kSleepTextMaxLen = 240;
 constexpr size_t kSleepPortalQueueMax = 128;
 constexpr size_t kSleepStaQueueMax = 20;
 constexpr size_t kMaxReminderTimes = 128;
-constexpr size_t kScheduleInterruptQueueMax = 16;
+constexpr size_t kScheduleInterruptQueueMax = 64;
 constexpr char kSleepSnapshotPath[] = "/sleep_state.bin";
 constexpr const char *kDefaultReminderMessage = u8"这个时候你似乎有什么事要干";
 constexpr uint32_t kSleepFileMagic = 0x53534E50UL;      // "SSNP"
@@ -114,18 +114,27 @@ char gLastDisplayedText[kSleepTextMaxLen + 1] = {0};
 
 struct ScheduleInterruptQueueItem {
   char text[kSleepTextMaxLen + 1] = {0};
+  uint16_t intervalSec = 0;
+  uint16_t reminderTimes = 0;
+  uint16_t reminderCount = 0;
+  bool hostMessage = false;
 };
 
 struct DailyReminderSlot {
   uint8_t hour = 0;
   uint8_t minute = 0;
-  uint16_t order = 0;
+  uint8_t priority = 0;
+  uint16_t number = 0;
+  uint16_t scheduleIndex = 0;
   bool triggered = false;
 };
 
 ScheduleInterruptQueueItem gScheduleInterruptQueue[kScheduleInterruptQueueMax];
-size_t gScheduleInterruptHead = 0;
 size_t gScheduleInterruptCount = 0;
+bool gScheduleInterruptActive = false;
+bool gScheduleInterruptKeyLatch = false;
+bool gScheduleInterruptPendingStart = false;
+uint32_t gScheduleInterruptLastPlayMs = 0;
 DailyReminderSlot gTodayReminderSlots[kMaxReminderTimes];
 size_t gTodayReminderCount = 0;
 uint32_t gTodayReminderDateKey = 0;
@@ -150,47 +159,109 @@ void rememberLastDisplayedText(const char *text) {
   sanitizeMessageForSnapshot(normalized, gLastDisplayedText);
 }
 
+uint8_t reminderRepeatPriority(bool repeatDay,
+                               bool repeatMonth,
+                               bool repeatWeek,
+                               bool repeatYear) {
+  if (!(repeatDay || repeatMonth || repeatWeek || repeatYear)) return 0;  // 不重复
+  if (repeatYear) return 1;
+  if (repeatMonth) return 2;
+  if (repeatWeek) return 3;
+  return 4;  // 每日重复
+}
+
+bool normalizeScheduleQueueMessage(const String &rawText, String &outText) {
+  outText = rawText;
+  outText.replace("\r", " ");
+  outText.replace("\n", " ");
+  outText.trim();
+  if (!outText.length()) {
+    outText = kDefaultReminderMessage;
+  }
+  if (outText.length() > kSleepTextMaxLen) {
+    outText.remove(kSleepTextMaxLen);
+  }
+  return outText.length() > 0;
+}
+
 void clearScheduleInterruptQueue() {
-  gScheduleInterruptHead = 0;
   gScheduleInterruptCount = 0;
+  gScheduleInterruptActive = false;
+  gScheduleInterruptKeyLatch = false;
+  gScheduleInterruptPendingStart = false;
+  gScheduleInterruptLastPlayMs = 0;
   for (size_t i = 0; i < kScheduleInterruptQueueMax; ++i) {
     gScheduleInterruptQueue[i].text[0] = '\0';
+    gScheduleInterruptQueue[i].intervalSec = 0;
+    gScheduleInterruptQueue[i].reminderTimes = 0;
+    gScheduleInterruptQueue[i].reminderCount = 0;
+    gScheduleInterruptQueue[i].hostMessage = false;
   }
 }
 
+bool appendScheduleInterruptQueueItem(const String &rawText,
+                                      uint16_t intervalSec,
+                                      uint16_t reminderTimes,
+                                      bool hostMessage) {
+  String normalized;
+  if (!normalizeScheduleQueueMessage(rawText, normalized)) return false;
+  if (gScheduleInterruptCount >= kScheduleInterruptQueueMax) return false;
+
+  ScheduleInterruptQueueItem &item = gScheduleInterruptQueue[gScheduleInterruptCount];
+  normalized.toCharArray(item.text, sizeof(item.text));
+  item.text[kSleepTextMaxLen] = '\0';
+  item.intervalSec = hostMessage ? 0U : intervalSec;
+  item.reminderTimes = hostMessage ? 0U : reminderTimes;
+  item.reminderCount = 0;
+  item.hostMessage = hostMessage;
+  ++gScheduleInterruptCount;
+  return true;
+}
+
 bool enqueueScheduleInterruptMessage(const String &rawText) {
-  String normalized = rawText;
-  normalized.replace("\r", " ");
-  normalized.replace("\n", " ");
-  normalized.trim();
-  if (!normalized.length()) {
-    normalized = kDefaultReminderMessage;
-  }
-  if (normalized.length() > kSleepTextMaxLen) {
-    normalized.remove(kSleepTextMaxLen);
-  }
+  return appendScheduleInterruptQueueItem(rawText, 0, 0, false);
+}
 
+bool insertHostMessageIntoScheduleInterruptQueueFront(const String &rawText) {
+  String normalized;
+  if (!normalizeScheduleQueueMessage(rawText, normalized)) return false;
   if (gScheduleInterruptCount >= kScheduleInterruptQueueMax) {
-    gScheduleInterruptHead = (gScheduleInterruptHead + 1) % kScheduleInterruptQueueMax;
-    gScheduleInterruptCount--;
+    if (gScheduleInterruptCount == 0) return false;
+    --gScheduleInterruptCount;  // Drop tail.
   }
 
-  const size_t writeIdx = (gScheduleInterruptHead + gScheduleInterruptCount) % kScheduleInterruptQueueMax;
-  normalized.toCharArray(gScheduleInterruptQueue[writeIdx].text,
-                         sizeof(gScheduleInterruptQueue[writeIdx].text));
-  gScheduleInterruptQueue[writeIdx].text[kSleepTextMaxLen] = '\0';
-  gScheduleInterruptCount++;
+  size_t insertPos = gScheduleInterruptActive ? 1U : 0U;
+  if (insertPos > gScheduleInterruptCount) {
+    insertPos = gScheduleInterruptCount;
+  }
+
+  for (size_t i = gScheduleInterruptCount; i > insertPos; --i) {
+    gScheduleInterruptQueue[i] = gScheduleInterruptQueue[i - 1];
+  }
+
+  ScheduleInterruptQueueItem &item = gScheduleInterruptQueue[insertPos];
+  normalized.toCharArray(item.text, sizeof(item.text));
+  item.text[kSleepTextMaxLen] = '\0';
+  item.intervalSec = 0;
+  item.reminderTimes = 0;
+  item.reminderCount = 0;
+  item.hostMessage = true;
+  ++gScheduleInterruptCount;
   return true;
 }
 
 bool popScheduleInterruptMessage(String &outText) {
   outText = "";
   if (gScheduleInterruptCount == 0) return false;
-  const size_t readIdx = gScheduleInterruptHead;
-  outText = String(gScheduleInterruptQueue[readIdx].text);
-  gScheduleInterruptQueue[readIdx].text[0] = '\0';
-  gScheduleInterruptHead = (gScheduleInterruptHead + 1) % kScheduleInterruptQueueMax;
-  gScheduleInterruptCount--;
+  outText = String(gScheduleInterruptQueue[0].text);
+  for (size_t i = 1; i < gScheduleInterruptCount; ++i) {
+    gScheduleInterruptQueue[i - 1] = gScheduleInterruptQueue[i];
+  }
+  --gScheduleInterruptCount;
+  if (gScheduleInterruptCount == 0) {
+    gScheduleInterruptActive = false;
+    gScheduleInterruptKeyLatch = false;
+  }
   outText.trim();
   return outText.length() > 0;
 }
@@ -1158,6 +1229,7 @@ bool readRtcUnix(uint64_t &outUnix) {
 struct ReminderSchedule {
   struct Entry {
     uint16_t sourceIndex = 0;
+    uint16_t number = 0;
     uint16_t year = 2000;
     uint8_t month = 1;
     uint8_t day = 1;
@@ -1165,10 +1237,13 @@ struct ReminderSchedule {
     uint8_t minute = 0;
     uint8_t second = 0;
     uint8_t week = 0;  // Monday=1 ... Sunday=7
+    uint16_t intervalSec = 0;
+    uint16_t reminderTimes = 0;
     bool repeatDay = false;
     bool repeatMonth = false;
     bool repeatWeek = false;
     bool repeatYear = false;
+    char message[kSleepTextMaxLen + 1] = {0};
   };
 
   Entry entries[kMaxReminderTimes];
@@ -1178,6 +1253,13 @@ struct ReminderSchedule {
 ReminderSchedule &scheduleScratchBuffer() {
   static ReminderSchedule schedule;
   return schedule;
+}
+
+uint8_t reminderEntryPriority(const ReminderSchedule::Entry &entry) {
+  return reminderRepeatPriority(entry.repeatDay,
+                                entry.repeatMonth,
+                                entry.repeatWeek,
+                                entry.repeatYear);
 }
 
 bool isLeapYearLocal(uint16_t year) {
@@ -1264,6 +1346,29 @@ String decodeScheduleMessageValue(String value) {
   return value;
 }
 
+bool parseStrictIntWithTail(String value, int &out, String *outTail) {
+  value.trim();
+  if (outTail) outTail->remove(0);
+  if (!value.length()) return false;
+  int idx = 0;
+  if (value[idx] == '+' || value[idx] == '-') {
+    if (value.length() == 1) return false;
+    ++idx;
+  }
+  const int digitStart = idx;
+  while (idx < value.length() && isDigit(value[idx])) {
+    ++idx;
+  }
+  if (idx == digitStart) return false;
+  const String numPart = value.substring(0, idx);
+  if (!parseStrictInt(numPart, out)) return false;
+  if (outTail) {
+    *outTail = value.substring(idx);
+    outTail->trim();
+  }
+  return true;
+}
+
 bool parseScheduleCsvLine(const String &lineRaw,
                           ReminderSchedule::Entry &outEntry,
                           String *outMessage) {
@@ -1275,11 +1380,11 @@ bool parseScheduleCsvLine(const String &lineRaw,
     *outMessage = "";
   }
 
-  String cols[12];
+  String cols[14];
   size_t colCount = 0;
   int start = 0;
   while (start <= line.length()) {
-    if (colCount >= 11) {
+    if (colCount >= 13) {
       cols[colCount++] = line.substring(start);
       cols[colCount - 1].trim();
       break;
@@ -1293,6 +1398,7 @@ bool parseScheduleCsvLine(const String &lineRaw,
   }
 
   if (colCount < 11) return false;
+  const bool isV2 = (colCount >= 13);
 
   int year = 0;
   int month = 0;
@@ -1305,18 +1411,40 @@ bool parseScheduleCsvLine(const String &lineRaw,
   int repeatMonth = 0;
   int repeatWeek = 0;
   int repeatYear = 0;
+  int number = 0;
+  int intervalSec = 0;
+  int reminderTimes = 0;
+  String messageTailFromTimes;
 
   if (!parseStrictInt(cols[0], year) || year < 2000 || year > 2099) return false;
   if (!parseStrictInt(cols[1], month) || month < 1 || month > 12) return false;
   if (!parseStrictInt(cols[2], day) || day < 1 || day > 31) return false;
   if (!parseStrictInt(cols[3], hour) || hour < 0 || hour > 23) return false;
   if (!parseStrictInt(cols[4], minute) || minute < 0 || minute > 59) return false;
-  if (!parseStrictInt(cols[5], second) || second < 0 || second > 59) return false;
-  if (!parseStrictInt(cols[6], week) || week < 0 || week > 7) return false;
-  if (!parseStrictInt(cols[7], repeatDay) || (repeatDay != 0 && repeatDay != 1)) return false;
-  if (!parseStrictInt(cols[8], repeatMonth) || (repeatMonth != 0 && repeatMonth != 1)) return false;
-  if (!parseStrictInt(cols[9], repeatWeek) || (repeatWeek != 0 && repeatWeek != 1)) return false;
-  if (!parseStrictInt(cols[10], repeatYear) || (repeatYear != 0 && repeatYear != 1)) return false;
+  if (isV2) {
+    if (!parseStrictInt(cols[5], week) || week < 0 || week > 7) return false;
+    if (!parseStrictInt(cols[6], repeatDay) || (repeatDay != 0 && repeatDay != 1)) return false;
+    if (!parseStrictInt(cols[7], repeatMonth) || (repeatMonth != 0 && repeatMonth != 1)) return false;
+    if (!parseStrictInt(cols[8], repeatWeek) || (repeatWeek != 0 && repeatWeek != 1)) return false;
+    if (!parseStrictInt(cols[9], repeatYear) || (repeatYear != 0 && repeatYear != 1)) return false;
+    if (!parseStrictInt(cols[10], number) || number < 0 || number > 65535) return false;
+    if (!parseStrictInt(cols[11], intervalSec) || intervalSec < 0 || intervalSec > 65535) return false;
+    if (!parseStrictIntWithTail(cols[12], reminderTimes, &messageTailFromTimes) ||
+        reminderTimes < 0 || reminderTimes > 65535) {
+      return false;
+    }
+    second = 0;
+  } else {
+    if (!parseStrictInt(cols[5], second) || second < 0 || second > 59) return false;
+    if (!parseStrictInt(cols[6], week) || week < 0 || week > 7) return false;
+    if (!parseStrictInt(cols[7], repeatDay) || (repeatDay != 0 && repeatDay != 1)) return false;
+    if (!parseStrictInt(cols[8], repeatMonth) || (repeatMonth != 0 && repeatMonth != 1)) return false;
+    if (!parseStrictInt(cols[9], repeatWeek) || (repeatWeek != 0 && repeatWeek != 1)) return false;
+    if (!parseStrictInt(cols[10], repeatYear) || (repeatYear != 0 && repeatYear != 1)) return false;
+    number = 0;
+    intervalSec = 0;
+    reminderTimes = 0;
+  }
 
   Ds1302DateTime base;
   base.year = static_cast<uint16_t>(year);
@@ -1340,12 +1468,26 @@ bool parseScheduleCsvLine(const String &lineRaw,
   outEntry.repeatMonth = (repeatMonth != 0);
   outEntry.repeatWeek = (repeatWeek != 0);
   outEntry.repeatYear = (repeatYear != 0);
+  outEntry.number = static_cast<uint16_t>(number);
+  outEntry.intervalSec = static_cast<uint16_t>(intervalSec);
+  outEntry.reminderTimes = static_cast<uint16_t>(reminderTimes);
 
-  if (outMessage) {
-    String decoded = (colCount > 11) ? decodeScheduleMessageValue(cols[11]) : String();
-    if (!decoded.length()) {
-      decoded = kDefaultReminderMessage;
+  String messageField;
+  if (isV2) {
+    if (colCount > 13) {
+      messageField = cols[13];
+    } else if (messageTailFromTimes.length()) {
+      messageField = messageTailFromTimes;
     }
+  } else if (colCount > 11) {
+    messageField = cols[11];
+  }
+  String decoded = decodeScheduleMessageValue(messageField);
+  if (!decoded.length()) {
+    decoded = kDefaultReminderMessage;
+  }
+  sanitizeMessageForSnapshot(decoded, outEntry.message);
+  if (outMessage) {
     *outMessage = decoded;
   }
   return true;
@@ -1383,6 +1525,9 @@ bool loadReminderSchedule(ReminderSchedule &outSchedule) {
     ReminderSchedule::Entry entry;
     if (parseScheduleCsvLine(line, entry, nullptr)) {
       entry.sourceIndex = static_cast<uint16_t>(outSchedule.count);
+      if (entry.number == 0) {
+        entry.number = entry.sourceIndex;
+      }
       outSchedule.entries[outSchedule.count++] = entry;
     }
   }
@@ -1511,7 +1656,9 @@ void refreshTodayReminderSlots(const Ds1302DateTime &nowDt, bool markPastTrigger
     DailyReminderSlot &slot = gTodayReminderSlots[gTodayReminderCount];
     slot.hour = entry.hour;
     slot.minute = entry.minute;
-    slot.order = static_cast<uint16_t>(gTodayReminderCount);
+    slot.priority = reminderEntryPriority(entry);
+    slot.number = entry.number;
+    slot.scheduleIndex = static_cast<uint16_t>(i);
     slot.triggered = false;
     ++gTodayReminderCount;
   }
@@ -1522,7 +1669,9 @@ void refreshTodayReminderSlots(const Ds1302DateTime &nowDt, bool markPastTrigger
               const uint16_t aMin = static_cast<uint16_t>(a.hour) * 60U + static_cast<uint16_t>(a.minute);
               const uint16_t bMin = static_cast<uint16_t>(b.hour) * 60U + static_cast<uint16_t>(b.minute);
               if (aMin != bMin) return aMin < bMin;
-              return a.order < b.order;
+              if (a.priority != b.priority) return a.priority < b.priority;
+              if (a.number != b.number) return a.number < b.number;
+              return a.scheduleIndex < b.scheduleIndex;
             });
 
   if (markPastTriggered) {
@@ -1558,6 +1707,29 @@ bool refreshTodayReminderSlotsFromRtc(bool forceReload, bool markPastTriggered) 
   return true;
 }
 
+void replaceScheduleInterruptQueueBySlots(const uint16_t *slotIndices, size_t slotCount) {
+  clearScheduleInterruptQueue();
+  if (!slotIndices || slotCount == 0) return;
+
+  ReminderSchedule &schedule = scheduleScratchBuffer();
+  for (size_t i = 0; i < slotCount && gScheduleInterruptCount < kScheduleInterruptQueueMax; ++i) {
+    const uint16_t slotIdx = slotIndices[i];
+    if (slotIdx >= gTodayReminderCount) continue;
+    const DailyReminderSlot &slot = gTodayReminderSlots[slotIdx];
+    if (slot.scheduleIndex >= schedule.count) continue;
+    const ReminderSchedule::Entry &entry = schedule.entries[slot.scheduleIndex];
+    const String text = String(entry.message);
+    (void)appendScheduleInterruptQueueItem(text,
+                                           entry.intervalSec,
+                                           entry.reminderTimes,
+                                           false);
+  }
+
+  if (gScheduleInterruptCount > 0) {
+    gScheduleInterruptPendingStart = true;
+  }
+}
+
 void serviceScheduleInterruptByRtcMinute() {
   const bool scheduleChanged = wirelessPortalConsumeScheduleReloadRequest();
   Ds1302DateTime nowDt;
@@ -1581,6 +1753,8 @@ void serviceScheduleInterruptByRtcMinute() {
   }
   gTodayReminderLastCheckedMinute = nowMinuteOfDay;
 
+  uint16_t dueSlots[kMaxReminderTimes];
+  size_t dueCount = 0;
   for (size_t i = 0; i < gTodayReminderCount; ++i) {
     DailyReminderSlot &slot = gTodayReminderSlots[i];
     if (slot.triggered) continue;
@@ -1592,15 +1766,18 @@ void serviceScheduleInterruptByRtcMinute() {
     }
     if (slot.hour == nowDt.hour && slot.minute == nowDt.minute) {
       slot.triggered = true;
-      String reminderMessage;
-      if (!loadReminderMessageByDateMinute(nowDt, slot.hour, slot.minute, reminderMessage)) {
-        reminderMessage = kDefaultReminderMessage;
+      if (dueCount < kMaxReminderTimes) {
+        dueSlots[dueCount++] = static_cast<uint16_t>(i);
       }
-      enqueueScheduleInterruptMessage(reminderMessage);
-      Serial.printf("[SCHEDULE] due now %02u:%02u\n",
-                    static_cast<unsigned int>(slot.hour),
-                    static_cast<unsigned int>(slot.minute));
     }
+  }
+
+  if (dueCount > 0) {
+    replaceScheduleInterruptQueueBySlots(dueSlots, dueCount);
+    Serial.printf("[SCHEDULE] due now %02u:%02u queue=%u\n",
+                  static_cast<unsigned int>(nowDt.hour),
+                  static_cast<unsigned int>(nowDt.minute),
+                  static_cast<unsigned int>(dueCount));
   }
 }
 
@@ -1646,9 +1823,13 @@ bool computeNextReminderDelta(const ReminderSchedule &schedule,
   const uint64_t dayStartUnix = nowUnix - static_cast<uint64_t>(nowSecOfDay);
   const uint8_t nowWeek = weekdayMondayOneFromUnix(nowUnix);
   uint32_t bestDelta = std::numeric_limits<uint32_t>::max();
-  uint16_t bestSourceIndex = 0xFFFFU;
+  uint16_t bestScheduleIndex = 0xFFFFU;
+  uint8_t bestPriority = 0xFFU;
+  uint16_t bestNumber = 0xFFFFU;
 
-  auto considerCandidate = [&](uint64_t candidateUnix, uint16_t sourceIndex) {
+  auto considerCandidate = [&](uint64_t candidateUnix,
+                               const ReminderSchedule::Entry &entry,
+                               uint16_t scheduleIndex) {
     uint32_t delta = 0;
     if (candidateUnix >= nowUnix) {
       const uint64_t diff = candidateUnix - nowUnix;
@@ -1659,9 +1840,18 @@ bool computeNextReminderDelta(const ReminderSchedule &schedule,
       if (late > kReminderTriggerWindowSec) return;
       delta = 0;
     }
-    if (delta < bestDelta || (delta == bestDelta && sourceIndex < bestSourceIndex)) {
+    const uint8_t priority = reminderEntryPriority(entry);
+    const uint16_t number = entry.number;
+    if (delta < bestDelta ||
+        (delta == bestDelta &&
+         (priority < bestPriority ||
+          (priority == bestPriority &&
+           (number < bestNumber ||
+            (number == bestNumber && scheduleIndex < bestScheduleIndex)))))) {
       bestDelta = delta;
-      bestSourceIndex = sourceIndex;
+      bestScheduleIndex = scheduleIndex;
+      bestPriority = priority;
+      bestNumber = number;
     }
   };
 
@@ -1694,7 +1884,7 @@ bool computeNextReminderDelta(const ReminderSchedule &schedule,
       uint64_t candidateUnix = 0;
       if (makeUnix(entry.year, entry.month, entry.day,
                    entry.hour, entry.minute, 0, candidateUnix)) {
-        considerCandidate(candidateUnix, entry.sourceIndex);
+        considerCandidate(candidateUnix, entry, static_cast<uint16_t>(i));
       }
       continue;
     }
@@ -1704,7 +1894,7 @@ bool computeNextReminderDelta(const ReminderSchedule &schedule,
       if (candidateUnix + static_cast<uint64_t>(kReminderTriggerWindowSec) < nowUnix) {
         candidateUnix += 86400ULL;
       }
-      considerCandidate(candidateUnix, entry.sourceIndex);
+      considerCandidate(candidateUnix, entry, static_cast<uint16_t>(i));
     }
 
     if (entry.repeatWeek) {
@@ -1720,7 +1910,7 @@ bool computeNextReminderDelta(const ReminderSchedule &schedule,
       if (candidateUnix + static_cast<uint64_t>(kReminderTriggerWindowSec) < nowUnix) {
         candidateUnix += 7ULL * 86400ULL;
       }
-      considerCandidate(candidateUnix, entry.sourceIndex);
+      considerCandidate(candidateUnix, entry, static_cast<uint16_t>(i));
     }
 
     if (entry.repeatMonth) {
@@ -1737,10 +1927,10 @@ bool computeNextReminderDelta(const ReminderSchedule &schedule,
           }
           if (makeUnix(targetYear, targetMonth, entry.day,
                        entry.hour, entry.minute, 0, candidateUnix)) {
-            considerCandidate(candidateUnix, entry.sourceIndex);
+            considerCandidate(candidateUnix, entry, static_cast<uint16_t>(i));
           }
         } else {
-          considerCandidate(candidateUnix, entry.sourceIndex);
+          considerCandidate(candidateUnix, entry, static_cast<uint16_t>(i));
         }
       }
     }
@@ -1754,10 +1944,10 @@ bool computeNextReminderDelta(const ReminderSchedule &schedule,
           targetYear += 1;
           if (makeUnix(targetYear, entry.month, entry.day,
                        entry.hour, entry.minute, 0, candidateUnix)) {
-            considerCandidate(candidateUnix, entry.sourceIndex);
+            considerCandidate(candidateUnix, entry, static_cast<uint16_t>(i));
           }
         } else {
-          considerCandidate(candidateUnix, entry.sourceIndex);
+          considerCandidate(candidateUnix, entry, static_cast<uint16_t>(i));
         }
       }
     }
@@ -1769,9 +1959,13 @@ bool computeNextReminderDelta(const ReminderSchedule &schedule,
 
   outDeltaSec = bestDelta;
   if (outMessage) {
-    String message;
-    if (!loadReminderMessageBySourceIndex(bestSourceIndex, message)) {
-      message = kDefaultReminderMessage;
+    String message = kDefaultReminderMessage;
+    if (bestScheduleIndex < schedule.count) {
+      message = String(schedule.entries[bestScheduleIndex].message);
+      message.trim();
+      if (!message.length()) {
+        message = kDefaultReminderMessage;
+      }
     }
     sanitizeMessageForSnapshot(message, outMessage);
   }
@@ -2881,6 +3075,7 @@ void processAppLoop() {
   static AppLoopMode lastLoopMode = APP_MODE_AP_STA;
   if (lastLoopMode != gAppLoopMode) {
     irq = InterruptController{};
+    clearScheduleInterruptQueue();
     lastLoopMode = gAppLoopMode;
   }
 
@@ -3042,17 +3237,81 @@ void processAppLoop() {
        gStaOnlinePhase == StaOnlinePhase::kConnected);
 
   if (allowHostInterrupts) {
+    if (gScheduleInterruptPendingStart && gScheduleInterruptCount > 0) {
+      preemptByHost();
+      gScheduleInterruptPendingStart = false;
+      gScheduleInterruptActive = true;
+      gScheduleInterruptKeyLatch = false;
+      gScheduleInterruptQueue[0].reminderCount = 0;
+      playMessageWithGlitch(gScheduleInterruptQueue[0].text);
+      gScheduleInterruptLastPlayMs = millis();
+      Serial.println("[SCHEDULE] interrupt queue started");
+      return;
+    }
+
+    if (gScheduleInterruptActive && gScheduleInterruptCount > 0) {
+      String hostBroadcastMessage;
+      if (wirelessPortalPopHostMessage(hostBroadcastMessage)) {
+        if (insertHostMessageIntoScheduleInterruptQueueFront(hostBroadcastMessage)) {
+          Serial.println("[SCHEDULE] host message inserted at queue front");
+        } else {
+          Serial.println("[SCHEDULE] host message dropped (queue full)");
+        }
+      }
+
+      Key_loop();
+      const uint8_t key = get_Keycode();
+      if (key == 2 && !gScheduleInterruptKeyLatch) {
+        gScheduleInterruptKeyLatch = true;
+        if (wakeBacklightByKeyIfNeeded()) {
+          return;
+        }
+
+        if (gScheduleInterruptCount > 1) {
+          for (size_t i = 1; i < gScheduleInterruptCount; ++i) {
+            gScheduleInterruptQueue[i - 1] = gScheduleInterruptQueue[i];
+          }
+          --gScheduleInterruptCount;
+          gScheduleInterruptQueue[0].reminderCount = 0;
+          playMessageWithGlitch(gScheduleInterruptQueue[0].text);
+          gScheduleInterruptLastPlayMs = millis();
+          Serial.println("[SCHEDULE] interrupt next message");
+          return;
+        }
+
+        clearScheduleInterruptQueue();
+        syntheticKeyPress = true;
+        Serial.println("[SCHEDULE] interrupt queue finished");
+      }
+      if (key != 2) {
+        gScheduleInterruptKeyLatch = false;
+      }
+
+      if (gScheduleInterruptActive && gScheduleInterruptCount > 0) {
+        ScheduleInterruptQueueItem &current = gScheduleInterruptQueue[0];
+        if (!current.hostMessage &&
+            current.intervalSec > 0 &&
+            current.reminderTimes > current.reminderCount) {
+          const uint32_t intervalMs = static_cast<uint32_t>(current.intervalSec) * 1000UL;
+          if (intervalMs > 0 &&
+              (millis() - gScheduleInterruptLastPlayMs) >= intervalMs) {
+            ++current.reminderCount;
+            playMessageWithGlitch(current.text);
+            gScheduleInterruptLastPlayMs = millis();
+            Serial.printf("[SCHEDULE] reminder replay %u/%u\n",
+                          static_cast<unsigned int>(current.reminderCount),
+                          static_cast<unsigned int>(current.reminderTimes));
+            return;
+          }
+        }
+        return;
+      }
+    }
+
     String hostBroadcastMessage;
     if (wirelessPortalPopHostMessage(hostBroadcastMessage)) {
       preemptByHost();
       playMessageWithGlitch(hostBroadcastMessage.c_str());
-      return;
-    }
-
-    String scheduleInterruptMessage;
-    if (popScheduleInterruptMessage(scheduleInterruptMessage)) {
-      preemptByHost();
-      playMessageWithGlitch(scheduleInterruptMessage.c_str());
       return;
     }
   }

@@ -451,7 +451,7 @@ button:disabled {
 
 .item-row {
   display: grid;
-  grid-template-columns: 120px 130px 1fr;
+  grid-template-columns: 120px 130px 104px 104px 1fr;
   gap: 8px;
 }
 

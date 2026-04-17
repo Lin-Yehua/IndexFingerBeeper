@@ -38,7 +38,7 @@ const el = {
   btnSendImg: $("btnSendImg"), btnClearImg: $("btnClearImg"), imgStatus: $("imgStatus"),
   cmdList: $("cmdList"), cmdPager: $("cmdPager"), cmdAddInput: $("cmdAddInput"), btnCmdAdd: $("btnCmdAdd"), btnCmdSave: $("btnCmdSave"), btnCmdRetry: $("btnCmdRetry"), cmdAutoSaveEnable: $("cmdAutoSaveEnable"), cmdAdvanced: $("cmdAdvanced"), btnCmdFoldAll: $("btnCmdFoldAll"), btnCmdExpandAll: $("btnCmdExpandAll"), cmdStatus: $("cmdStatus"),
   rtcNow: $("rtcNow"), rtcYear: $("rtcYear"), rtcMonth: $("rtcMonth"), rtcDay: $("rtcDay"), rtcHour: $("rtcHour"), rtcMinute: $("rtcMinute"), rtcSecond: $("rtcSecond"), btnRtcSet: $("btnRtcSet"), btnRtcSyncPhone: $("btnRtcSyncPhone"), rtcStatus: $("rtcStatus"),
-  scheduleDate: $("scheduleDate"), scheduleList: $("scheduleList"), schedulePager: $("schedulePager"), scheduleAddTime: $("scheduleAddTime"), scheduleAddRepeat: $("scheduleAddRepeat"), scheduleAddText: $("scheduleAddText"), btnScheduleAdd: $("btnScheduleAdd"), btnScheduleSave: $("btnScheduleSave"), btnScheduleRetry: $("btnScheduleRetry"), scheduleAutoSaveEnable: $("scheduleAutoSaveEnable"), scheduleAdvanced: $("scheduleAdvanced"), scheduleStatus: $("scheduleStatus"),
+  scheduleDate: $("scheduleDate"), scheduleList: $("scheduleList"), schedulePager: $("schedulePager"), scheduleAddTime: $("scheduleAddTime"), scheduleAddRepeat: $("scheduleAddRepeat"), scheduleAddInterval: $("scheduleAddInterval"), scheduleAddTimes: $("scheduleAddTimes"), scheduleAddText: $("scheduleAddText"), btnScheduleAdd: $("btnScheduleAdd"), btnScheduleSave: $("btnScheduleSave"), btnScheduleRetry: $("btnScheduleRetry"), scheduleAutoSaveEnable: $("scheduleAutoSaveEnable"), scheduleAdvanced: $("scheduleAdvanced"), scheduleStatus: $("scheduleStatus"),
   bgVol: $("bgVol"), insertVol: $("insertVol"), bgVolVal: $("bgVolVal"), insertVolVal: $("insertVolVal"), backlight: $("backlight"), backlightTime: $("backlightTime"), backlightCloseTime: $("backlightCloseTime"), btnSaveDisplay: $("btnSaveDisplay"), displayStatus: $("displayStatus"),
   apSsid: $("apSsid"), apPassword: $("apPassword"), apChannel: $("apChannel"), btnSaveAp: $("btnSaveAp"),
   staSsid: $("staSsid"), staPassword: $("staPassword"), staNet: $("staNet"), btnSaveSta: $("btnSaveSta"),
@@ -490,7 +490,7 @@ async function saveCommandsManual() {
 
 function splitSchedule(line) {
   const cols = []; let s = 0;
-  for (let i = 0; i < 11; i += 1) { const c = line.indexOf(",", s); if (c < 0) { cols.push(line.slice(s).trim()); s = line.length; break; } cols.push(line.slice(s, c).trim()); s = c + 1; }
+  for (let i = 0; i < 13; i += 1) { const c = line.indexOf(",", s); if (c < 0) { cols.push(line.slice(s).trim()); s = line.length; break; } cols.push(line.slice(s, c).trim()); s = c + 1; }
   if (cols.length < 11) return null; const tail = line.slice(s).trim(); if (tail) cols.push(tail); return cols;
 }
 function parseScheduleMessageCell(cell) {
@@ -504,8 +504,27 @@ function encodeScheduleMessageCell(text) {
   const t = String(text || "").replace(/\r?\n+/g, " ").trim();
   return `"${t.replace(/"/g, "\"\"")}"`;
 }
+function parseScheduleIntWithTail(cell, fallback = 0) {
+  const raw = String(cell || "").trim();
+  const m = raw.match(/^([+-]?\d+)(.*)$/);
+  if (!m) return { value: fallback, tail: raw };
+  const v = parseInt(m[1], 10);
+  return { value: Number.isFinite(v) ? v : fallback, tail: String(m[2] || "").trim() };
+}
+function nextScheduleNumber(list) {
+  let maxNo = 0;
+  list.forEach((it) => { maxNo = Math.max(maxNo, Math.max(0, toInt(it.number, 0))); });
+  return maxNo + 1;
+}
 const weekMon = (d) => (d.getDay() === 0 ? 7 : d.getDay());
 function schRepeat(it) { if (it.d) return "daily"; if (it.w) return "weekly"; if (it.m) return "monthly"; if (it.y) return "yearly"; return "none"; }
+function schPriority(it) {
+  if (!(it.d || it.m || it.w || it.y)) return 0;
+  if (it.y) return 1;
+  if (it.m) return 2;
+  if (it.w) return 3;
+  return 4;
+}
 function setSchRepeat(it, type, day) {
   it.d = it.m = it.w = it.y = false;
   if (type === "daily") it.d = true;
@@ -522,20 +541,48 @@ function parseSchedules(text) {
   text.split(/\r?\n/).forEach((raw, idx) => {
     const line = raw.trim(); if (!line || line.startsWith("#") || line.startsWith(";")) return;
     const c = splitSchedule(line); if (!c) return;
+    const isV2 = c.length >= 13;
     const Y = toInt(c[0], -1), M = toInt(c[1], -1), D = toInt(c[2], -1), h = toInt(c[3], 0), i = toInt(c[4], 0);
     if (Y < 2000 || Y > 2099 || M < 1 || M > 12 || D < 1 || D > 31 || h < 0 || h > 23 || i < 0 || i > 59) return;
     const dt = new Date(Y, M - 1, D);
-    const wkRaw = toInt(c[6], 0);
+    const wkRaw = toInt(isV2 ? c[5] : c[6], 0);
     const wk = (wkRaw >= 1 && wkRaw <= 7) ? wkRaw : weekMon(dt);
-    out.push({ id: `sc_${Date.now()}_${idx}_${Math.random().toString(16).slice(2, 6)}`, Y, M, D, h, i, week: wk, d: toInt(c[7], 0) !== 0, m: toInt(c[8], 0) !== 0, w: toInt(c[9], 0) !== 0, y: toInt(c[10], 0) !== 0, text: parseScheduleMessageCell(c[11] || "") });
+    const d = toInt(isV2 ? c[6] : c[7], 0) !== 0;
+    const m = toInt(isV2 ? c[7] : c[8], 0) !== 0;
+    const w = toInt(isV2 ? c[8] : c[9], 0) !== 0;
+    const y = toInt(isV2 ? c[9] : c[10], 0) !== 0;
+    let number = Math.max(0, toInt(isV2 ? c[10] : "", idx + 1));
+    let interval = 0;
+    let times = 0;
+    let msgCell = "";
+    if (isV2) {
+      interval = Math.max(0, toInt(c[11], 0));
+      const tw = parseScheduleIntWithTail(c[12], 0);
+      times = Math.max(0, tw.value);
+      msgCell = (c[13] && String(c[13]).length) ? c[13] : tw.tail;
+      if (!number) number = idx + 1;
+    } else {
+      msgCell = c[11] || "";
+    }
+    out.push({
+      id: `sc_${Date.now()}_${idx}_${Math.random().toString(16).slice(2, 6)}`,
+      Y, M, D, h, i, week: wk, d, m, w, y,
+      number,
+      interval,
+      times,
+      text: parseScheduleMessageCell(msgCell)
+    });
   });
   return out;
 }
 
 function schedulesToCsv(list) {
-  const lines = ["#YEAR,MOUTH,DAY,HOUR,MIN,SEC,WEEK,IsDayRange,IsMouthRange,IsWeekRange,IsYearRange,ScheduleMessage"];
-  [...list].sort((a, b) => (a.Y - b.Y) || (a.M - b.M) || (a.D - b.D) || (a.h - b.h) || (a.i - b.i)).forEach((it) => {
-    const line = `${it.Y},${it.M},${it.D},${it.h},${it.i},0,${it.week},${it.d ? 1 : 0},${it.m ? 1 : 0},${it.w ? 1 : 0},${it.y ? 1 : 0},${encodeScheduleMessageCell(it.text)}`;
+  const lines = ["#YEAR,MOUTH,DAY,HOUR,MIN,WEEK,IsDayRange,IsMouthRange,IsWeekRange,IsYearRange,NUMBER,Interval,Times,ScheduleMessage"];
+  [...list].sort((a, b) => (a.Y - b.Y) || (a.M - b.M) || (a.D - b.D) || (a.h - b.h) || (a.i - b.i) || (schPriority(a) - schPriority(b)) || (toInt(a.number, 0) - toInt(b.number, 0))).forEach((it) => {
+    const number = Math.max(0, toInt(it.number, 0));
+    const interval = Math.max(0, toInt(it.interval, 0));
+    const times = Math.max(0, toInt(it.times, 0));
+    const line = `${it.Y},${it.M},${it.D},${it.h},${it.i},${it.week},${it.d ? 1 : 0},${it.m ? 1 : 0},${it.w ? 1 : 0},${it.y ? 1 : 0},${number},${interval},${times},${encodeScheduleMessageCell(it.text)}`;
     lines.push(line);
   });
   return `${lines.join("\n")}\n`;
@@ -602,13 +649,20 @@ function schPast(it, day) {
 function isScheduleEditorBusy() {
   const a = document.activeElement;
   if (!a) return false;
-  if (a === el.scheduleDate || a === el.scheduleAddTime || a === el.scheduleAddRepeat || a === el.scheduleAddText) return true;
+  if (a === el.scheduleDate ||
+      a === el.scheduleAddTime ||
+      a === el.scheduleAddRepeat ||
+      a === el.scheduleAddInterval ||
+      a === el.scheduleAddTimes ||
+      a === el.scheduleAddText) return true;
   return !!(el.scheduleList && el.scheduleList.contains(a));
 }
 function renderSchedules() {
   el.scheduleList.innerHTML = "";
   const day = pickDay();
-  const shown = st.schedules.filter((it) => schMatch(it, day)).sort((a, b) => (a.h - b.h) || (a.i - b.i));
+  const shown = st.schedules
+    .filter((it) => schMatch(it, day))
+    .sort((a, b) => (a.h - b.h) || (a.i - b.i) || (schPriority(a) - schPriority(b)) || (toInt(a.number, 0) - toInt(b.number, 0)));
   if (!shown.length) {
     const p = document.createElement("p");
     p.className = "status";
@@ -626,7 +680,7 @@ function renderSchedules() {
     const wrap = document.createElement("div"); wrap.className = "list-item"; if (schPast(it, day)) wrap.classList.add("is-past");
     const head = document.createElement("div"); head.className = "item-head";
     const left = document.createElement("div"); left.className = "item-left";
-    const lab = document.createElement("div"); lab.className = "item-repeat"; lab.textContent = schPrefix(it);
+    const lab = document.createElement("div"); lab.className = "item-repeat"; lab.textContent = `${schPrefix(it)} #${Math.max(0, toInt(it.number, 0))}`;
     const timePreview = document.createElement("span"); timePreview.className = "item-preview item-time-preview"; timePreview.textContent = schTime(it);
     const actions = document.createElement("div"); actions.className = "item-actions";
     const tg = document.createElement("button"); tg.className = "item-toggle ghost"; tg.type = "button";
@@ -651,10 +705,26 @@ function renderSchedules() {
     rp.value = schRepeat(it);
     rp.addEventListener("change", () => { setSchRepeat(it, rp.value, day); renderSchedules(); queueScheduleAutoSave(); });
 
+    const intervalIn = document.createElement("input");
+    intervalIn.type = "number";
+    intervalIn.min = "0";
+    intervalIn.step = "1";
+    intervalIn.value = String(Math.max(0, toInt(it.interval, 0)));
+    intervalIn.title = "提醒间隔(秒)";
+    intervalIn.addEventListener("change", () => { it.interval = Math.max(0, toInt(intervalIn.value, 0)); queueScheduleAutoSave(); });
+
+    const timesIn = document.createElement("input");
+    timesIn.type = "number";
+    timesIn.min = "0";
+    timesIn.step = "1";
+    timesIn.value = String(Math.max(0, toInt(it.times, 0)));
+    timesIn.title = "提醒次数";
+    timesIn.addEventListener("change", () => { it.times = Math.max(0, toInt(timesIn.value, 0)); queueScheduleAutoSave(); });
+
     const tx = document.createElement("textarea"); tx.rows = 2; tx.placeholder = "内容（可选）"; tx.value = it.text || ""; autoGrow(tx);
     tx.addEventListener("input", () => { it.text = tx.value.replace(/\r?\n+/g, " ").trim(); autoGrow(tx); queueScheduleAutoSave(); });
 
-    row.append(ti, rp, tx);
+    row.append(ti, rp, intervalIn, timesIn, tx);
     body.appendChild(row);
     wrap.append(head, body);
     const syncFold = () => {
@@ -716,7 +786,23 @@ async function saveSchedulesManual() {
 
 function addSchedule() {
   const d = pickDay(); const [h, m] = (el.scheduleAddTime.value || "09:00").split(":").map((x) => toInt(x, 0));
-  const it = { id: `sc_${Date.now()}_${Math.random().toString(16).slice(2, 6)}`, Y: d.getFullYear(), M: d.getMonth() + 1, D: d.getDate(), h: clamp(h, 0, 23), i: clamp(m, 0, 59), week: weekMon(d), d: false, m: false, w: false, y: false, text: String(el.scheduleAddText.value || "").replace(/\r?\n+/g, " ").trim() };
+  const it = {
+    id: `sc_${Date.now()}_${Math.random().toString(16).slice(2, 6)}`,
+    Y: d.getFullYear(),
+    M: d.getMonth() + 1,
+    D: d.getDate(),
+    h: clamp(h, 0, 23),
+    i: clamp(m, 0, 59),
+    week: weekMon(d),
+    d: false,
+    m: false,
+    w: false,
+    y: false,
+    number: nextScheduleNumber(st.schedules),
+    interval: Math.max(0, toInt(el.scheduleAddInterval ? el.scheduleAddInterval.value : 0, 0)),
+    times: Math.max(0, toInt(el.scheduleAddTimes ? el.scheduleAddTimes.value : 0, 0)),
+    text: String(el.scheduleAddText.value || "").replace(/\r?\n+/g, " ").trim()
+  };
   setSchRepeat(it, el.scheduleAddRepeat.value, d); st.schedules.push(it); el.scheduleAddText.value = ""; st.schedulePage = 1; renderSchedules(); queueScheduleAutoSave();
 }
 

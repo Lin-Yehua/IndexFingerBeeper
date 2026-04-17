@@ -154,6 +154,10 @@
             <option value="yearly">每年重复</option>
           </select>
         </div>
+        <div class="grid3 compact">
+          <input id="scheduleAddInterval" type="number" min="0" step="1" value="0" placeholder="提醒间隔(秒)">
+          <input id="scheduleAddTimes" type="number" min="0" step="1" value="0" placeholder="提醒次数">
+        </div>
         <textarea id="scheduleAddText" rows="2" placeholder="日程内容（可选）"></textarea>
         <div class="btn-row schedule-add-action">
           <button id="btnScheduleAdd" type="button">添加</button>
