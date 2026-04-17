@@ -786,11 +786,6 @@ void loadApCredentialsFromSettingIni() {
     } else if (key == "espnowchannel" || key == "channel" || key == "apchannel") {
       channelValue = value;
       gotChannel = true;
-    } else if (key == "enableap") {
-      bool parsed = true;
-      if (parseBoolString(value, parsed)) {
-        gEnableAp = parsed;
-      }
     } else if (key == "enableespnow") {
       bool parsed = true;
       if (parseBoolString(value, parsed)) {
@@ -927,7 +922,6 @@ bool persistApConfigToSettingIni(const String &ssidRaw, const String &passwordRa
   bool foundSsid = false;
   bool foundPassword = false;
   bool foundChannel = false;
-  bool foundEnableAp = false;
   String output;
   output.reserve(original.length() + 128);
 
@@ -935,6 +929,7 @@ bool persistApConfigToSettingIni(const String &ssidRaw, const String &passwordRa
   while (start <= original.length()) {
     const int end = original.indexOf('\n', start);
     String line = (end >= 0) ? original.substring(start, end) : original.substring(start);
+    bool keepLine = true;
 
     String trimmed = line;
     trimmed.trim();
@@ -954,15 +949,20 @@ bool persistApConfigToSettingIni(const String &ssidRaw, const String &passwordRa
           line = "EspNowChannel = " + String(static_cast<unsigned int>(channel)) + ";";
           foundChannel = true;
         } else if (key == "enableap") {
-          line = String("EnableAP = ") + (gEnableAp ? "true;" : "false;");
-          foundEnableAp = true;
+          // EnableAP is no longer a setting.ini control item.
+          // AP enablement is decided by current app mode.
+          keepLine = false;
         }
       }
     }
 
-    output += line;
+    if (keepLine) {
+      output += line;
+      if (end >= 0) {
+        output += '\n';
+      }
+    }
     if (end >= 0) {
-      output += '\n';
       start = end + 1;
     } else {
       break;
@@ -981,11 +981,6 @@ bool persistApConfigToSettingIni(const String &ssidRaw, const String &passwordRa
     if (output.length() && output[output.length() - 1] != '\n') output += '\n';
     output += "EspNowChannel = " + String(static_cast<unsigned int>(channel)) + ";\n";
   }
-  if (!foundEnableAp) {
-    if (output.length() && output[output.length() - 1] != '\n') output += '\n';
-    output += String("EnableAP = ") + (gEnableAp ? "true;\n" : "false;\n");
-  }
-
   fs::File wf = FFat.open("/setting.ini", "w");
   if (!wf) return false;
   const size_t written = wf.print(output);

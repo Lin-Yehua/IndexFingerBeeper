@@ -488,11 +488,15 @@ void showGlitchEffectUTF8(const char *text) {
     if (keycode != 2) keyLatch = false;
     if (forceFinishNow) break;
 
-    if (random(1, 100) <= 30 + Sound_count) {
+    const int beepProbability =
+        constrain(gInsertSoundBaseProbability + static_cast<int>(Sound_count), 0, 100);
+    if (random(1, 100) <= beepProbability) {
       Sound_count = 0;
       mixer.playInsert("/BB2.wav");
     } else {
-      Sound_count += 5;
+      const int nextCount =
+          static_cast<int>(Sound_count) + constrain(gInsertSoundIncreaseProbability, 0, 100);
+      Sound_count = static_cast<uint8_t>(nextCount > 255 ? 255 : nextCount);
     }
 
     if (!didRollbackThisFrame && !rollbackPending) i++;

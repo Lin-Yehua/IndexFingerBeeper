@@ -49,6 +49,8 @@ extern float gBgGain;
 extern float gBacklightLevel;
 extern int gWrongProb3;
 extern int gWrongProb5;
+extern int gInsertSoundBaseProbability;
+extern int gInsertSoundIncreaseProbability;
 extern bool gEnableReprint;
 extern int gBacklightTimeSec;
 extern int gBacklightCloseTimeSec;

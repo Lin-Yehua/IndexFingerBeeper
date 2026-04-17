@@ -644,6 +644,8 @@ void applyAudioGainsFromSettingIni() {
   static constexpr float kDefaultBgGain = 0.2f;
   static constexpr int kDefaultWrongProb3 = 25;
   static constexpr int kDefaultWrongProb5 = 12;
+  static constexpr int kDefaultInsertSoundBaseProbability = 10;
+  static constexpr int kDefaultInsertSoundIncreaseProbability = 5;
   static constexpr bool kDefaultEnableReprint = true;
   static constexpr float kDefaultBacklightLevel = 1.0f;
   static constexpr int kDefaultBacklightTimeSec = -1;
@@ -654,6 +656,8 @@ void applyAudioGainsFromSettingIni() {
   gBacklightLevel = kDefaultBacklightLevel;
   gWrongProb3 = kDefaultWrongProb3;
   gWrongProb5 = kDefaultWrongProb5;
+  gInsertSoundBaseProbability = kDefaultInsertSoundBaseProbability;
+  gInsertSoundIncreaseProbability = kDefaultInsertSoundIncreaseProbability;
   gEnableReprint = kDefaultEnableReprint;
   gBacklightTimeSec = kDefaultBacklightTimeSec;
   gBacklightCloseTimeSec = kDefaultBacklightCloseTime;
@@ -668,6 +672,8 @@ void applyAudioGainsFromSettingIni() {
   bool gotBg = false;
   bool gotWrong3 = false;
   bool gotWrong5 = false;
+  bool gotInsertSoundBase = false;
+  bool gotInsertSoundIncrease = false;
   bool gotReprint = false;
   bool gotBacklight = false;
   bool gotBacklightTime = false;
@@ -709,6 +715,12 @@ void applyAudioGainsFromSettingIni() {
     } else if (key == "testwrongindexpersent_5area") {
       gWrongProb5 = constrain(value.toInt(), 0, 100);
       gotWrong5 = true;
+    } else if (key == "insertsoundbaseprobability") {
+      gInsertSoundBaseProbability = constrain(value.toInt(), 0, 100);
+      gotInsertSoundBase = true;
+    } else if (key == "insertsoundincreaseprobability") {
+      gInsertSoundIncreaseProbability = constrain(value.toInt(), 0, 100);
+      gotInsertSoundIncrease = true;
     } else if (key == "enablereprint") {
       gEnableReprint = (value == "1" || value == "true" || value == "on" || value == "yes");
       gotReprint = true;
@@ -727,6 +739,12 @@ void applyAudioGainsFromSettingIni() {
   if (!gotBg) Serial.printf("[APP] BackGroundGain missing, default=%.3f\n", gBgGain);
   if (!gotWrong3) Serial.printf("[APP] TestWrongIndexPersent_3Area missing, default=%d\n", gWrongProb3);
   if (!gotWrong5) Serial.printf("[APP] TestWrongIndexPersent_5Area missing, default=%d\n", gWrongProb5);
+  if (!gotInsertSoundBase) {
+    Serial.printf("[APP] InsertSoundBaseProbability missing, default=%d\n", gInsertSoundBaseProbability);
+  }
+  if (!gotInsertSoundIncrease) {
+    Serial.printf("[APP] InsertSoundIncreaseProbability missing, default=%d\n", gInsertSoundIncreaseProbability);
+  }
   if (!gotReprint) Serial.printf("[APP] EnableReprint missing, default=%d\n", gEnableReprint ? 1 : 0);
   if (!gotBacklight) Serial.printf("[APP] BackLight missing, default=%.3f\n", gBacklightLevel);
   if (!gotBacklightTime) Serial.printf("[APP] BacklightTime missing, default=%d\n", gBacklightTimeSec);
@@ -735,9 +753,11 @@ void applyAudioGainsFromSettingIni() {
                 gInsertGain,
                 gBgGain,
                 gBacklightLevel);
-  Serial.printf("[APP] glitch: p3=%d p5=%d reprint=%d backlightTime=%d closeTime=%d\n",
+  Serial.printf("[APP] glitch: p3=%d p5=%d insertBase=%d insertInc=%d reprint=%d backlightTime=%d closeTime=%d\n",
                 gWrongProb3,
                 gWrongProb5,
+                gInsertSoundBaseProbability,
+                gInsertSoundIncreaseProbability,
                 gEnableReprint ? 1 : 0,
                 gBacklightTimeSec,
                 gBacklightCloseTimeSec);
