@@ -237,6 +237,14 @@ button:disabled {
   padding: 6px 10px;
 }
 
+.schedule-add-action {
+  margin-top: 10px;
+}
+
+.schedule-save-wrap {
+  margin-top: 12px;
+}
+
 .input-btn {
   display: grid;
   grid-template-columns: 1fr auto;

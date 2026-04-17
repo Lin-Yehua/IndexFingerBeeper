@@ -9,10 +9,17 @@ const st = {
   cmdPage: 1,
   schedulePage: 1,
   cmdCollapsed: {},
-  scheduleCollapsed: {}
+  scheduleCollapsed: {},
+  cmdAutoTimer: null,
+  scheduleAutoTimer: null,
+  cmdAutoSaving: false,
+  scheduleAutoSaving: false,
+  cmdAutoResave: false,
+  scheduleAutoResave: false
 };
 const LS = { hist: "bb_msg_history", pfxOn: "bb_prefix_on", pfxText: "bb_prefix_text" };
 const PAGE_SIZE = 10;
+const AUTO_SAVE_DELAY_MS = 1200;
 
 const el = {
   tabMsg: $("tabMsg"), tabImg: $("tabImg"), panelMsg: $("panelMsg"), panelImg: $("panelImg"),
@@ -292,6 +299,35 @@ function parseCmdLine(line) {
 }
 function cmdToLine(text, id) { return `${id},"${String(text || "").replace(/\r?\n+/g, " ").replace(/"/g, '""')}"`; }
 
+function queueCmdAutoSave() {
+  if (st.cmdAutoTimer) clearTimeout(st.cmdAutoTimer);
+  st.cmdAutoTimer = setTimeout(() => {
+    st.cmdAutoTimer = null;
+    void runCmdAutoSave();
+  }, AUTO_SAVE_DELAY_MS);
+  setStatus(el.cmdStatus, "指令库已改动，等待自动保存...");
+}
+
+async function runCmdAutoSave() {
+  if (st.cmdAutoSaving) {
+    st.cmdAutoResave = true;
+    return;
+  }
+  st.cmdAutoSaving = true;
+  const ret = await saveCommands({ reload: false, showStatus: false });
+  if (ret.ok) setStatus(el.cmdStatus, "指令库已自动保存");
+  else setStatus(el.cmdStatus, `指令库自动保存失败: ${ret.message}`, true);
+  st.cmdAutoSaving = false;
+  if (st.cmdAutoResave) {
+    st.cmdAutoResave = false;
+    if (st.cmdAutoTimer) clearTimeout(st.cmdAutoTimer);
+    st.cmdAutoTimer = setTimeout(() => {
+      st.cmdAutoTimer = null;
+      void runCmdAutoSave();
+    }, AUTO_SAVE_DELAY_MS);
+  }
+}
+
 function renderCmdList() {
   el.cmdList.innerHTML = "";
   if (!st.commands.length) {
@@ -323,6 +359,7 @@ function renderCmdList() {
       const nextPages = Math.max(1, Math.ceil(st.commands.length / PAGE_SIZE));
       st.cmdPage = clamp(st.cmdPage, 1, nextPages);
       renderCmdList();
+      queueCmdAutoSave();
     });
     actions.append(tg, del);
     meta.append(n, pv);
@@ -330,7 +367,7 @@ function renderCmdList() {
 
     const body = document.createElement("div"); body.className = "item-body";
     const ta = document.createElement("textarea"); ta.rows = Math.max(2, lineCount(txt)); ta.value = txt; fitTextarea(ta, 2);
-    ta.addEventListener("input", () => { st.commands[idx] = ta.value; fitTextarea(ta, 2); pv.textContent = cmdPreview(st.commands[idx]); });
+    ta.addEventListener("input", () => { st.commands[idx] = ta.value; fitTextarea(ta, 2); pv.textContent = cmdPreview(st.commands[idx]); queueCmdAutoSave(); });
     ta.addEventListener("blur", () => {
       if (!String(ta.value || "").trim()) {
         st.commands.splice(idx, 1);
@@ -338,6 +375,7 @@ function renderCmdList() {
         const nextPages = Math.max(1, Math.ceil(st.commands.length / PAGE_SIZE));
         st.cmdPage = clamp(st.cmdPage, 1, nextPages);
         renderCmdList();
+        queueCmdAutoSave();
       }
     });
     body.appendChild(ta);
@@ -373,14 +411,21 @@ async function loadCommands() {
   } catch (e) { setStatus(el.cmdStatus, `加载失败: ${e.message}`, true); }
 }
 
-async function saveCommands() {
+async function saveCommands(options = {}) {
+  const reload = options.reload !== false;
+  const showStatus = options.showStatus !== false;
   try {
     const lines = st.commands.map((t) => String(t || "").replace(/\r?\n+/g, " ").trim()).filter(Boolean).map((t, i) => cmdToLine(t, i + 1));
     const b = new FormData(); b.append("content", lines.join("\n") + (lines.length ? "\n" : ""));
     const r = await fetch("/api/csv", { method: "POST", body: b }); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`);
-    await loadCommands();
-    setStatus(el.cmdStatus, raw || "保存成功");
-  } catch (e) { setStatus(el.cmdStatus, `保存失败: ${e.message}`, true); }
+    if (reload) await loadCommands();
+    if (showStatus) setStatus(el.cmdStatus, raw || "保存成功");
+    return { ok: true, message: raw || "保存成功" };
+  } catch (e) {
+    const msg = e?.message || String(e);
+    if (showStatus) setStatus(el.cmdStatus, `保存失败: ${msg}`, true);
+    return { ok: false, message: msg };
+  }
 }
 
 function splitSchedule(line) {
@@ -436,6 +481,35 @@ function schedulesToCsv(list) {
   return `${lines.join("\n")}\n`;
 }
 
+function queueScheduleAutoSave() {
+  if (st.scheduleAutoTimer) clearTimeout(st.scheduleAutoTimer);
+  st.scheduleAutoTimer = setTimeout(() => {
+    st.scheduleAutoTimer = null;
+    void runScheduleAutoSave();
+  }, AUTO_SAVE_DELAY_MS);
+  setStatus(el.scheduleStatus, "日程已改动，等待自动保存...");
+}
+
+async function runScheduleAutoSave() {
+  if (st.scheduleAutoSaving) {
+    st.scheduleAutoResave = true;
+    return;
+  }
+  st.scheduleAutoSaving = true;
+  const ret = await saveSchedules({ reload: false, showStatus: false });
+  if (ret.ok) setStatus(el.scheduleStatus, "日程表已自动保存");
+  else setStatus(el.scheduleStatus, `日程自动保存失败: ${ret.message}`, true);
+  st.scheduleAutoSaving = false;
+  if (st.scheduleAutoResave) {
+    st.scheduleAutoResave = false;
+    if (st.scheduleAutoTimer) clearTimeout(st.scheduleAutoTimer);
+    st.scheduleAutoTimer = setTimeout(() => {
+      st.scheduleAutoTimer = null;
+      void runScheduleAutoSave();
+    }, AUTO_SAVE_DELAY_MS);
+  }
+}
+
 function pickDay() {
   const v = el.scheduleDate.value; if (!v) return new Date();
   const p = v.split("-").map((x) => parseInt(x, 10)); if (p.length !== 3 || p.some((n) => !Number.isFinite(n))) return new Date();
@@ -488,6 +562,7 @@ function renderSchedules() {
       st.schedules = st.schedules.filter((x) => x.id !== it.id);
       delete st.scheduleCollapsed[it.id];
       renderSchedules();
+      queueScheduleAutoSave();
     });
     actions.append(tg, del);
     left.append(lab, timePreview);
@@ -496,15 +571,15 @@ function renderSchedules() {
     const body = document.createElement("div"); body.className = "item-body";
     const row = document.createElement("div"); row.className = "item-row";
     const ti = document.createElement("input"); ti.type = "time"; ti.value = schTime(it);
-    ti.addEventListener("change", () => { const [h, m] = ti.value.split(":").map((v) => toInt(v, 0)); it.h = clamp(h, 0, 23); it.i = clamp(m, 0, 59); renderSchedules(); });
+    ti.addEventListener("change", () => { const [h, m] = ti.value.split(":").map((v) => toInt(v, 0)); it.h = clamp(h, 0, 23); it.i = clamp(m, 0, 59); renderSchedules(); queueScheduleAutoSave(); });
 
     const rp = document.createElement("select");
     [["none", "不重复"], ["daily", "每日重复"], ["weekly", "每周重复"], ["monthly", "每月重复"], ["yearly", "每年重复"]].forEach(([v, t]) => { const o = document.createElement("option"); o.value = v; o.textContent = t; rp.appendChild(o); });
     rp.value = schRepeat(it);
-    rp.addEventListener("change", () => { setSchRepeat(it, rp.value, day); renderSchedules(); });
+    rp.addEventListener("change", () => { setSchRepeat(it, rp.value, day); renderSchedules(); queueScheduleAutoSave(); });
 
     const tx = document.createElement("textarea"); tx.rows = 2; tx.placeholder = "内容（可选）"; tx.value = it.text || ""; autoGrow(tx);
-    tx.addEventListener("input", () => { it.text = tx.value.replace(/\r?\n+/g, " ").trim(); autoGrow(tx); });
+    tx.addEventListener("input", () => { it.text = tx.value.replace(/\r?\n+/g, " ").trim(); autoGrow(tx); queueScheduleAutoSave(); });
 
     row.append(ti, rp, tx);
     body.appendChild(row);
@@ -539,19 +614,26 @@ async function loadSchedules() {
   } catch (e) { setStatus(el.scheduleStatus, `加载失败: ${e.message}`, true); }
 }
 
-async function saveSchedules() {
+async function saveSchedules(options = {}) {
+  const reload = options.reload !== false;
+  const showStatus = options.showStatus !== false;
   try {
     const b = new FormData(); b.append("content", schedulesToCsv(st.schedules));
     const r = await fetch("/api/schedule", { method: "POST", body: b }); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`);
-    await loadSchedules();
-    setStatus(el.scheduleStatus, raw || "日程已保存");
-  } catch (e) { setStatus(el.scheduleStatus, `保存失败: ${e.message}`, true); }
+    if (reload) await loadSchedules();
+    if (showStatus) setStatus(el.scheduleStatus, raw || "日程已保存");
+    return { ok: true, message: raw || "日程已保存" };
+  } catch (e) {
+    const msg = e?.message || String(e);
+    if (showStatus) setStatus(el.scheduleStatus, `保存失败: ${msg}`, true);
+    return { ok: false, message: msg };
+  }
 }
 
 function addSchedule() {
   const d = pickDay(); const [h, m] = (el.scheduleAddTime.value || "09:00").split(":").map((x) => toInt(x, 0));
   const it = { id: `sc_${Date.now()}_${Math.random().toString(16).slice(2, 6)}`, Y: d.getFullYear(), M: d.getMonth() + 1, D: d.getDate(), h: clamp(h, 0, 23), i: clamp(m, 0, 59), week: weekMon(d), d: false, m: false, w: false, y: false, text: String(el.scheduleAddText.value || "").replace(/\r?\n+/g, " ").trim() };
-  setSchRepeat(it, el.scheduleAddRepeat.value, d); st.schedules.push(it); el.scheduleAddText.value = ""; st.schedulePage = 1; renderSchedules(); setStatus(el.scheduleStatus, "已添加（记得保存）");
+  setSchRepeat(it, el.scheduleAddRepeat.value, d); st.schedules.push(it); el.scheduleAddText.value = ""; st.schedulePage = 1; renderSchedules(); queueScheduleAutoSave();
 }
 
 function rtcPayload() {
@@ -745,13 +827,21 @@ function bind() {
     st.cmdPage = Math.max(1, Math.ceil(st.commands.length / PAGE_SIZE));
     el.cmdAddInput.value = "";
     renderCmdList();
-    setStatus(el.cmdStatus, "已添加（记得保存）");
+    queueCmdAutoSave();
   });
-  el.btnCmdSave.addEventListener("click", saveCommands);
+  el.btnCmdSave.addEventListener("click", async () => {
+    if (st.cmdAutoTimer) { clearTimeout(st.cmdAutoTimer); st.cmdAutoTimer = null; }
+    st.cmdAutoResave = false;
+    await saveCommands({ reload: true, showStatus: true });
+  });
   if (el.btnCmdFoldAll) el.btnCmdFoldAll.addEventListener("click", () => setCmdCollapsedAll(true));
   if (el.btnCmdExpandAll) el.btnCmdExpandAll.addEventListener("click", () => setCmdCollapsedAll(false));
 
-  el.scheduleDate.addEventListener("change", () => { st.schedulePage = 1; renderSchedules(); }); el.btnScheduleAdd.addEventListener("click", addSchedule); el.btnScheduleSave.addEventListener("click", saveSchedules);
+  el.scheduleDate.addEventListener("change", () => { st.schedulePage = 1; renderSchedules(); }); el.btnScheduleAdd.addEventListener("click", addSchedule); el.btnScheduleSave.addEventListener("click", async () => {
+    if (st.scheduleAutoTimer) { clearTimeout(st.scheduleAutoTimer); st.scheduleAutoTimer = null; }
+    st.scheduleAutoResave = false;
+    await saveSchedules({ reload: true, showStatus: true });
+  });
   el.btnRtcSet.addEventListener("click", rtcSet); el.btnRtcSyncPhone.addEventListener("click", rtcSyncPhone);
 
   el.insertVol.addEventListener("input", () => { setVolUi(el.insertVol.value, el.bgVol.value); if (st.volTimer) clearTimeout(st.volTimer); st.volTimer = setTimeout(async () => { st.volTimer = null; try { const d = await pushVol(false); setVolUi(d.insertVolume, d.bgVolume); } catch (_) {} }, 120); });
