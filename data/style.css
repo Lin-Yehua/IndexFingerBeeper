@@ -370,10 +370,23 @@ button:disabled {
   margin-top: 8px;
 }
 
+.advanced-tools {
+  margin-top: 10px;
+  padding-top: 2px;
+}
+
 .advanced summary {
   cursor: pointer;
   color: #9ec4ff;
   font-weight: 700;
+}
+
+.advanced-tools[open] summary {
+  margin-bottom: 8px;
+}
+
+.auto-save-opt {
+  margin: 0 0 4px;
 }
 
 .list {

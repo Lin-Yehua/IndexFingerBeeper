@@ -17,7 +17,13 @@ const st = {
   cmdAutoResave: false,
   scheduleAutoResave: false
 };
-const LS = { hist: "bb_msg_history", pfxOn: "bb_prefix_on", pfxText: "bb_prefix_text" };
+const LS = {
+  hist: "bb_msg_history",
+  pfxOn: "bb_prefix_on",
+  pfxText: "bb_prefix_text",
+  cmdAutoSave: "bb_cmd_auto_save",
+  scheduleAutoSave: "bb_schedule_auto_save"
+};
 const PAGE_SIZE = 10;
 const AUTO_SAVE_DELAY_MS = 1200;
 
@@ -30,9 +36,9 @@ const el = {
   imgOffsetY: $("imgOffsetY"), imgOffsetYInput: $("imgOffsetYInput"), imgPreview: $("imgPreview"), imgFitMode: $("imgFitMode"),
   imgCenterX: $("imgCenterX"), imgCenterY: $("imgCenterY"), imgWidth: $("imgWidth"), imgHeight: $("imgHeight"),
   btnSendImg: $("btnSendImg"), btnClearImg: $("btnClearImg"), imgStatus: $("imgStatus"),
-  cmdList: $("cmdList"), cmdPager: $("cmdPager"), cmdAddInput: $("cmdAddInput"), btnCmdAdd: $("btnCmdAdd"), btnCmdSave: $("btnCmdSave"), btnCmdFoldAll: $("btnCmdFoldAll"), btnCmdExpandAll: $("btnCmdExpandAll"), cmdStatus: $("cmdStatus"),
+  cmdList: $("cmdList"), cmdPager: $("cmdPager"), cmdAddInput: $("cmdAddInput"), btnCmdAdd: $("btnCmdAdd"), btnCmdSave: $("btnCmdSave"), btnCmdRetry: $("btnCmdRetry"), cmdAutoSaveEnable: $("cmdAutoSaveEnable"), cmdAdvanced: $("cmdAdvanced"), btnCmdFoldAll: $("btnCmdFoldAll"), btnCmdExpandAll: $("btnCmdExpandAll"), cmdStatus: $("cmdStatus"),
   rtcNow: $("rtcNow"), rtcYear: $("rtcYear"), rtcMonth: $("rtcMonth"), rtcDay: $("rtcDay"), rtcHour: $("rtcHour"), rtcMinute: $("rtcMinute"), rtcSecond: $("rtcSecond"), btnRtcSet: $("btnRtcSet"), btnRtcSyncPhone: $("btnRtcSyncPhone"), rtcStatus: $("rtcStatus"),
-  scheduleDate: $("scheduleDate"), scheduleList: $("scheduleList"), schedulePager: $("schedulePager"), scheduleAddTime: $("scheduleAddTime"), scheduleAddRepeat: $("scheduleAddRepeat"), scheduleAddText: $("scheduleAddText"), btnScheduleAdd: $("btnScheduleAdd"), btnScheduleSave: $("btnScheduleSave"), scheduleStatus: $("scheduleStatus"),
+  scheduleDate: $("scheduleDate"), scheduleList: $("scheduleList"), schedulePager: $("schedulePager"), scheduleAddTime: $("scheduleAddTime"), scheduleAddRepeat: $("scheduleAddRepeat"), scheduleAddText: $("scheduleAddText"), btnScheduleAdd: $("btnScheduleAdd"), btnScheduleSave: $("btnScheduleSave"), btnScheduleRetry: $("btnScheduleRetry"), scheduleAutoSaveEnable: $("scheduleAutoSaveEnable"), scheduleAdvanced: $("scheduleAdvanced"), scheduleStatus: $("scheduleStatus"),
   bgVol: $("bgVol"), insertVol: $("insertVol"), bgVolVal: $("bgVolVal"), insertVolVal: $("insertVolVal"), backlight: $("backlight"), backlightTime: $("backlightTime"), backlightCloseTime: $("backlightCloseTime"), btnSaveDisplay: $("btnSaveDisplay"), displayStatus: $("displayStatus"),
   apSsid: $("apSsid"), apPassword: $("apPassword"), apChannel: $("apChannel"), btnSaveAp: $("btnSaveAp"),
   staSsid: $("staSsid"), staPassword: $("staPassword"), staNet: $("staNet"), btnSaveSta: $("btnSaveSta"),
@@ -68,6 +74,36 @@ const setImgOffsetY = (v) => {
   if (el.imgOffsetYInput) el.imgOffsetYInput.value = String(oy);
   return oy;
 };
+const isCmdAutoSaveEnabled = () => !el.cmdAutoSaveEnable || !!el.cmdAutoSaveEnable.checked;
+const isScheduleAutoSaveEnabled = () => !el.scheduleAutoSaveEnable || !!el.scheduleAutoSaveEnable.checked;
+const setCmdRetryVisible = (show) => {
+  if (el.btnCmdRetry) el.btnCmdRetry.hidden = !show;
+  if (show && el.cmdAdvanced) el.cmdAdvanced.open = true;
+};
+const setScheduleRetryVisible = (show) => {
+  if (el.btnScheduleRetry) el.btnScheduleRetry.hidden = !show;
+  if (show && el.scheduleAdvanced) el.scheduleAdvanced.open = true;
+};
+
+function loadAutoSavePrefs() {
+  try {
+    if (el.cmdAutoSaveEnable) {
+      const v = localStorage.getItem(LS.cmdAutoSave);
+      el.cmdAutoSaveEnable.checked = v !== "0";
+    }
+    if (el.scheduleAutoSaveEnable) {
+      const v = localStorage.getItem(LS.scheduleAutoSave);
+      el.scheduleAutoSaveEnable.checked = v !== "0";
+    }
+  } catch (_) {}
+}
+
+function saveAutoSavePrefs() {
+  try {
+    if (el.cmdAutoSaveEnable) localStorage.setItem(LS.cmdAutoSave, el.cmdAutoSaveEnable.checked ? "1" : "0");
+    if (el.scheduleAutoSaveEnable) localStorage.setItem(LS.scheduleAutoSave, el.scheduleAutoSaveEnable.checked ? "1" : "0");
+  } catch (_) {}
+}
 
 function renderPager(container, page, totalPages, onPage) {
   if (!container) return;
@@ -300,6 +336,10 @@ function parseCmdLine(line) {
 function cmdToLine(text, id) { return `${id},"${String(text || "").replace(/\r?\n+/g, " ").replace(/"/g, '""')}"`; }
 
 function queueCmdAutoSave() {
+  if (!isCmdAutoSaveEnabled()) {
+    setStatus(el.cmdStatus, "指令库已改动（自动保存已关闭）");
+    return;
+  }
   if (st.cmdAutoTimer) clearTimeout(st.cmdAutoTimer);
   st.cmdAutoTimer = setTimeout(() => {
     st.cmdAutoTimer = null;
@@ -309,14 +349,23 @@ function queueCmdAutoSave() {
 }
 
 async function runCmdAutoSave() {
+  if (!isCmdAutoSaveEnabled()) {
+    setStatus(el.cmdStatus, "自动保存已关闭");
+    return;
+  }
   if (st.cmdAutoSaving) {
     st.cmdAutoResave = true;
     return;
   }
   st.cmdAutoSaving = true;
   const ret = await saveCommands({ reload: false, showStatus: false });
-  if (ret.ok) setStatus(el.cmdStatus, "指令库已自动保存");
-  else setStatus(el.cmdStatus, `指令库自动保存失败: ${ret.message}`, true);
+  if (ret.ok) {
+    setStatus(el.cmdStatus, "指令库已自动保存");
+    setCmdRetryVisible(false);
+  } else {
+    setStatus(el.cmdStatus, `指令库自动保存失败: ${ret.message}`, true);
+    setCmdRetryVisible(true);
+  }
   st.cmdAutoSaving = false;
   if (st.cmdAutoResave) {
     st.cmdAutoResave = false;
@@ -428,6 +477,17 @@ async function saveCommands(options = {}) {
   }
 }
 
+async function saveCommandsManual() {
+  if (st.cmdAutoTimer) {
+    clearTimeout(st.cmdAutoTimer);
+    st.cmdAutoTimer = null;
+  }
+  st.cmdAutoResave = false;
+  const ret = await saveCommands({ reload: true, showStatus: true });
+  setCmdRetryVisible(!ret.ok);
+  return ret;
+}
+
 function splitSchedule(line) {
   const cols = []; let s = 0;
   for (let i = 0; i < 11; i += 1) { const c = line.indexOf(",", s); if (c < 0) { cols.push(line.slice(s).trim()); s = line.length; break; } cols.push(line.slice(s, c).trim()); s = c + 1; }
@@ -482,6 +542,10 @@ function schedulesToCsv(list) {
 }
 
 function queueScheduleAutoSave() {
+  if (!isScheduleAutoSaveEnabled()) {
+    setStatus(el.scheduleStatus, "日程已改动（自动保存已关闭）");
+    return;
+  }
   if (st.scheduleAutoTimer) clearTimeout(st.scheduleAutoTimer);
   st.scheduleAutoTimer = setTimeout(() => {
     st.scheduleAutoTimer = null;
@@ -491,14 +555,23 @@ function queueScheduleAutoSave() {
 }
 
 async function runScheduleAutoSave() {
+  if (!isScheduleAutoSaveEnabled()) {
+    setStatus(el.scheduleStatus, "自动保存已关闭");
+    return;
+  }
   if (st.scheduleAutoSaving) {
     st.scheduleAutoResave = true;
     return;
   }
   st.scheduleAutoSaving = true;
   const ret = await saveSchedules({ reload: false, showStatus: false });
-  if (ret.ok) setStatus(el.scheduleStatus, "日程表已自动保存");
-  else setStatus(el.scheduleStatus, `日程自动保存失败: ${ret.message}`, true);
+  if (ret.ok) {
+    setStatus(el.scheduleStatus, "日程表已自动保存");
+    setScheduleRetryVisible(false);
+  } else {
+    setStatus(el.scheduleStatus, `日程自动保存失败: ${ret.message}`, true);
+    setScheduleRetryVisible(true);
+  }
   st.scheduleAutoSaving = false;
   if (st.scheduleAutoResave) {
     st.scheduleAutoResave = false;
@@ -628,6 +701,17 @@ async function saveSchedules(options = {}) {
     if (showStatus) setStatus(el.scheduleStatus, `保存失败: ${msg}`, true);
     return { ok: false, message: msg };
   }
+}
+
+async function saveSchedulesManual() {
+  if (st.scheduleAutoTimer) {
+    clearTimeout(st.scheduleAutoTimer);
+    st.scheduleAutoTimer = null;
+  }
+  st.scheduleAutoResave = false;
+  const ret = await saveSchedules({ reload: true, showStatus: true });
+  setScheduleRetryVisible(!ret.ok);
+  return ret;
 }
 
 function addSchedule() {
@@ -829,19 +913,39 @@ function bind() {
     renderCmdList();
     queueCmdAutoSave();
   });
-  el.btnCmdSave.addEventListener("click", async () => {
-    if (st.cmdAutoTimer) { clearTimeout(st.cmdAutoTimer); st.cmdAutoTimer = null; }
-    st.cmdAutoResave = false;
-    await saveCommands({ reload: true, showStatus: true });
-  });
+  if (el.btnCmdSave) el.btnCmdSave.addEventListener("click", async () => { await saveCommandsManual(); });
+  if (el.btnCmdRetry) el.btnCmdRetry.addEventListener("click", async () => { await saveCommandsManual(); });
+  if (el.cmdAutoSaveEnable) {
+    el.cmdAutoSaveEnable.addEventListener("change", () => {
+      saveAutoSavePrefs();
+      if (!isCmdAutoSaveEnabled()) {
+        if (st.cmdAutoTimer) { clearTimeout(st.cmdAutoTimer); st.cmdAutoTimer = null; }
+        st.cmdAutoResave = false;
+        setStatus(el.cmdStatus, "指令库自动保存已关闭");
+      } else {
+        setStatus(el.cmdStatus, "指令库自动保存已开启");
+      }
+    });
+  }
   if (el.btnCmdFoldAll) el.btnCmdFoldAll.addEventListener("click", () => setCmdCollapsedAll(true));
   if (el.btnCmdExpandAll) el.btnCmdExpandAll.addEventListener("click", () => setCmdCollapsedAll(false));
 
-  el.scheduleDate.addEventListener("change", () => { st.schedulePage = 1; renderSchedules(); }); el.btnScheduleAdd.addEventListener("click", addSchedule); el.btnScheduleSave.addEventListener("click", async () => {
-    if (st.scheduleAutoTimer) { clearTimeout(st.scheduleAutoTimer); st.scheduleAutoTimer = null; }
-    st.scheduleAutoResave = false;
-    await saveSchedules({ reload: true, showStatus: true });
-  });
+  el.scheduleDate.addEventListener("change", () => { st.schedulePage = 1; renderSchedules(); });
+  el.btnScheduleAdd.addEventListener("click", addSchedule);
+  if (el.btnScheduleSave) el.btnScheduleSave.addEventListener("click", async () => { await saveSchedulesManual(); });
+  if (el.btnScheduleRetry) el.btnScheduleRetry.addEventListener("click", async () => { await saveSchedulesManual(); });
+  if (el.scheduleAutoSaveEnable) {
+    el.scheduleAutoSaveEnable.addEventListener("change", () => {
+      saveAutoSavePrefs();
+      if (!isScheduleAutoSaveEnabled()) {
+        if (st.scheduleAutoTimer) { clearTimeout(st.scheduleAutoTimer); st.scheduleAutoTimer = null; }
+        st.scheduleAutoResave = false;
+        setStatus(el.scheduleStatus, "日程自动保存已关闭");
+      } else {
+        setStatus(el.scheduleStatus, "日程自动保存已开启");
+      }
+    });
+  }
   el.btnRtcSet.addEventListener("click", rtcSet); el.btnRtcSyncPhone.addEventListener("click", rtcSyncPhone);
 
   el.insertVol.addEventListener("input", () => { setVolUi(el.insertVol.value, el.bgVol.value); if (st.volTimer) clearTimeout(st.volTimer); st.volTimer = setTimeout(async () => { st.volTimer = null; try { const d = await pushVol(false); setVolUi(d.insertVolume, d.bgVolume); } catch (_) {} }, 120); });
@@ -866,6 +970,9 @@ function bind() {
 }
 
 async function boot() {
+  loadAutoSavePrefs();
+  setCmdRetryVisible(false);
+  setScheduleRetryVisible(false);
   switchPush("msg"); bind(); initCollapsibleCards(); loadMsgLocal();
   el.portalUrl.value = portalRoot();
   setImgOffsetY(0);

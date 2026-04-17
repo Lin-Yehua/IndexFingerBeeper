@@ -98,10 +98,19 @@
         <textarea id="cmdAddInput" rows="2" placeholder="输入新增指令"></textarea>
         <div class="btn-row">
           <button id="btnCmdAdd" type="button">添加</button>
-          <button id="btnCmdSave" class="ghost" type="button">保存指令库</button>
         </div>
       </div>
       <p id="cmdStatus" class="status"></p>
+      <details id="cmdAdvanced" class="advanced advanced-tools">
+        <summary>高级</summary>
+        <div class="line-checks auto-save-opt">
+          <label><input id="cmdAutoSaveEnable" type="checkbox" checked> 启用自动保存</label>
+        </div>
+        <div class="btn-row">
+          <button id="btnCmdSave" class="ghost" type="button">保存指令库</button>
+          <button id="btnCmdRetry" class="ghost" type="button" hidden>重试保存</button>
+        </div>
+      </details>
     </section>
 
     <section class="card">
@@ -150,10 +159,17 @@
           <button id="btnScheduleAdd" type="button">添加</button>
         </div>
       </div>
-      <div class="btn-row schedule-save-wrap">
-        <button id="btnScheduleSave" type="button">保存日程表</button>
-      </div>
       <p id="scheduleStatus" class="status"></p>
+      <details id="scheduleAdvanced" class="advanced advanced-tools">
+        <summary>高级</summary>
+        <div class="line-checks auto-save-opt">
+          <label><input id="scheduleAutoSaveEnable" type="checkbox" checked> 启用自动保存</label>
+        </div>
+        <div class="btn-row schedule-save-wrap">
+          <button id="btnScheduleSave" type="button">保存日程表</button>
+          <button id="btnScheduleRetry" class="ghost" type="button" hidden>重试保存</button>
+        </div>
+      </details>
     </section>
 
     <section class="card">
