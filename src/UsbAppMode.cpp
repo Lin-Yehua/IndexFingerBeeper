@@ -3136,14 +3136,10 @@ void processAppLoop() {
         String queuedMessage;
         if (wirelessPortalPopMessage(queuedMessage)) {
           playMessageWithGlitch(queuedMessage.c_str());
-          if (!wirelessPortalHasPendingMessage()) {
-            irq.webActive = false;
-            irq.webKeyLatch = false;
-            // This key press just consumed the final web message:
-            // pass it through so AP/STA normal flow does not need a second press.
-            syntheticKeyPress = true;
-            Serial.println("[WEB] interrupt finished");
-          }
+          // Important: even if queue is now empty, we are still displaying
+          // the message we just popped. Web interrupt must stay active until
+          // the user presses the key once more to explicitly exit.
+          Serial.println("[WEB] interrupt next message");
         } else {
           irq.webActive = false;
           irq.webKeyLatch = false;
