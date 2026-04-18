@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>漂流瓶投递</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="{{ url_for('assets', filename='bottle.css') }}">
+  <script defer src="{{ url_for('assets', filename='bottle.js') }}"></script>
+</head>
+<body>
+  <main class="page">
+    <header class="frame page-head">
+      <h1>漂流瓶投递</h1>
+      <p class="sub">支持随机投递或指定设备投递。指定模式可输入 {{ uuid_len }} 位UUID或MAC。</p>
+      <nav class="nav">
+        <a href="{{ url_for('submit_page') }}">外部提交</a>
+      </nav>
+    </header>
+
+    {% if notice %}
+      <section class="frame notice notice-{{ notice.level }}" role="status">{{ notice.text }}</section>
+    {% endif %}
+
+    <section class="frame">
+      <form method="post" action="{{ url_for('bottle_send') }}" class="stack">
+        <fieldset class="mode-field">
+          <legend>目标</legend>
+          <label><input type="radio" name="targetMode" value="specified" checked> 指定设备</label>
+          <label><input type="radio" name="targetMode" value="random"> 随机设备</label>
+        </fieldset>
+
+        <label for="target">设备标识（{{ uuid_len }}位UUID 或 MAC）</label>
+        <input id="target" name="target" type="text" maxlength="32" placeholder="输入 {{ uuid_len }}位UUID 或 AA:BB:CC:DD:EE:FF">
+
+        <label for="username">用户名（可选，最多 {{ max_username_len }} 字）</label>
+        <input id="username" name="username" type="text" maxlength="{{ max_username_len }}" placeholder="不填则仅发送消息正文">
+
+        <label for="message">消息内容（最多 {{ max_message_len }} 字）</label>
+        <textarea id="message" name="message" rows="5" maxlength="{{ max_message_len }}" placeholder="请输入要投递的消息"></textarea>
+
+        <div class="row between">
+          <span id="char-counter" class="counter">0 / {{ max_message_len }}</span>
+          <button type="submit" class="btn">投递消息</button>
+        </div>
+      </form>
+    </section>
+  </main>
+</body>
+</html>

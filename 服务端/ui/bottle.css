@@ -1,0 +1,167 @@
+:root {
+  --bg: #03070d;
+  --text: #d7ecff;
+  --muted: #8eb5d7;
+  --line: #2d8fe6;
+  --yellow: #f0cf45;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Consolas", "Segoe UI", sans-serif;
+}
+
+.page {
+  max-width: 900px;
+  margin: 24px auto;
+  padding: 0 16px 40px;
+}
+
+.frame {
+  border: 2px solid var(--line);
+  padding: 16px;
+  margin-bottom: 16px;
+  background: transparent;
+}
+
+.page-head {
+  display: grid;
+  gap: 10px;
+}
+
+.sub {
+  color: var(--muted);
+  margin: 0;
+}
+
+.nav {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.nav a,
+.btn {
+  border: 2px solid var(--line);
+  color: var(--text);
+  text-decoration: none;
+  background: transparent;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.nav a:hover,
+.btn:hover {
+  border-color: var(--yellow);
+  color: var(--yellow);
+}
+
+.stack {
+  display: grid;
+  gap: 10px;
+}
+
+.grid2 {
+  display: grid;
+  gap: 8px;
+}
+
+label {
+  color: var(--muted);
+}
+
+input[type="text"],
+textarea {
+  width: 100%;
+  border: 2px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  padding: 10px;
+  font-size: 15px;
+}
+
+textarea {
+  resize: vertical;
+  min-height: 140px;
+}
+
+input:focus,
+textarea:focus,
+button:focus,
+a:focus {
+  outline: none;
+  border-color: var(--yellow);
+}
+
+.mode-field {
+  border: 2px solid var(--line);
+  padding: 10px;
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.mode-field legend {
+  color: var(--muted);
+  padding: 0 6px;
+}
+
+.row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.row.between {
+  justify-content: space-between;
+}
+
+.counter {
+  color: var(--yellow);
+}
+
+.notice {
+  font-weight: 700;
+}
+
+.notice-ok {
+  border-color: var(--line);
+}
+
+.notice-warn,
+.notice-error {
+  border-color: var(--yellow);
+}
+
+.device-list {
+  margin: 0;
+  padding-left: 20px;
+}
+
+.device-list code {
+  color: var(--yellow);
+}
+
+.empty {
+  margin: 0;
+  color: var(--muted);
+}
+
+@media (max-width: 720px) {
+  .nav a,
+  .btn {
+    width: 100%;
+    text-align: center;
+  }
+
+  .row.between {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}

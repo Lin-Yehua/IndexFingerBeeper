@@ -25,7 +25,7 @@
 
 static bool ensureStaQueueMutex();
 static void clearStaMessageQueue();
-static bool pushStaMessageQueue(const String &message);
+static bool pushStaMessageQueue(const String &message, bool prioritizeBottleMessage = false);
 static bool loadStaCredentialsFromSettingIni(String &outSsid, String &outPassword, String &outNet);
 static void ensureStaFetcherTaskStarted();
 static void beginStaConnectAttempt();
@@ -1188,6 +1188,8 @@ static SemaphoreHandle_t gStaMsgQueueMutex = nullptr;
 static TaskHandle_t gStaFetcherTaskHandle = nullptr;
 static bool gStaNtpSyncedThisSession = false;
 static uint32_t gStaNtpLastAttemptMs = 0;
+static bool gStaBottlePriorityActive = false;
+static size_t gStaBottlePriorityNextLogical = 0;
 
 struct SleepSnapshotData {
   SleepSnapshotHeader header;
@@ -2414,25 +2416,71 @@ static void clearStaMessageQueue() {
   }
   gStaMsgQueueHead = 0;
   gStaMsgQueueSize = 0;
+  gStaBottlePriorityActive = false;
+  gStaBottlePriorityNextLogical = 0;
   xSemaphoreGive(gStaMsgQueueMutex);
 }
 
-static bool pushStaMessageQueue(const String &message) {
-  if (!ensureStaQueueMutex()) return false;
-  String normalized = message;
-  normalized.trim();
-  if (!normalized.length()) return false;
-  if (xSemaphoreTake(gStaMsgQueueMutex, pdMS_TO_TICKS(200)) != pdTRUE) return false;
-  if (gStaMsgQueueSize >= kStaPrefetchDepth) {
-    xSemaphoreGive(gStaMsgQueueMutex);
-    return false;
+static bool normalizeStaQueueMessage(const String &message, String &outNormalized) {
+  outNormalized = message;
+  outNormalized.replace("\r", " ");
+  outNormalized.replace("\n", " ");
+  outNormalized.trim();
+  if (!outNormalized.length()) return false;
+  if (outNormalized.length() > kSleepTextMaxLen) {
+    outNormalized.remove(kSleepTextMaxLen);
   }
+  return outNormalized.length() > 0;
+}
 
+static bool pushStaMessageQueueLocked(const String &normalized) {
+  if (gStaMsgQueueSize >= kStaPrefetchDepth) return false;
   const size_t tail = (gStaMsgQueueHead + gStaMsgQueueSize) % kStaPrefetchDepth;
   gStaMsgQueue[tail] = normalized;
   gStaMsgQueueSize++;
-  xSemaphoreGive(gStaMsgQueueMutex);
   return true;
+}
+
+static bool pushStaMessageQueue(const String &message, bool prioritizeBottleMessage) {
+  if (!ensureStaQueueMutex()) return false;
+  String normalized = message;
+  if (!normalizeStaQueueMessage(message, normalized)) return false;
+  if (xSemaphoreTake(gStaMsgQueueMutex, pdMS_TO_TICKS(200)) != pdTRUE) return false;
+
+  bool ok = false;
+  if (prioritizeBottleMessage && gStaMsgQueueSize > 0) {
+    if (!gStaBottlePriorityActive) {
+      gStaBottlePriorityActive = true;
+      // logical 0 means queue head (the very next message to be shown on key press).
+      gStaBottlePriorityNextLogical = 0;
+    }
+    if (gStaBottlePriorityNextLogical > gStaMsgQueueSize) {
+      gStaBottlePriorityNextLogical = gStaMsgQueueSize;
+    }
+
+    if (gStaBottlePriorityNextLogical < gStaMsgQueueSize) {
+      const size_t writeIdx =
+          (gStaMsgQueueHead + gStaBottlePriorityNextLogical) % kStaPrefetchDepth;
+      gStaMsgQueue[writeIdx] = normalized;
+      gStaBottlePriorityNextLogical++;
+      ok = true;
+    } else {
+      ok = pushStaMessageQueueLocked(normalized);
+      if (ok) {
+        // Keep consuming the tail for subsequent bottle messages.
+        gStaBottlePriorityNextLogical = gStaMsgQueueSize;
+      }
+    }
+  } else {
+    if (!prioritizeBottleMessage) {
+      gStaBottlePriorityActive = false;
+      gStaBottlePriorityNextLogical = 0;
+    }
+    ok = pushStaMessageQueueLocked(normalized);
+  }
+
+  xSemaphoreGive(gStaMsgQueueMutex);
+  return ok;
 }
 
 static bool popStaMessageQueue(String &outMessage) {
@@ -2448,6 +2496,17 @@ static bool popStaMessageQueue(String &outMessage) {
   gStaMsgQueue[gStaMsgQueueHead] = "";
   gStaMsgQueueHead = (gStaMsgQueueHead + 1) % kStaPrefetchDepth;
   gStaMsgQueueSize--;
+  if (gStaMsgQueueSize == 0) {
+    gStaBottlePriorityActive = false;
+    gStaBottlePriorityNextLogical = 0;
+  } else if (gStaBottlePriorityActive) {
+    if (gStaBottlePriorityNextLogical > 0) {
+      gStaBottlePriorityNextLogical--;
+    }
+    if (gStaBottlePriorityNextLogical > gStaMsgQueueSize) {
+      gStaBottlePriorityNextLogical = gStaMsgQueueSize;
+    }
+  }
   xSemaphoreGive(gStaMsgQueueMutex);
   return outMessage.length() > 0;
 }
@@ -2482,13 +2541,18 @@ static void appendUtf8Codepoint(String &out, uint16_t codepoint) {
   out += static_cast<char>(0x80 | (codepoint & 0x3F));
 }
 
-static bool extractJsonTextField(const String &json, String &outText) {
+static bool extractJsonStringField(const String &json, const char *fieldName, String &outText) {
   outText = "";
+  if (!fieldName || !fieldName[0]) return false;
 
-  const int keyPos = json.indexOf("\"text\"");
+  String key = "\"";
+  key += fieldName;
+  key += "\"";
+
+  const int keyPos = json.indexOf(key);
   if (keyPos < 0) return false;
 
-  int colon = json.indexOf(':', keyPos + 6);
+  int colon = json.indexOf(':', keyPos + key.length());
   if (colon < 0) return false;
   colon++;
   while (colon < static_cast<int>(json.length()) &&
@@ -2547,16 +2611,114 @@ static bool extractJsonTextField(const String &json, String &outText) {
         break;
       }
       default:
-        decoded += esc;
-        break;
+      decoded += esc;
+      break;
     }
   }
 
   return false;
 }
 
-static bool fetchStaMessageFromCloud(String &outMessage) {
+static bool extractJsonTextField(const String &json, String &outText) {
+  if (!extractJsonStringField(json, "text", outText)) return false;
+  outText.trim();
+  return outText.length() > 0;
+}
+
+static String percentEncodeUriComponent(const String &value) {
+  static constexpr char kHex[] = "0123456789ABCDEF";
+  String out;
+  out.reserve(value.length() * 3);
+  for (size_t i = 0; i < value.length(); ++i) {
+    const uint8_t c = static_cast<uint8_t>(value[i]);
+    const bool safe =
+        (c >= '0' && c <= '9') ||
+        (c >= 'A' && c <= 'Z') ||
+        (c >= 'a' && c <= 'z') ||
+        c == '-' || c == '_' || c == '.' || c == '~';
+    if (safe) {
+      out += static_cast<char>(c);
+      continue;
+    }
+    out += '%';
+    out += kHex[(c >> 4) & 0x0F];
+    out += kHex[c & 0x0F];
+  }
+  return out;
+}
+
+static String normalizeMacAddressForApi(const String &raw) {
+  String compact;
+  compact.reserve(12);
+  for (size_t i = 0; i < raw.length(); ++i) {
+    const char ch = raw[i];
+    if (isxdigit(static_cast<unsigned char>(ch))) {
+      compact += static_cast<char>(toupper(static_cast<unsigned char>(ch)));
+      continue;
+    }
+    if (ch == ':' || ch == '-' || ch == ' ') {
+      continue;
+    }
+    return "";
+  }
+  if (compact.length() != 12) return "";
+
+  String mac;
+  mac.reserve(17);
+  for (int i = 0; i < 12; i += 2) {
+    if (i > 0) mac += ':';
+    mac += compact[i];
+    mac += compact[i + 1];
+  }
+  return mac;
+}
+
+static String appendDeviceIdentityToApiUrl(const String &baseUrl) {
+  String out = baseUrl;
+  if (!out.length()) return out;
+
+  const String mac = normalizeMacAddressForApi(WiFi.macAddress());
+  String uuid;
+  if (!deviceUuidRead(uuid) || !uuid.length()) {
+    String uuidErr;
+    if (!deviceUuidEnsureFromRtc(uuid, uuidErr)) {
+      uuid = "";
+    }
+  }
+  uuid.trim();
+  uuid.toUpperCase();
+
+  if (!uuid.length() && !mac.length()) {
+    return out;
+  }
+
+  String lower = out;
+  lower.toLowerCase();
+  const bool hasUuidParam = (lower.indexOf("uuid=") >= 0);
+  const bool hasMacParam = (lower.indexOf("mac=") >= 0);
+  if ((hasUuidParam || !uuid.length()) && (hasMacParam || !mac.length())) {
+    return out;
+  }
+
+  const bool hasQuery = out.indexOf('?') >= 0;
+  char sep = hasQuery ? '&' : '?';
+  if (!hasUuidParam && uuid.length()) {
+    out += sep;
+    out += "uuid=";
+    out += percentEncodeUriComponent(uuid);
+    sep = '&';
+  }
+  if (!hasMacParam && mac.length()) {
+    out += sep;
+    out += "mac=";
+    out += percentEncodeUriComponent(mac);
+  }
+  return out;
+}
+
+static bool fetchStaMessageFromCloud(String &outMessage, bool &outIsBottleMessage) {
   outMessage = "";
+  outIsBottleMessage = false;
   if (WiFi.status() != WL_CONNECTED) return false;
 
   String apiUrl = gStaNetApi;
@@ -2583,7 +2745,8 @@ static bool fetchStaMessageFromCloud(String &outMessage) {
   http.setConnectTimeout(kStaHttpConnectTimeoutMs);
   http.setTimeout(kStaHttpReadTimeoutMs);
   http.setReuse(true);
-  const bool beginOk = useHttps ? http.begin(gStaHttpsClient, apiUrl) : http.begin(apiUrl);
+  const String requestUrl = appendDeviceIdentityToApiUrl(apiUrl);
+  const bool beginOk = useHttps ? http.begin(gStaHttpsClient, requestUrl) : http.begin(requestUrl);
   if (!beginOk) {
     Serial.println("[STA] API HTTP begin failed");
     if (useHttps) {
@@ -2612,6 +2775,12 @@ static bool fetchStaMessageFromCloud(String &outMessage) {
                   static_cast<unsigned int>(payload.length()));
     return false;
   }
+  String source;
+  if (extractJsonStringField(payload, "source", source)) {
+    source.trim();
+    source.toLowerCase();
+    outIsBottleMessage = (source == "device_queue");
+  }
   return true;
 }
 
@@ -2626,18 +2795,20 @@ static bool fetchAndQueueOneStaMessage() {
 
   gStaFetchInProgress = true;
   String fetched;
-  const bool fetchedOk = fetchStaMessageFromCloud(fetched);
+  bool fetchedIsBottle = false;
+  const bool fetchedOk = fetchStaMessageFromCloud(fetched, fetchedIsBottle);
   gStaFetchInProgress = false;
 
   if (!fetchedOk) {
     gStaNextFetchAllowedMs = nowMs + kStaFetchFailCooldownMs;
     return false;
   }
-  if (!pushStaMessageQueue(fetched)) return false;
+  if (!pushStaMessageQueue(fetched, fetchedIsBottle)) return false;
   const size_t queued = staMessageQueueSize();
   gStaNextFetchAllowedMs = 0;
-  Serial.printf("[STA] queued cloud message count=%u\n",
-                static_cast<unsigned int>(queued));
+  Serial.printf("[STA] queued cloud message count=%u source=%s\n",
+                static_cast<unsigned int>(queued),
+                fetchedIsBottle ? "device_queue" : "main_random");
   return true;
 }
 

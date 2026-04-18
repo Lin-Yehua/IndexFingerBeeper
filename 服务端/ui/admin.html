@@ -15,6 +15,7 @@
       <nav class="nav">
         <a href="{{ url_for('submit_page') }}">外部提交</a>
         <a href="{{ url_for('review_page') }}">审核页</a>
+        <a href="{{ url_for('bottle_page') }}">漂流瓶</a>
       </nav>
     </header>
 
@@ -77,6 +78,30 @@
         {% endfor %}
       {% else %}
         <p class="empty">正式库目前为空。</p>
+      {% endif %}
+    </section>
+
+    <section class="frame">
+      <h2>已发现设备与漂流瓶队列</h2>
+      {% if device_overview %}
+        {% for dev in device_overview %}
+          <article class="item frame-lite">
+            <div class="item-title">{{ dev.uuid }} / {{ dev.mac }}</div>
+            <p>文件：<code>{{ dev.file_name }}</code></p>
+            <p>待发送：<strong>{{ dev.queue_count }}</strong></p>
+            {% if dev.messages %}
+              <ol>
+                {% for m in dev.messages %}
+                  <li>{{ m }}</li>
+                {% endfor %}
+              </ol>
+            {% else %}
+              <p class="empty">该设备当前没有漂流瓶消息。</p>
+            {% endif %}
+          </article>
+        {% endfor %}
+      {% else %}
+        <p class="empty">当前没有发现任何设备。</p>
       {% endif %}
     </section>
   </main>

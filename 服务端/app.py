@@ -2,6 +2,7 @@
 import math
 import os
 import random
+import re
 import threading
 import time
 from typing import Dict, List, Optional, Tuple
@@ -29,15 +30,24 @@ else:
 DATA_DIR = os.environ.get("CSV_API_DATA_DIR", DEFAULT_DATA_DIR)
 MAIN_FILE = os.path.join(DATA_DIR, "text.csv")
 PENDING_FILE = os.path.join(DATA_DIR, "pending.csv")
+MESSAGEDATA_DIR = os.environ.get("CSV_API_MESSAGE_DIR", os.path.join(BASE_DIR, "messagedata"))
 
 MAX_TEXT_LEN = 140
 PAGE_SIZE = 10
+MAX_BOTTLE_MESSAGE_LEN = 100
+MAX_BOTTLE_USERNAME_LEN = 20
+DEVICE_MESSAGE_LIMIT = 20
+UUID_LEN = 18
+
+UUID_RE = re.compile(r"^UUID\d{14}$")
+MAC_COMPACT_RE = re.compile(r"^[0-9A-F]{12}$")
 
 API_HOST = os.environ.get("CSV_API_HOST", "0.0.0.0")
 API_HTTP_PORT = int(os.environ.get("API_HTTP_PORT", "80"))
-WEB_HTTPS_PORT = int(os.environ.get("WEB_HTTPS_PORT", "443"))
-SSL_CERT_FILE = os.environ.get("WEB_SSL_CERT_FILE", "").strip()
-SSL_KEY_FILE = os.environ.get("WEB_SSL_KEY_FILE", "").strip()
+# HTTP-only mode:
+# - prefer WEB_HTTP_PORT
+# - fallback to legacy WEB_HTTPS_PORT for compatibility
+WEB_HTTP_PORT = int(os.environ.get("WEB_HTTP_PORT", os.environ.get("WEB_HTTPS_PORT", "8080")))
 
 NOTICE_LEVELS = {"info", "ok", "warn", "error"}
 
@@ -47,6 +57,7 @@ web_app = Flask("csv_api_web", template_folder=WEB_UI_DIR, static_folder=None)
 
 def ensure_data_dir() -> None:
     os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(MESSAGEDATA_DIR, exist_ok=True)
     for path in [MAIN_FILE, PENDING_FILE]:
         if not os.path.exists(path):
             with open(path, "a", encoding="utf-8"):
@@ -78,6 +89,118 @@ def write_lines(file_path: str, lines: List[str]) -> None:
             safe_text = line.replace("\r", " ").replace("\n", " ").strip()
             if safe_text:
                 f.write(safe_text + "\n")
+
+
+def normalize_uuid(raw: Optional[str]) -> str:
+    value = (raw or "").strip().upper()
+    if UUID_RE.fullmatch(value):
+        return value
+    return ""
+
+
+def normalize_mac_compact(raw: Optional[str]) -> str:
+    value = (raw or "").strip().upper()
+    if not value:
+        return ""
+    compact = "".join(ch for ch in value if ch not in ":- ")
+    if MAC_COMPACT_RE.fullmatch(compact):
+        return compact
+    return ""
+
+
+def format_mac_compact_to_colon(mac_compact: str) -> str:
+    if not MAC_COMPACT_RE.fullmatch(mac_compact):
+        return ""
+    return ":".join(mac_compact[i : i + 2] for i in range(0, 12, 2))
+
+
+def build_device_file_name(uuid: str, mac_compact: str) -> str:
+    return f"{uuid}+{mac_compact}.csv"
+
+
+def device_file_path(uuid: str, mac_compact: str) -> str:
+    return os.path.join(MESSAGEDATA_DIR, build_device_file_name(uuid, mac_compact))
+
+
+def parse_device_file_name(file_name: str) -> Optional[Dict[str, str]]:
+    if not file_name.lower().endswith(".csv"):
+        return None
+    stem = file_name[:-4]
+    if "+" not in stem:
+        return None
+    uuid_part, mac_part = stem.split("+", 1)
+    uuid = normalize_uuid(uuid_part)
+    mac_compact = normalize_mac_compact(mac_part)
+    if not uuid or not mac_compact:
+        return None
+    return {
+        "uuid": uuid,
+        "mac_compact": mac_compact,
+        "mac": format_mac_compact_to_colon(mac_compact),
+        "file_name": file_name,
+        "path": os.path.join(MESSAGEDATA_DIR, file_name),
+    }
+
+
+def list_known_devices() -> List[Dict[str, str]]:
+    ensure_data_dir()
+    devices: List[Dict[str, str]] = []
+    try:
+        names = sorted(os.listdir(MESSAGEDATA_DIR))
+    except FileNotFoundError:
+        return devices
+
+    for name in names:
+        parsed = parse_device_file_name(name)
+        if not parsed:
+            continue
+        devices.append(parsed)
+    return devices
+
+
+def collect_device_overview() -> List[Dict[str, object]]:
+    devices = list_known_devices()
+    overview: List[Dict[str, object]] = []
+    for item in devices:
+        messages = read_nonempty_lines(item["path"])
+        overview.append(
+            {
+                "uuid": item["uuid"],
+                "mac": item["mac"],
+                "file_name": item["file_name"],
+                "queue_count": len(messages),
+                "messages": messages,
+            }
+        )
+    return overview
+
+
+def ensure_device_file(uuid: str, mac_compact: str) -> str:
+    ensure_data_dir()
+    path = device_file_path(uuid, mac_compact)
+    if not os.path.exists(path):
+        with open(path, "a", encoding="utf-8"):
+            pass
+    return path
+
+
+def append_device_message(path: str, message: str) -> None:
+    lines = read_nonempty_lines(path)
+    lines.append(message)
+    if len(lines) > DEVICE_MESSAGE_LIMIT:
+        lines = lines[-DEVICE_MESSAGE_LIMIT:]
+    write_lines(path, lines)
+
+
+def pop_oldest_device_message(path: str) -> Optional[str]:
+    if not os.path.isfile(path):
+        return None
+    lines = read_nonempty_lines(path)
+    if not lines:
+        return None
+    oldest = lines[0]
+    write_lines(path, lines[1:])
+    return oldest
 
 
 def parse_positive_int(raw_value: Optional[str], default: int = 1) -> int:
@@ -133,17 +256,6 @@ def redirect_with_notice(
     return redirect(target)
 
 
-def resolve_ssl_context():
-    if SSL_CERT_FILE and SSL_KEY_FILE:
-        if not os.path.isfile(SSL_CERT_FILE):
-            raise FileNotFoundError(f"SSL cert file not found: {SSL_CERT_FILE}")
-        if not os.path.isfile(SSL_KEY_FILE):
-            raise FileNotFoundError(f"SSL key file not found: {SSL_KEY_FILE}")
-        return SSL_CERT_FILE, SSL_KEY_FILE
-
-    return "adhoc"
-
-
 class ServerThread(threading.Thread):
     def __init__(self, app: Flask, host: str, port: int, ssl_context=None):
         super().__init__(daemon=True)
@@ -163,7 +275,8 @@ def api_index():
             "ok": True,
             "service": "csv_api",
             "api": ["/random", "/health"],
-            "web_https_port": WEB_HTTPS_PORT,
+            "web": ["/admin", "/submit", "/review", "/bottle"],
+            "web_http_port": WEB_HTTP_PORT,
         }
     ), 200
 
@@ -171,12 +284,19 @@ def api_index():
 @api_app.route("/random", methods=["GET"])
 def random_text():
     ensure_data_dir()
-    lines = read_nonempty_lines(MAIN_FILE)
+    req_uuid = normalize_uuid(request.args.get("uuid"))
+    req_mac_compact = normalize_mac_compact(request.args.get("mac"))
+    if req_uuid and req_mac_compact:
+        device_path = ensure_device_file(req_uuid, req_mac_compact)
+        queued = pop_oldest_device_message(device_path)
+        if queued:
+            return jsonify({"ok": True, "text": queued, "source": "device_queue"}), 200
 
+    lines = read_nonempty_lines(MAIN_FILE)
     if not lines:
         return jsonify({"ok": False, "error": "No approved text found"}), 404
 
-    return jsonify({"ok": True, "text": random.choice(lines)}), 200
+    return jsonify({"ok": True, "text": random.choice(lines), "source": "main_random"}), 200
 
 
 @api_app.route("/health", methods=["GET"])
@@ -202,6 +322,7 @@ def admin_page():
 
     approved_lines = read_nonempty_lines(MAIN_FILE)
     pending_count = len(read_nonempty_lines(PENDING_FILE))
+    device_overview = collect_device_overview()
 
     requested_page = parse_positive_int(request.args.get("page"), 1)
     page_lines, page, total_pages, start_index = paginate(approved_lines, requested_page, PAGE_SIZE)
@@ -225,6 +346,7 @@ def admin_page():
         rows=rows,
         total_approved=len(approved_lines),
         pending_count=pending_count,
+        device_overview=device_overview,
         main_file=MAIN_FILE,
         notice=notice_from_request(),
     )
@@ -400,6 +522,88 @@ def review_page():
     )
 
 
+@web_app.route("/bottle", methods=["GET"])
+def bottle_page():
+    ensure_data_dir()
+    return render_template(
+        "bottle.html",
+        max_message_len=MAX_BOTTLE_MESSAGE_LEN,
+        max_username_len=MAX_BOTTLE_USERNAME_LEN,
+        uuid_len=UUID_LEN,
+        notice=notice_from_request(),
+    )
+
+
+@web_app.route("/bottle-send", methods=["POST"])
+def bottle_send():
+    ensure_data_dir()
+
+    target_mode = (request.form.get("targetMode") or "specified").strip().lower()
+    target_input = (request.form.get("target") or "").strip()
+    username = (request.form.get("username") or "").strip()
+    message = (request.form.get("message") or "").strip()
+
+    if not message:
+        return redirect_with_notice("bottle_page", msg="Message cannot be empty.", level="warn")
+    if len(message) > MAX_BOTTLE_MESSAGE_LEN:
+        return redirect_with_notice(
+            "bottle_page",
+            msg=f"Message length must be <= {MAX_BOTTLE_MESSAGE_LEN}.",
+            level="warn",
+        )
+    if len(username) > MAX_BOTTLE_USERNAME_LEN:
+        return redirect_with_notice(
+            "bottle_page",
+            msg=f"Username length must be <= {MAX_BOTTLE_USERNAME_LEN}.",
+            level="warn",
+        )
+
+    final_message = message
+    if username:
+        final_message = f"[{username}]：{message}"
+
+    devices = list_known_devices()
+    target: Optional[Dict[str, str]] = None
+
+    if target_mode == "random":
+        if not devices:
+            return redirect_with_notice("bottle_page", msg="No known device available.", level="warn")
+        target = random.choice(devices)
+    else:
+        if not target_input:
+            return redirect_with_notice("bottle_page", msg="Target cannot be empty.", level="warn")
+
+        target_uuid = normalize_uuid(target_input)
+        target_mac = normalize_mac_compact(target_input)
+        if target_uuid:
+            uuid_matches = [item for item in devices if item["uuid"] == target_uuid]
+            if not uuid_matches:
+                return redirect_with_notice("bottle_page", msg="UUID不存在", level="warn")
+            target = uuid_matches[0]
+        elif target_mac:
+            mac_matches = [item for item in devices if item["mac_compact"] == target_mac]
+            if not mac_matches:
+                return redirect_with_notice("bottle_page", msg="MAC does not exist.", level="warn")
+            target = mac_matches[0]
+        else:
+            return redirect_with_notice(
+                "bottle_page",
+                msg=f"Invalid target. Enter a {UUID_LEN}-char UUID or MAC.",
+                level="warn",
+            )
+
+    if not target:
+        return redirect_with_notice("bottle_page", msg="Target device not found.", level="warn")
+
+    path = ensure_device_file(target["uuid"], target["mac_compact"])
+    append_device_message(path, final_message)
+    return redirect_with_notice(
+        "bottle_page",
+        msg=f"Delivered: {target['uuid']} / {target['mac']}",
+        level="ok",
+    )
+
+
 @web_app.route("/approve", methods=["POST"])
 def approve():
     ensure_data_dir()
@@ -475,16 +679,14 @@ def reject():
 def run_servers() -> None:
     ensure_data_dir()
 
-    ssl_context = resolve_ssl_context()
-
     api_server = ServerThread(api_app, API_HOST, API_HTTP_PORT)
-    web_server = ServerThread(web_app, API_HOST, WEB_HTTPS_PORT, ssl_context=ssl_context)
+    web_server = ServerThread(web_app, API_HOST, WEB_HTTP_PORT)
 
     api_server.start()
     web_server.start()
 
     print(f"[API ] http://{API_HOST}:{API_HTTP_PORT}")
-    print(f"[WEB ] https://{API_HOST}:{WEB_HTTPS_PORT}")
+    print(f"[WEB ] http://{API_HOST}:{WEB_HTTP_PORT}")
 
     try:
         while True:
