@@ -42,8 +42,10 @@ const el = {
   bgVol: $("bgVol"), insertVol: $("insertVol"), bgVolVal: $("bgVolVal"), insertVolVal: $("insertVolVal"), backlight: $("backlight"), backlightTime: $("backlightTime"), backlightCloseTime: $("backlightCloseTime"), btnSaveDisplay: $("btnSaveDisplay"), displayStatus: $("displayStatus"),
   apSsid: $("apSsid"), apPassword: $("apPassword"), apChannel: $("apChannel"), btnSaveAp: $("btnSaveAp"),
   staSsid: $("staSsid"), staPassword: $("staPassword"), staNet: $("staNet"), btnSaveSta: $("btnSaveSta"),
-  hostMac: $("hostMac"), btnSaveHostMac: $("btnSaveHostMac"), selfMac: $("selfMac"), btnCopySelfMac: $("btnCopySelfMac"), wirelessStatus: $("wirelessStatus"),
-  batteryStatus: $("batteryStatus")
+  hostMac: $("hostMac"), btnSaveHostMac: $("btnSaveHostMac"),
+  selfMac: $("selfMac"), btnCopySelfMac: $("btnCopySelfMac"), selfUuid: $("selfUuid"), btnCopySelfUuid: $("btnCopySelfUuid"), wirelessStatus: $("wirelessStatus"),
+  batteryStatus: $("batteryStatus"),
+  deviceMac: $("deviceMac"), btnCopyDeviceMac: $("btnCopyDeviceMac"), deviceUuid: $("deviceUuid"), btnCopyDeviceUuid: $("btnCopyDeviceUuid"), deviceStatus: $("deviceStatus")
 };
 
 const pad2 = (n) => String(n).padStart(2, "0");
@@ -226,6 +228,14 @@ async function copyText(t) {
   try { if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(t); return true; } } catch (_) {}
   const ta = document.createElement("textarea"); ta.value = t; ta.style.position = "fixed"; ta.style.opacity = "0"; document.body.appendChild(ta);
   ta.focus(); ta.select(); let ok = false; try { ok = document.execCommand("copy"); } catch (_) {} document.body.removeChild(ta); return ok;
+}
+async function copyInputValue(inputEl, statusEl, emptyText, okText) {
+  const t = String(inputEl?.value || "").trim();
+  if (!t) {
+    setStatus(statusEl, emptyText, true);
+    return;
+  }
+  setStatus(statusEl, (await copyText(t)) ? okText : "复制失败");
 }
 
 function switchPush(mode) {
@@ -911,9 +921,14 @@ async function loadWireless() {
     if (active !== el.staSsid) el.staSsid.value = t.ssid || "";
     if (active !== el.staPassword) el.staPassword.value = t.password || "";
     if (active !== el.staNet) el.staNet.value = t.net || "";
+    const selfMac = s.selfMac || "";
+    const deviceUuid = String(s.deviceUuid || "").trim();
     el.hostMac.value = h.hostMac || "";
-    el.selfMac.value = s.selfMac || "";
-    setStatus(el.wirelessStatus, `队列: Web ${s.queue} / Host ${s.hostQueue} | AP=${s.apSsid || "-"} CH=${s.apChannel || "-"}`);
+    el.selfMac.value = selfMac;
+    if (el.selfUuid) el.selfUuid.value = deviceUuid;
+    if (el.deviceMac) el.deviceMac.value = selfMac;
+    if (el.deviceUuid) el.deviceUuid.value = deviceUuid;
+    setStatus(el.wirelessStatus, `队列: Web ${s.queue} / Host ${s.hostQueue} | AP=${s.apSsid || "-"} CH=${s.apChannel || "-"} | UUID=${deviceUuid || "-"}`);
   } catch (e) { setStatus(el.wirelessStatus, `加载无线信息失败: ${e.message}`, true); }
 }
 
@@ -1043,10 +1058,10 @@ function bind() {
   el.btnSaveAp.addEventListener("click", saveAp);
   el.btnSaveSta.addEventListener("click", saveSta);
   el.btnSaveHostMac.addEventListener("click", saveHostMac);
-  el.btnCopySelfMac.addEventListener("click", async () => {
-    const t = String(el.selfMac.value || "").trim(); if (!t) return setStatus(el.wirelessStatus, "MAC为空", true);
-    setStatus(el.wirelessStatus, (await copyText(t)) ? "MAC已复制" : "复制失败");
-  });
+  el.btnCopySelfMac.addEventListener("click", async () => copyInputValue(el.selfMac, el.wirelessStatus, "MAC为空", "MAC已复制"));
+  if (el.btnCopySelfUuid) el.btnCopySelfUuid.addEventListener("click", async () => copyInputValue(el.selfUuid, el.wirelessStatus, "UUID为空", "UUID已复制"));
+  if (el.btnCopyDeviceMac) el.btnCopyDeviceMac.addEventListener("click", async () => copyInputValue(el.deviceMac, el.deviceStatus || el.wirelessStatus, "MAC为空", "MAC已复制"));
+  if (el.btnCopyDeviceUuid) el.btnCopyDeviceUuid.addEventListener("click", async () => copyInputValue(el.deviceUuid, el.deviceStatus || el.wirelessStatus, "UUID为空", "UUID已复制"));
 
   [el.msgInput, el.cmdAddInput, el.scheduleAddText].forEach((ta) => {
     if (!ta) return;

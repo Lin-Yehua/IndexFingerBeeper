@@ -19,6 +19,7 @@
 #include "DisplayEffects.h"
 #include "WirelessPortal.h"
 #include "Ds1302Rtc.h"
+#include "DeviceUuid.h"
 #include "Index_B.h"
 #include "Key_Drv.h"
 
@@ -2928,6 +2929,16 @@ static bool syncDs1302FromStaNtp(String &detailOut) {
     detailOut = "ds1302 write failed";
     return false;
   }
+  String uuid;
+  String uuidError;
+  if (!deviceUuidEnsureFromDateTime(synced, uuid, uuidError)) {
+    detailOut = "uuid save failed";
+    if (uuidError.length()) {
+      detailOut += ": ";
+      detailOut += uuidError;
+    }
+    return false;
+  }
 
   gStaNtpSyncedThisSession = true;
   char buf[48] = {0};
@@ -2939,6 +2950,10 @@ static bool syncDs1302FromStaNtp(String &detailOut) {
            static_cast<unsigned int>(synced.minute),
            static_cast<unsigned int>(synced.second));
   detailOut = String(buf);
+  if (uuid.length()) {
+    detailOut += " UUID=";
+    detailOut += uuid;
+  }
   return true;
 }
 

@@ -1,0 +1,37 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>外部提交</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="{{ url_for('assets', filename='submit.css') }}">
+  <script defer src="{{ url_for('assets', filename='submit.js') }}"></script>
+</head>
+<body>
+  <main class="page">
+    <header class="frame page-head">
+      <h1>外部提交</h1>
+      <p class="sub">提交内容会进入待审核区，不会直接进入正式库。</p>
+      <nav class="nav">
+        <a href="{{ url_for('admin_page') }}">管理页</a>
+        <a href="{{ url_for('review_page') }}">审核页</a>
+      </nav>
+    </header>
+
+    {% if notice %}
+      <section class="frame notice notice-{{ notice.level }}" role="status">{{ notice.text }}</section>
+    {% endif %}
+
+    <section class="frame">
+      <form method="post" action="{{ url_for('add_pending') }}" class="stack">
+        <label for="submit-text">文本内容（最多 {{ max_text_len }} 字）</label>
+        <textarea id="submit-text" name="text" rows="6" maxlength="{{ max_text_len }}" placeholder="请输入要提交审核的文本"></textarea>
+        <div class="row between">
+          <span id="char-counter" class="counter">0 / {{ max_text_len }}</span>
+          <button type="submit" class="btn">提交审核</button>
+        </div>
+      </form>
+    </section>
+  </main>
+</body>
+</html>

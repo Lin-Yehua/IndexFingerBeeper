@@ -1,0 +1,71 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>审核页</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="{{ url_for('assets', filename='review.css') }}">
+  <script defer src="{{ url_for('assets', filename='review.js') }}"></script>
+</head>
+<body>
+  <main class="page">
+    <header class="frame page-head">
+      <h1>审核页</h1>
+      <p class="sub">通过会写入正式库，驳回会从待审核队列移除。</p>
+      <nav class="nav">
+        <a href="{{ url_for('admin_page') }}">管理页</a>
+        <a href="{{ url_for('submit_page') }}">外部提交</a>
+      </nav>
+    </header>
+
+    {% if notice %}
+      <section class="frame notice notice-{{ notice.level }}" role="status">{{ notice.text }}</section>
+    {% endif %}
+
+    <section class="frame meta">
+      <p>正式库数量：<strong>{{ approved_count }}</strong></p>
+      <p>待审核数量：<strong>{{ pending_count }}</strong></p>
+      <p>每页显示：<strong>10</strong> 条</p>
+    </section>
+
+    <section class="frame pager">
+      <div>第 {{ page }} / {{ total_pages }} 页</div>
+      <div class="row">
+        {% if page > 1 %}
+          <a class="btn-link" href="{{ url_for('review_page', page=page - 1) }}">上一页</a>
+        {% endif %}
+        {% if page < total_pages %}
+          <a class="btn-link" href="{{ url_for('review_page', page=page + 1) }}">下一页</a>
+        {% endif %}
+      </div>
+    </section>
+
+    <section class="frame">
+      <h2>待审核内容</h2>
+      {% if rows %}
+        {% for row in rows %}
+          <article class="item frame-lite" id="pending-{{ row.global_index }}">
+            <div class="item-title">#{{ row.display_index }}</div>
+            <div class="text">{{ row.text }}</div>
+            <div class="row">
+              <form method="post" action="{{ url_for('approve') }}">
+                <input type="hidden" name="index" value="{{ row.global_index }}">
+                <input type="hidden" name="page" value="{{ page }}">
+                <button type="submit" class="btn">通过</button>
+              </form>
+
+              <form method="post" action="{{ url_for('reject') }}" onsubmit="return confirm('确认驳回这条内容吗？');">
+                <input type="hidden" name="index" value="{{ row.global_index }}">
+                <input type="hidden" name="page" value="{{ page }}">
+                <button type="submit" class="btn btn-warn">驳回</button>
+              </form>
+            </div>
+          </article>
+        {% endfor %}
+      {% else %}
+        <p class="empty">当前没有待审核内容。</p>
+      {% endif %}
+    </section>
+  </main>
+</body>
+</html>

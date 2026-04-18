@@ -1,0 +1,182 @@
+﻿:root {
+  --bg: #03070d;
+  --text: #d7ecff;
+  --muted: #8eb5d7;
+  --blue: #3fa3ff;
+  --line: #2d8fe6;
+  --line-soft: #216aa9;
+  --yellow: #f0cf45;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Consolas", "Segoe UI", sans-serif;
+}
+
+.page {
+  max-width: 1080px;
+  margin: 24px auto;
+  padding: 0 16px 40px;
+}
+
+.frame {
+  border: 2px solid var(--line);
+  padding: 16px;
+  margin-bottom: 16px;
+  background: transparent;
+}
+
+.frame-lite {
+  border: 2px solid var(--line-soft);
+  padding: 12px;
+  margin-top: 12px;
+}
+
+h1,
+h2,
+p {
+  margin: 0;
+}
+
+h2 {
+  margin-bottom: 12px;
+}
+
+.page-head {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sub {
+  color: var(--muted);
+}
+
+.nav,
+.row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.row.end {
+  justify-content: flex-end;
+}
+
+.nav a,
+.btn-link,
+.btn {
+  border: 2px solid var(--line);
+  color: var(--text);
+  background: transparent;
+  text-decoration: none;
+  padding: 8px 12px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.nav a:hover,
+.btn-link:hover,
+.btn:hover {
+  border-color: var(--yellow);
+  color: var(--yellow);
+}
+
+.btn-warn {
+  border-color: var(--yellow);
+}
+
+.meta {
+  display: grid;
+  gap: 8px;
+}
+
+code {
+  color: var(--yellow);
+}
+
+.stack {
+  display: grid;
+  gap: 10px;
+}
+
+textarea {
+  width: 100%;
+  border: 2px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  padding: 10px;
+  resize: vertical;
+  min-height: 88px;
+  font-size: 15px;
+}
+
+textarea:focus,
+button:focus,
+a:focus {
+  outline: none;
+  border-color: var(--yellow);
+}
+
+.pager {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.item {
+  display: grid;
+  gap: 10px;
+}
+
+.item-title {
+  color: var(--yellow);
+  font-weight: 700;
+}
+
+.notice {
+  font-weight: 700;
+}
+
+.notice-ok {
+  border-color: var(--blue);
+}
+
+.notice-warn,
+.notice-error {
+  border-color: var(--yellow);
+}
+
+.empty {
+  color: var(--muted);
+}
+
+.flash {
+  border-color: var(--yellow) !important;
+}
+
+@media (max-width: 720px) {
+  .pager {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .nav a,
+  .btn-link,
+  .btn {
+    width: 100%;
+    text-align: center;
+  }
+
+  .row.end {
+    justify-content: stretch;
+  }
+}

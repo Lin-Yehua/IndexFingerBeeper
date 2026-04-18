@@ -221,12 +221,27 @@
         <input id="selfMac" type="text" readonly>
         <button id="btnCopySelfMac" class="ghost" type="button">复制本机MAC</button>
       </div>
+      <div class="input-btn">
+        <input id="selfUuid" type="text" readonly>
+        <button id="btnCopySelfUuid" class="ghost" type="button">Copy UUID</button>
+      </div>
       <p id="wirelessStatus" class="status"></p>
     </section>
 
     <section class="card">
-      <h2>电池电量</h2>
+      <h2>设备信息</h2>
       <p id="batteryStatus" class="status">读取中...</p>
+      <label class="label" for="deviceMac">MAC</label>
+      <div class="input-btn">
+        <input id="deviceMac" type="text" readonly>
+        <button id="btnCopyDeviceMac" class="ghost" type="button">Copy MAC</button>
+      </div>
+      <label class="label" for="deviceUuid">UUID</label>
+      <div class="input-btn">
+        <input id="deviceUuid" type="text" readonly>
+        <button id="btnCopyDeviceUuid" class="ghost" type="button">Copy UUID</button>
+      </div>
+      <p id="deviceStatus" class="status"></p>
     </section>
   </main>
 

@@ -1,0 +1,84 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>文本库管理</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="{{ url_for('assets', filename='admin.css') }}">
+  <script defer src="{{ url_for('assets', filename='admin.js') }}"></script>
+</head>
+<body>
+  <main class="page">
+    <header class="frame page-head">
+      <h1>文本库管理</h1>
+      <p class="sub">HTTPS 管理端 · 黑底框线风格</p>
+      <nav class="nav">
+        <a href="{{ url_for('submit_page') }}">外部提交</a>
+        <a href="{{ url_for('review_page') }}">审核页</a>
+      </nav>
+    </header>
+
+    {% if notice %}
+      <section class="frame notice notice-{{ notice.level }}" role="status">{{ notice.text }}</section>
+    {% endif %}
+
+    <section class="frame meta">
+      <p>正式库数量：<strong>{{ total_approved }}</strong></p>
+      <p>待审核数量：<strong>{{ pending_count }}</strong></p>
+      <p>正式库文件：<code>{{ main_file }}</code></p>
+      <p>每页显示：<strong>10</strong> 条</p>
+    </section>
+
+    <section class="frame">
+      <h2>新增正式文本</h2>
+      <form method="post" action="{{ url_for('admin_add') }}" class="stack">
+        <input type="hidden" name="page" value="{{ page }}">
+        <textarea name="text" rows="4" maxlength="{{ max_text_len }}" placeholder="输入要加入正式库的文本"></textarea>
+        <div class="row end">
+          <button type="submit" class="btn">添加到正式库</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="frame pager">
+      <div>第 {{ page }} / {{ total_pages }} 页</div>
+      <div class="row">
+        {% if page > 1 %}
+          <a class="btn-link" href="{{ url_for('admin_page', page=page - 1) }}">上一页</a>
+        {% endif %}
+        {% if page < total_pages %}
+          <a class="btn-link" href="{{ url_for('admin_page', page=page + 1) }}">下一页</a>
+        {% endif %}
+      </div>
+    </section>
+
+    <section class="frame">
+      <h2>当前正式库</h2>
+      {% if rows %}
+        {% for row in rows %}
+          <article class="item frame-lite" id="item-{{ row.global_index }}">
+            <div class="item-title">#{{ row.display_index }}</div>
+
+            <form method="post" action="{{ url_for('admin_update') }}" class="stack">
+              <input type="hidden" name="index" value="{{ row.global_index }}">
+              <input type="hidden" name="page" value="{{ page }}">
+              <textarea name="text" rows="3" maxlength="{{ max_text_len }}">{{ row.text }}</textarea>
+              <div class="row">
+                <button type="submit" class="btn">保存修改</button>
+              </div>
+            </form>
+
+            <form method="post" action="{{ url_for('admin_delete') }}" onsubmit="return confirm('确认删除这条正式文本吗？');">
+              <input type="hidden" name="index" value="{{ row.global_index }}">
+              <input type="hidden" name="page" value="{{ page }}">
+              <button type="submit" class="btn btn-warn">删除</button>
+            </form>
+          </article>
+        {% endfor %}
+      {% else %}
+        <p class="empty">正式库目前为空。</p>
+      {% endif %}
+    </section>
+  </main>
+</body>
+</html>

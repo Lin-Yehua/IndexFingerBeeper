@@ -16,6 +16,7 @@
 #include "EspNowMessage.h"
 #include "UsbAppMode.h"
 #include "Ds1302Rtc.h"
+#include "DeviceUuid.h"
 
 namespace {
 
@@ -1555,6 +1556,10 @@ bool persistEffectSettingsToSettingIni(int wrongProb3,
 String statusJson() {
   const String staMac = WiFi.macAddress();
   const String apMac = WiFi.softAPmacAddress();
+  String deviceUuid;
+  if (!deviceUuidRead(deviceUuid)) {
+    deviceUuid = "";
+  }
   const UBaseType_t regularQueued = gMessageQueue ? uxQueueMessagesWaiting(gMessageQueue) : 0;
   const UBaseType_t immediateQueued = immediatePendingCount();
   const UBaseType_t queued = regularQueued + immediateQueued;
@@ -1639,6 +1644,9 @@ String statusJson() {
   out += "\"";
   out += ",\"selfApMac\":\"";
   out += jsonEscape(apMac);
+  out += "\"";
+  out += ",\"deviceUuid\":\"";
+  out += jsonEscape(deviceUuid);
   out += "\"";
   out += "}";
   return out;
@@ -1738,6 +1746,17 @@ void registerRoutes() {
     }
     if (!rtc.writeDateTime(dt)) {
       gWebServer->send(500, "text/plain", "DS1302 write failed");
+      return;
+    }
+    String uuid;
+    String uuidError;
+    if (!deviceUuidEnsureFromDateTime(dt, uuid, uuidError)) {
+      String msg = "UUID save failed";
+      if (uuidError.length()) {
+        msg += ": ";
+        msg += uuidError;
+      }
+      gWebServer->send(500, "text/plain", msg);
       return;
     }
     gWebServer->send(200, "application/json", rtcDateTimeJson());
