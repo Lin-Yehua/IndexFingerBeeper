@@ -720,21 +720,35 @@ function renderSchedules() {
     intervalIn.min = "0";
     intervalIn.step = "1";
     intervalIn.value = String(Math.max(0, toInt(it.interval, 0)));
-    intervalIn.title = "提醒间隔(秒)";
+    intervalIn.id = `scheduleInterval-${it.id}`;
     intervalIn.addEventListener("change", () => { it.interval = Math.max(0, toInt(intervalIn.value, 0)); queueScheduleAutoSave(); });
+    const intervalWrap = document.createElement("div");
+    intervalWrap.className = "schedule-field";
+    const intervalLab = document.createElement("label");
+    intervalLab.className = "schedule-field-label";
+    intervalLab.setAttribute("for", intervalIn.id);
+    intervalLab.textContent = "提醒间隔(秒)";
+    intervalWrap.append(intervalLab, intervalIn);
 
     const timesIn = document.createElement("input");
     timesIn.type = "number";
     timesIn.min = "0";
     timesIn.step = "1";
     timesIn.value = String(Math.max(0, toInt(it.times, 0)));
-    timesIn.title = "提醒次数";
+    timesIn.id = `scheduleTimes-${it.id}`;
     timesIn.addEventListener("change", () => { it.times = Math.max(0, toInt(timesIn.value, 0)); queueScheduleAutoSave(); });
+    const timesWrap = document.createElement("div");
+    timesWrap.className = "schedule-field";
+    const timesLab = document.createElement("label");
+    timesLab.className = "schedule-field-label";
+    timesLab.setAttribute("for", timesIn.id);
+    timesLab.textContent = "提醒次数";
+    timesWrap.append(timesLab, timesIn);
 
     const tx = document.createElement("textarea"); tx.rows = 2; tx.placeholder = "内容（可选）"; tx.value = it.text || ""; autoGrow(tx);
     tx.addEventListener("input", () => { it.text = tx.value.replace(/\r?\n+/g, " ").trim(); autoGrow(tx); queueScheduleAutoSave(); });
 
-    row.append(ti, rp, intervalIn, timesIn, tx);
+    row.append(ti, rp, intervalWrap, timesWrap, tx);
     body.appendChild(row);
     wrap.append(head, body);
     const syncFold = () => {

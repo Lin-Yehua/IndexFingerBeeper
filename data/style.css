@@ -245,6 +245,19 @@ button:disabled {
   margin-top: 12px;
 }
 
+.schedule-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.schedule-field-label {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.2;
+}
+
 .input-btn {
   display: grid;
   grid-template-columns: 1fr auto;

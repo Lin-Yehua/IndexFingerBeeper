@@ -155,8 +155,14 @@
           </select>
         </div>
         <div class="grid3 compact">
-          <input id="scheduleAddInterval" type="number" min="0" step="1" value="0" placeholder="提醒间隔(秒)">
-          <input id="scheduleAddTimes" type="number" min="0" step="1" value="0" placeholder="提醒次数">
+          <div class="schedule-field">
+            <label class="schedule-field-label" for="scheduleAddInterval">提醒间隔(秒)</label>
+            <input id="scheduleAddInterval" type="number" min="0" step="1" value="0">
+          </div>
+          <div class="schedule-field">
+            <label class="schedule-field-label" for="scheduleAddTimes">提醒次数</label>
+            <input id="scheduleAddTimes" type="number" min="0" step="1" value="0">
+          </div>
         </div>
         <textarea id="scheduleAddText" rows="2" placeholder="日程内容（可选）"></textarea>
         <div class="btn-row schedule-add-action">
