@@ -26,6 +26,7 @@ const LS = {
 };
 const PAGE_SIZE = 10;
 const AUTO_SAVE_DELAY_MS = 1200;
+const DISABLE_RTC_SCHEDULE = true;
 
 const el = {
   tabMsg: $("tabMsg"), tabImg: $("tabImg"), panelMsg: $("panelMsg"), panelImg: $("panelImg"),
@@ -1016,23 +1017,30 @@ function bind() {
   if (el.btnCmdFoldAll) el.btnCmdFoldAll.addEventListener("click", () => setCmdCollapsedAll(true));
   if (el.btnCmdExpandAll) el.btnCmdExpandAll.addEventListener("click", () => setCmdCollapsedAll(false));
 
-  el.scheduleDate.addEventListener("change", () => { st.schedulePage = 1; renderSchedules(); });
-  el.btnScheduleAdd.addEventListener("click", addSchedule);
-  if (el.btnScheduleSave) el.btnScheduleSave.addEventListener("click", async () => { await saveSchedulesManual(); });
-  if (el.btnScheduleRetry) el.btnScheduleRetry.addEventListener("click", async () => { await saveSchedulesManual(); });
-  if (el.scheduleAutoSaveEnable) {
-    el.scheduleAutoSaveEnable.addEventListener("change", () => {
-      saveAutoSavePrefs();
-      if (!isScheduleAutoSaveEnabled()) {
-        if (st.scheduleAutoTimer) { clearTimeout(st.scheduleAutoTimer); st.scheduleAutoTimer = null; }
-        st.scheduleAutoResave = false;
-        setStatus(el.scheduleStatus, "日程自动保存已关闭");
-      } else {
-        setStatus(el.scheduleStatus, "日程自动保存已开启");
-      }
-    });
+  if (!DISABLE_RTC_SCHEDULE) {
+    if (el.scheduleDate) el.scheduleDate.addEventListener("change", () => { st.schedulePage = 1; renderSchedules(); });
+    if (el.btnScheduleAdd) el.btnScheduleAdd.addEventListener("click", addSchedule);
+    if (el.btnScheduleSave) el.btnScheduleSave.addEventListener("click", async () => { await saveSchedulesManual(); });
+    if (el.btnScheduleRetry) el.btnScheduleRetry.addEventListener("click", async () => { await saveSchedulesManual(); });
+    if (el.scheduleAutoSaveEnable) {
+      el.scheduleAutoSaveEnable.addEventListener("change", () => {
+        saveAutoSavePrefs();
+        if (!isScheduleAutoSaveEnabled()) {
+          if (st.scheduleAutoTimer) { clearTimeout(st.scheduleAutoTimer); st.scheduleAutoTimer = null; }
+          st.scheduleAutoResave = false;
+          setStatus(el.scheduleStatus, "日程自动保存已关闭");
+        } else {
+          setStatus(el.scheduleStatus, "日程自动保存已开启");
+        }
+      });
+    }
+    if (el.btnRtcSet) el.btnRtcSet.addEventListener("click", rtcSet);
+    if (el.btnRtcSyncPhone) el.btnRtcSyncPhone.addEventListener("click", rtcSyncPhone);
+  } else {
+    const scheduleCard = (el.rtcNow && el.rtcNow.closest(".card")) ||
+                         (el.scheduleList && el.scheduleList.closest(".card"));
+    if (scheduleCard) scheduleCard.hidden = true;
   }
-  el.btnRtcSet.addEventListener("click", rtcSet); el.btnRtcSyncPhone.addEventListener("click", rtcSyncPhone);
 
   el.insertVol.addEventListener("input", () => { setVolUi(el.insertVol.value, el.bgVol.value); if (st.volTimer) clearTimeout(st.volTimer); st.volTimer = setTimeout(async () => { st.volTimer = null; try { const d = await pushVol(false); setVolUi(d.insertVolume, d.bgVolume); } catch (_) {} }, 120); });
   el.bgVol.addEventListener("input", () => { setVolUi(el.insertVol.value, el.bgVol.value); if (st.volTimer) clearTimeout(st.volTimer); st.volTimer = setTimeout(async () => { st.volTimer = null; try { const d = await pushVol(false); setVolUi(d.insertVolume, d.bgVolume); } catch (_) {} }, 120); });
@@ -1062,10 +1070,19 @@ async function boot() {
   switchPush("msg"); bind(); initCollapsibleCards(); loadMsgLocal();
   el.portalUrl.value = portalRoot();
   setImgOffsetY(0);
-  const n = new Date(); el.scheduleDate.value = `${n.getFullYear()}-${pad2(n.getMonth() + 1)}-${pad2(n.getDate())}`;
+  const n = new Date();
+  if (el.scheduleDate) {
+    el.scheduleDate.value = `${n.getFullYear()}-${pad2(n.getMonth() + 1)}-${pad2(n.getDate())}`;
+  }
   clearPreview();
-  await Promise.all([loadCommands(), loadSchedules(), loadRtc(), loadDisplayAudio(), loadWireless(), loadBattery()]);
-  setInterval(loadRtc, 5000);
+  const bootTasks = [loadCommands(), loadDisplayAudio(), loadWireless(), loadBattery()];
+  if (!DISABLE_RTC_SCHEDULE) {
+    bootTasks.push(loadSchedules(), loadRtc());
+  }
+  await Promise.all(bootTasks);
+  if (!DISABLE_RTC_SCHEDULE) {
+    setInterval(loadRtc, 5000);
+  }
   setInterval(loadBattery, 5000);
 }
 

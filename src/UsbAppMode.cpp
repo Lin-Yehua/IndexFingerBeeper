@@ -967,7 +967,6 @@ bool initProjectResources() {
     Serial.println("[APP] /data.csv load failed from FAT");
     return false;
   }
-  (void)refreshTodayReminderSlotsFromRtc(true, true);
 
   Text.createSprite(320, 120);
   Text.fillSprite(TFT_BLACK);
@@ -2287,14 +2286,8 @@ void markSleepRtcContextForSleep() {
   gSleepRtcCtx.appMode = static_cast<uint8_t>(gAppLoopMode);
   gSleepRtcCtx.nextWakeSec = kRtcWakeDefaultSec;
   gSleepRtcCtx.pendingReminder = 0;
+  gSleepRtcCtx.expectedUnix = 0;
   gSleepRtcCtx.reminderMessage[0] = '\0';
-
-  uint64_t nowUnix = 0;
-  if (!readRtcUnix(nowUnix)) {
-    gSleepRtcCtx.expectedUnix = 0;
-    return;
-  }
-  gSleepRtcCtx.expectedUnix = nowUnix + static_cast<uint64_t>(kRtcWakeDefaultSec);
 }
 
 void waitWakeKeyReleaseBeforeSleep() {
@@ -2307,15 +2300,12 @@ void waitWakeKeyReleaseBeforeSleep() {
 }
 
 [[noreturn]] void enterDeepSleepNow(uint32_t wakeSec) {
-  if (wakeSec == 0) wakeSec = kRtcWakeDefaultSec;
-  if (wakeSec > kRtcWakeMaxSec) wakeSec = kRtcWakeMaxSec;
+  (void)wakeSec;
 
   esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
   esp_sleep_enable_ext0_wakeup(kWakeKeyGpio, 0);
-  esp_sleep_enable_timer_wakeup(static_cast<uint64_t>(wakeSec) * 1000000ULL);
-  Serial.printf("[SLEEP] enter deep sleep ext0(gpio=%d) timer=%us\n",
-                static_cast<int>(kWakeKeyGpio),
-                static_cast<unsigned int>(wakeSec));
+  Serial.printf("[SLEEP] enter deep sleep ext0(gpio=%d)\n",
+                static_cast<int>(kWakeKeyGpio));
   delay(20);
   esp_deep_sleep_start();
   while (true) {
@@ -3228,8 +3218,6 @@ void processAppLoop() {
       Serial.println("[WEB] /data.csv reload failed");
     }
   }
-  serviceScheduleInterruptByRtcMinute();
-
   const bool allowHostInterrupts =
       (gAppLoopMode == APP_MODE_AP_STA) ||
       (gAppLoopMode == APP_MODE_STA_ONLY) ||
@@ -3551,12 +3539,6 @@ void processAppLoop() {
           gStaNextFetchAllowedMs = 0;
           String okMsg = kStaConnectOkPrefix;
           okMsg += gStaNetSsid;
-          String ntpDetail;
-          if (syncDs1302FromStaNtp(ntpDetail)) {
-            Serial.printf("[STA] NTP sync -> DS1302 ok: %s\n", ntpDetail.c_str());
-          } else {
-            Serial.printf("[STA] NTP sync skipped/failed: %s\n", ntpDetail.c_str());
-          }
           playStaMessage(okMsg);
           return;
         }
@@ -3783,44 +3765,17 @@ void onStaOnlyInit(AppLoopMode mode)
 }
 
 bool appHandleRtcMaintenanceWakeIfNeeded() {
-  if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_TIMER) {
-    return false;
-  }
-  if (!hasValidSleepRtcContext()) {
-    return false;
-  }
-  Serial.println("[SLEEP] timer wake detected, run RTC maintenance");
-  const bool shouldContinueBoot = handleRtcMaintenanceWake();
-  return !shouldContinueBoot;
+  return false;
 }
 
 bool appShouldFastResumeFromDeepSleep() {
   const esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-  if (cause == ESP_SLEEP_WAKEUP_EXT0) {
-    return hasValidSleepRtcContext();
-  }
-  if (cause == ESP_SLEEP_WAKEUP_TIMER) {
-    return hasValidSleepRtcContext() && (gSleepRtcCtx.pendingReminder != 0);
-  }
-  return false;
+  return (cause == ESP_SLEEP_WAKEUP_EXT0) && hasValidSleepRtcContext();
 }
 
 bool appRestoreFromDeepSleepSnapshot() {
   if (!appShouldFastResumeFromDeepSleep()) {
     return false;
-  }
-  const bool timerReminderWake =
-      (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) &&
-      (gSleepRtcCtx.pendingReminder != 0);
-  char reminderMessage[kSleepTextMaxLen + 1] = {0};
-  if (timerReminderWake) {
-    memcpy(reminderMessage,
-           gSleepRtcCtx.reminderMessage,
-           sizeof(reminderMessage));
-    reminderMessage[sizeof(reminderMessage) - 1] = '\0';
-    if (!reminderMessage[0]) {
-      sanitizeMessageForSnapshot(String(kDefaultReminderMessage), reminderMessage);
-    }
   }
 
   SleepSnapshotData snapshot;
@@ -3829,17 +3784,12 @@ bool appRestoreFromDeepSleepSnapshot() {
     clearSleepRtcContext();
     return false;
   }
-  if (!applySleepSnapshot(snapshot, !timerReminderWake)) {
+  if (!applySleepSnapshot(snapshot, true)) {
     Serial.println("[SLEEP] snapshot apply failed, fallback normal app boot");
     clearSleepRtcContext();
     return false;
   }
   gSkipStartupPromptOnce = false;
-
-  if (timerReminderWake) {
-    (void)markCurrentMinuteScheduleAsTriggeredFromRtc();
-    playMessageWithGlitch(reminderMessage);
-  }
 
   (void)FFat.remove(kSleepSnapshotPath);
   clearSleepRtcContext();

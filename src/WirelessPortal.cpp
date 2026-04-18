@@ -1712,35 +1712,15 @@ void registerRoutes() {
   });
 
   gWebServer->on("/api/rtc", HTTP_GET, []() {
-    gWebServer->send(200, "application/json", rtcDateTimeJson());
+    gWebServer->send(410, "application/json", "{\"ok\":false,\"message\":\"rtc disabled\"}");
   });
 
   gWebServer->on("/api/rtc/set", HTTP_POST, []() {
-    Ds1302DateTime dt;
-    String err;
-    if (!parseRtcDateTimeFromRequest(dt, err)) {
-      gWebServer->send(400, "text/plain", err);
-      return;
-    }
-    if (!rtc.writeDateTime(dt)) {
-      gWebServer->send(500, "text/plain", "DS1302 write failed");
-      return;
-    }
-    gWebServer->send(200, "application/json", rtcDateTimeJson());
+    gWebServer->send(410, "text/plain", "rtc disabled");
   });
 
   gWebServer->on("/api/rtc/sync-phone", HTTP_POST, []() {
-    Ds1302DateTime dt;
-    String err;
-    if (!parseRtcDateTimeFromRequest(dt, err)) {
-      gWebServer->send(400, "text/plain", err);
-      return;
-    }
-    if (!rtc.writeDateTime(dt)) {
-      gWebServer->send(500, "text/plain", "DS1302 write failed");
-      return;
-    }
-    gWebServer->send(200, "application/json", rtcDateTimeJson());
+    gWebServer->send(410, "text/plain", "rtc disabled");
   });
 
   gWebServer->on("/api/battery", HTTP_GET, []() {
@@ -2247,23 +2227,11 @@ void registerRoutes() {
   });
 
   gWebServer->on("/api/schedule", HTTP_GET, []() {
-    if (!fatMounted) {
-      gWebServer->send(503, "text/plain", "FAT not mounted");
-      return;
-    }
-    gWebServer->send(200, "text/plain", readScheduleCsvText());
+    gWebServer->send(410, "text/plain", "schedule disabled");
   });
 
   gWebServer->on("/api/schedule", HTTP_POST, []() {
-    String content = gWebServer->arg("content");
-    if (!content.length() && gWebServer->hasArg("plain")) {
-      content = gWebServer->arg("plain");
-    }
-    if (!saveScheduleCsvText(content)) {
-      gWebServer->send(500, "text/plain", "save failed");
-      return;
-    }
-    gWebServer->send(200, "text/plain", "saved /schedule.csv");
+    gWebServer->send(410, "text/plain", "schedule disabled");
   });
 
   gWebServer->on("/api/send", HTTP_POST, []() {
