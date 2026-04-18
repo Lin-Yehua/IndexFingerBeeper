@@ -15,9 +15,9 @@ bool ds1302IsValidDateTime(const Ds1302DateTime &dt);
 
 class Ds1302Rtc {
  public:
-  static constexpr uint8_t kDefaultClkPin = 45;
+  static constexpr uint8_t kDefaultClkPin = 47;
   static constexpr uint8_t kDefaultDatPin = 48;
-  static constexpr uint8_t kDefaultRstPin = 47;
+  static constexpr uint8_t kDefaultRstPin = 45;
 
   Ds1302Rtc(uint8_t clkPin = kDefaultClkPin,
             uint8_t datPin = kDefaultDatPin,

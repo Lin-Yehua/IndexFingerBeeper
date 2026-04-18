@@ -1,5 +1,5 @@
 ﻿#include "Ds1302Rtc.h"
-Ds1302Rtc rtc(45, 48, 47);  // CLK, DAT, RST
+Ds1302Rtc rtc(47, 48, 45);  // CLK, DAT, RST
 namespace {
 
 constexpr uint8_t kRegSeconds = 0x80;
