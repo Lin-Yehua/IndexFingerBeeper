@@ -2596,9 +2596,8 @@ static bool pushStaMessageQueue(const String &message, bool prioritizeBottleMess
   if (prioritizeBottleMessage) {
     if (!gStaBottlePriorityActive) {
       gStaBottlePriorityActive = true;
-      // Queue empty: first bottle goes to head.
-      // Queue non-empty: start overriding from the next slot.
-      gStaBottlePriorityNextLogical = (gStaMsgQueueSize > 0) ? 1 : 0;
+      // Always start overriding from queue head.
+      gStaBottlePriorityNextLogical = 0;
     }
     if (gStaBottlePriorityNextLogical > gStaMsgQueueSize) {
       gStaBottlePriorityNextLogical = gStaMsgQueueSize;
