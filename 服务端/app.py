@@ -17,7 +17,7 @@ from flask import (
     send_from_directory,
     url_for,
 )
-from werkzeug.serving import make_server
+from werkzeug.serving import WSGIRequestHandler, make_server
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WEB_UI_DIR = os.path.join(BASE_DIR, "ui")
@@ -48,11 +48,29 @@ API_HTTP_PORT = int(os.environ.get("API_HTTP_PORT", "80"))
 # - prefer WEB_HTTP_PORT
 # - fallback to legacy WEB_HTTPS_PORT for compatibility
 WEB_HTTP_PORT = int(os.environ.get("WEB_HTTP_PORT", os.environ.get("WEB_HTTPS_PORT", "8080")))
+CLIENT_SOCKET_TIMEOUT_SEC = float(os.environ.get("CSV_API_CLIENT_TIMEOUT_SEC", "8"))
 
 NOTICE_LEVELS = {"info", "ok", "warn", "error"}
 
 api_app = Flask("csv_api_http")
 web_app = Flask("csv_api_web", template_folder=WEB_UI_DIR, static_folder=None)
+
+
+class TimeoutWSGIRequestHandler(WSGIRequestHandler):
+    def setup(self) -> None:
+        super().setup()
+        try:
+            self.connection.settimeout(CLIENT_SOCKET_TIMEOUT_SEC)
+        except OSError:
+            pass
+
+
+@api_app.after_request
+def force_close_api_connection(response):
+    # ESP abrupt power-off during HTTP receive can leave keep-alive sockets hanging.
+    # For the API server, prefer short stateless requests and always close connection.
+    response.headers["Connection"] = "close"
+    return response
 
 
 def ensure_data_dir() -> None:
@@ -259,7 +277,16 @@ def redirect_with_notice(
 class ServerThread(threading.Thread):
     def __init__(self, app: Flask, host: str, port: int, ssl_context=None):
         super().__init__(daemon=True)
-        self._server = make_server(host, port, app, ssl_context=ssl_context)
+        self._server = make_server(
+            host,
+            port,
+            app,
+            threaded=True,
+            request_handler=TimeoutWSGIRequestHandler,
+            ssl_context=ssl_context,
+        )
+        if hasattr(self._server, "daemon_threads"):
+            self._server.daemon_threads = True
 
     def run(self) -> None:
         self._server.serve_forever()

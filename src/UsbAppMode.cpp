@@ -2593,11 +2593,12 @@ static bool pushStaMessageQueue(const String &message, bool prioritizeBottleMess
   if (xSemaphoreTake(gStaMsgQueueMutex, pdMS_TO_TICKS(200)) != pdTRUE) return false;
 
   bool ok = false;
-  if (prioritizeBottleMessage && gStaMsgQueueSize > 0) {
+  if (prioritizeBottleMessage) {
     if (!gStaBottlePriorityActive) {
       gStaBottlePriorityActive = true;
-      // logical 0 means queue head (the very next message to be shown on key press).
-      gStaBottlePriorityNextLogical = 0;
+      // Queue empty: first bottle goes to head.
+      // Queue non-empty: start overriding from the next slot.
+      gStaBottlePriorityNextLogical = (gStaMsgQueueSize > 0) ? 1 : 0;
     }
     if (gStaBottlePriorityNextLogical > gStaMsgQueueSize) {
       gStaBottlePriorityNextLogical = gStaMsgQueueSize;
@@ -2612,15 +2613,13 @@ static bool pushStaMessageQueue(const String &message, bool prioritizeBottleMess
     } else {
       ok = pushStaMessageQueueLocked(normalized);
       if (ok) {
-        // Keep consuming the tail for subsequent bottle messages.
+        // Continue from tail for subsequent bottle messages.
         gStaBottlePriorityNextLogical = gStaMsgQueueSize;
       }
     }
   } else {
-    if (!prioritizeBottleMessage) {
-      gStaBottlePriorityActive = false;
-      gStaBottlePriorityNextLogical = 0;
-    }
+    gStaBottlePriorityActive = false;
+    gStaBottlePriorityNextLogical = 0;
     ok = pushStaMessageQueueLocked(normalized);
   }
 
