@@ -1317,7 +1317,7 @@ static constexpr const char *kStaConnectingPrefix =
 static constexpr const char *kStaRetryPrefix =
     u8"|重试次数";
 static constexpr const char *kStaConnectOkPrefix =
-    u8"WIFI连接成功";
+    u8"WiFi连接成功 | 配置网址         http://";
 static constexpr const char *kStaConnectFailMsg =
     u8"WIFI\u8FDE\u63A5\u5931\u8D25\uFF1A\u77ED\u6309\u5207\u6362\u6A21\u5F0F";
 static constexpr const char *kStaCloudQueueEmptyMsg =
@@ -3909,7 +3909,7 @@ void processAppLoop() {
           gStaLastQueueEmptyHintMs = 0;
           gStaNextFetchAllowedMs = 0;
           String okMsg = kStaConnectOkPrefix;
-          okMsg += gStaNetSsid;
+          okMsg += WiFi.localIP().toString();
           String ntpDetail;
           if (syncDs1302FromStaNtp(ntpDetail)) {
             Serial.printf("[STA] NTP sync -> DS1302 ok: %s\n", ntpDetail.c_str());
