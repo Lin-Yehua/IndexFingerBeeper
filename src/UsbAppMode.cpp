@@ -666,6 +666,24 @@ static void preloadSettingIniForBootAnimation() {
   }
 }
 
+static bool ensureMixerInitialized(const char *contextTag) {
+  if (mixer.isRunning()) return true;
+
+  if (!mountFat()) {
+    Serial.printf("[%s] mount FAT failed for mixer init\n", contextTag);
+    return false;
+  }
+
+  WavMixerI2S::I2SPinConfig pins = {.bck = 40, .ws = 39, .dout = 41};
+  if (!mixer.begin(pins)) {
+    Serial.printf("[%s] Mixer init failed\n", contextTag);
+    return false;
+  }
+  mixer.startOnCore(0);
+  Serial.printf("[%s] mixer initialized\n", contextTag);
+  return true;
+}
+
 void runBootAnimationTaskStart() {
   if (gBootAnimRunning) return;
 
@@ -709,6 +727,15 @@ void runBootAnimationTaskStart() {
 
   gBootAnimWaiter = xTaskGetCurrentTaskHandle();
   gBootAnimUsbDetected = usbHostActive;
+
+  if (ensureMixerInitialized("BOOT")) {
+    mixer.setInsertGain(gInsertGain);
+    mixer.setBgGain(gBgGain);
+    mixer.playBGnoLoop("/Boot.wav");
+  } else {
+    Serial.println("[BOOT] mixer not ready, skip Boot.wav");
+  }
+  
   const BaseType_t taskOk = xTaskCreate(
       task_LogoFadeInAndMove,
       "LogoFadeMove",
@@ -718,6 +745,7 @@ void runBootAnimationTaskStart() {
       nullptr);
   if (taskOk != pdPASS) {
     Serial.println("[BOOT] animation task create failed");
+    mixer.stopBG();
     gBootAnimWaiter = nullptr;
     gBootAnimRunning = false;
     return;
@@ -755,6 +783,9 @@ void runBootAnimationTaskWait() {
   if (gBootAnimUsbDetected) {
     Serial.println("[BOOT] USB detected during boot animation");
   }
+
+  // Ensure boot BGM does not leak into USB/App mode transition.
+  mixer.stopBG();
 
   gBootAnimRunning = false;
   gBootAnimWaiter = nullptr;
@@ -1092,12 +1123,9 @@ bool initProjectResources() {
     Serial.println("[APP] Oxta14.vlw missing, boot logo text falls back to default font");
   }
 
-  WavMixerI2S::I2SPinConfig pins = {.bck = 40, .ws = 39, .dout = 41};
-  if (!mixer.begin(pins)) {
-    Serial.println("[APP] Mixer init failed");
+  if (!ensureMixerInitialized("APP")) {
     return false;
   }
-  mixer.startOnCore(0);
 
   if (!mountFat()) {
     Serial.println("[APP] mount FAT failed");

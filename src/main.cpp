@@ -17,6 +17,9 @@ void setup() {
   ledcSetup(0, 40000, 8);
   ledcAttachPin(14, 0);
   ledcWrite(0, 0);
+  // Enable audio output path early so boot animation BGM can be heard.
+  pinMode(42, OUTPUT);
+  digitalWrite(42, HIGH);
   (void)appHandleRtcMaintenanceWakeIfNeeded();
 
   const bool fastResume = appShouldFastResumeFromDeepSleep();
@@ -34,7 +37,6 @@ void setup() {
       }
     }
   } else {
-    runBootAnimationTaskStart();
     msc.vendorID("ESP32");
     msc.productID("S3_FAT_MSC");
     msc.productRevision("1.0");
@@ -58,6 +60,7 @@ void setup() {
     USB.begin();
     Serial.println("[BOOT] USB initialized");
 
+    runBootAnimationTaskStart();
     runBootAnimationTaskWait();
 
     const uint32_t t0 = millis();
