@@ -44,10 +44,10 @@ namespace {
 
 constexpr uint8_t kBacklightDutyOff = 0;
 constexpr int kDefaultBacklightCloseTimeSec = 20;
+constexpr int kDefaultSleepTimeMin = 1;
 constexpr uint32_t kBacklightTaskTickMs = 100UL;
 constexpr uint32_t kBootAnimPollMs = 10UL;
 constexpr uint32_t kBootAnimMaxWaitMs = 12000UL;
-constexpr uint32_t kStaOnlySleepAfterOffMs = 60000UL;
 constexpr gpio_num_t kWakeKeyGpio = GPIO_NUM_2;
 constexpr uint32_t kRtcWakeDefaultSec = 60U;
 constexpr uint32_t kRtcWakeMaxSec = 30U * 60U;
@@ -352,6 +352,16 @@ uint32_t backlightCloseDelayMs() {
   return static_cast<uint32_t>(closeSec) * 1000UL;
 }
 
+uint32_t staOnlySleepAfterOffDelayMs() {
+  int minutes = gSleepTimeMin;
+  if (minutes < 0) minutes = 0;
+  uint64_t waitMs = static_cast<uint64_t>(minutes) * 60ULL * 1000ULL;
+  if (waitMs > static_cast<uint64_t>(0x7FFFFFFFUL)) {
+    waitMs = static_cast<uint64_t>(0x7FFFFFFFUL);
+  }
+  return static_cast<uint32_t>(waitMs);
+}
+
 bool staOnlySleepTimeoutReached() {
   int backlightTimeSec = -1;
   uint32_t lastActivity = 0;
@@ -367,11 +377,11 @@ bool staOnlySleepTimeoutReached() {
   const uint32_t dimMs = static_cast<uint32_t>(backlightTimeSec) * 1000UL;
   const uint32_t offAtMs = lastActivity + dimMs + backlightCloseDelayMs();
   const uint32_t nowMs = millis();
-  return (nowMs - offAtMs) >= kStaOnlySleepAfterOffMs;
+  return (nowMs - offAtMs) >= staOnlySleepAfterOffDelayMs();
 }
 
 [[noreturn]] void enterStaOnlyDeepSleep() {
-  Serial.println("[STA_ONLY] backlight off for 60s, entering deep sleep");
+  Serial.printf("[STA_ONLY] backlight off for %d min, entering deep sleep\n", gSleepTimeMin);
   const bool snapshotOk = saveSleepSnapshotToFat();
   if (snapshotOk) {
     markSleepRtcContextForSleep();
@@ -897,6 +907,7 @@ void applyAudioGainsFromSettingIni() {
   static constexpr float kDefaultBacklightLevel = 1.0f;
   static constexpr int kDefaultBacklightTimeSec = -1;
   static constexpr int kDefaultBacklightCloseTime = kDefaultBacklightCloseTimeSec;
+  static constexpr int kDefaultSleepTimeMinutes = kDefaultSleepTimeMin;
 
   gInsertGain = kDefaultInsertGain;
   gBgGain = kDefaultBgGain;
@@ -908,6 +919,7 @@ void applyAudioGainsFromSettingIni() {
   gEnableReprint = kDefaultEnableReprint;
   gBacklightTimeSec = kDefaultBacklightTimeSec;
   gBacklightCloseTimeSec = kDefaultBacklightCloseTime;
+  gSleepTimeMin = kDefaultSleepTimeMinutes;
 
   fs::File f = FFat.open("/setting.ini", FILE_READ);
   if (!f) {
@@ -925,6 +937,7 @@ void applyAudioGainsFromSettingIni() {
   bool gotBacklight = false;
   bool gotBacklightTime = false;
   bool gotBacklightCloseTime = false;
+  bool gotSleepTime = false;
   while (f.available()) {
     String line = f.readStringUntil('\n');
     line.trim();
@@ -978,6 +991,10 @@ void applyAudioGainsFromSettingIni() {
       const int parsedCloseSec = static_cast<int>(value.toInt());
       gBacklightCloseTimeSec = (parsedCloseSec < 0) ? 0 : parsedCloseSec;
       gotBacklightCloseTime = true;
+    } else if (key == "sleeptime" || key == "sleepafteroffmin" || key == "backlightoffsleepmin") {
+      const int parsedSleepMin = static_cast<int>(value.toInt());
+      gSleepTimeMin = (parsedSleepMin < 0) ? 0 : parsedSleepMin;
+      gotSleepTime = true;
     }
   }
   f.close();
@@ -996,18 +1013,20 @@ void applyAudioGainsFromSettingIni() {
   if (!gotBacklight) Serial.printf("[APP] BackLight missing, default=%.3f\n", gBacklightLevel);
   if (!gotBacklightTime) Serial.printf("[APP] BacklightTime missing, default=%d\n", gBacklightTimeSec);
   if (!gotBacklightCloseTime) Serial.printf("[APP] BacklightCloseTime missing, default=%d\n", gBacklightCloseTimeSec);
+  if (!gotSleepTime) Serial.printf("[APP] SleepTime missing, default=%d\n", gSleepTimeMin);
   Serial.printf("[APP] gains: insert=%.3f bg=%.3f backlight=%.3f\n",
                 gInsertGain,
                 gBgGain,
                 gBacklightLevel);
-  Serial.printf("[APP] glitch: p3=%d p5=%d insertBase=%d insertInc=%d reprint=%d backlightTime=%d closeTime=%d\n",
+  Serial.printf("[APP] glitch: p3=%d p5=%d insertBase=%d insertInc=%d reprint=%d backlightTime=%d closeTime=%d sleepTimeMin=%d\n",
                 gWrongProb3,
                 gWrongProb5,
                 gInsertSoundBaseProbability,
                 gInsertSoundIncreaseProbability,
                 gEnableReprint ? 1 : 0,
                 gBacklightTimeSec,
-                gBacklightCloseTimeSec);
+                gBacklightCloseTimeSec,
+                gSleepTimeMin);
 }
 
 void unmountFat() {

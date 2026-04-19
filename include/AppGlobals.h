@@ -54,5 +54,6 @@ extern int gInsertSoundIncreaseProbability;
 extern bool gEnableReprint;
 extern int gBacklightTimeSec;
 extern int gBacklightCloseTimeSec;
+extern int gSleepTimeMin;
 extern bool firstFlag;
 extern uint8_t RUNSTATE;

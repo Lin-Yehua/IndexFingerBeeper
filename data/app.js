@@ -42,7 +42,7 @@ const el = {
   cmdList: $("cmdList"), cmdPager: $("cmdPager"), cmdAddInput: $("cmdAddInput"), btnCmdAdd: $("btnCmdAdd"), btnCmdSave: $("btnCmdSave"), btnCmdRetry: $("btnCmdRetry"), cmdAutoSaveEnable: $("cmdAutoSaveEnable"), cmdAdvanced: $("cmdAdvanced"), btnCmdFoldAll: $("btnCmdFoldAll"), btnCmdExpandAll: $("btnCmdExpandAll"), cmdStatus: $("cmdStatus"),
   rtcNow: $("rtcNow"), rtcYear: $("rtcYear"), rtcMonth: $("rtcMonth"), rtcDay: $("rtcDay"), rtcHour: $("rtcHour"), rtcMinute: $("rtcMinute"), rtcSecond: $("rtcSecond"), btnRtcSet: $("btnRtcSet"), btnRtcSyncPhone: $("btnRtcSyncPhone"), rtcStatus: $("rtcStatus"),
   scheduleDate: $("scheduleDate"), scheduleList: $("scheduleList"), schedulePager: $("schedulePager"), scheduleAddTime: $("scheduleAddTime"), scheduleAddRepeat: $("scheduleAddRepeat"), scheduleAddInterval: $("scheduleAddInterval"), scheduleAddTimes: $("scheduleAddTimes"), scheduleAddText: $("scheduleAddText"), btnScheduleAdd: $("btnScheduleAdd"), btnScheduleSave: $("btnScheduleSave"), btnScheduleRetry: $("btnScheduleRetry"), scheduleAutoSaveEnable: $("scheduleAutoSaveEnable"), scheduleAdvanced: $("scheduleAdvanced"), scheduleStatus: $("scheduleStatus"),
-  bgVol: $("bgVol"), insertVol: $("insertVol"), bgVolVal: $("bgVolVal"), insertVolVal: $("insertVolVal"), backlight: $("backlight"), backlightTime: $("backlightTime"), backlightCloseTime: $("backlightCloseTime"), btnSaveDisplay: $("btnSaveDisplay"), displayStatus: $("displayStatus"),
+  bgVol: $("bgVol"), insertVol: $("insertVol"), bgVolVal: $("bgVolVal"), insertVolVal: $("insertVolVal"), backlight: $("backlight"), backlightTime: $("backlightTime"), backlightCloseTime: $("backlightCloseTime"), sleepAfterOffMin: $("sleepAfterOffMin"), btnSaveDisplay: $("btnSaveDisplay"), displayStatus: $("displayStatus"),
   apSsid: $("apSsid"), apPassword: $("apPassword"), apChannel: $("apChannel"), btnSaveAp: $("btnSaveAp"),
   staSsid: $("staSsid"), staPassword: $("staPassword"), staNet: $("staNet"), btnSaveSta: $("btnSaveSta"),
   hostMac: $("hostMac"), btnSaveHostMac: $("btnSaveHostMac"),
@@ -954,16 +954,21 @@ async function loadDisplayAudio() {
   try {
     const [vr, fr] = await Promise.all([fetch("/api/volume"), fetch("/api/effects")]); const vd = await vr.json(); const fd = await fr.json();
     if (vr.ok) setVolUi(Number.isFinite(vd.insertVolume) ? vd.insertVolume : vd.volume, Number.isFinite(vd.bgVolume) ? vd.bgVolume : vd.volume);
-    if (fr.ok) { el.backlight.value = String(fd.backlight ?? 1); el.backlightTime.value = String(fd.backlightTime ?? -1); el.backlightCloseTime.value = String(fd.backlightCloseTime ?? 20); }
+    if (fr.ok) {
+      el.backlight.value = String(fd.backlight ?? 1);
+      el.backlightTime.value = String(fd.backlightTime ?? -1);
+      el.backlightCloseTime.value = String(fd.backlightCloseTime ?? 20);
+      if (el.sleepAfterOffMin) el.sleepAfterOffMin.value = String(fd.sleepAfterOffMin ?? fd.SleepTime ?? 1);
+    }
     setStatus(el.displayStatus, "显示与音量参数已同步");
   } catch (e) { setStatus(el.displayStatus, `加载失败: ${e.message}`, true); }
 }
 async function saveDisplay() {
   try {
-    const b = new FormData(); b.append("backlight", String(parseFloat(el.backlight.value || "1"))); b.append("backlightTime", String(toInt(el.backlightTime.value, -1))); b.append("backlightCloseTime", String(toInt(el.backlightCloseTime.value, 20)));
+    const b = new FormData(); b.append("backlight", String(parseFloat(el.backlight.value || "1"))); b.append("backlightTime", String(toInt(el.backlightTime.value, -1))); b.append("backlightCloseTime", String(toInt(el.backlightCloseTime.value, 20))); b.append("sleepAfterOffMin", String(toInt(el.sleepAfterOffMin ? el.sleepAfterOffMin.value : 1, 1)));
     const r = await fetch("/api/effects", { method: "POST", body: b }); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`); const d = JSON.parse(raw);
     await loadDisplayAudio();
-    setStatus(el.displayStatus, `保存成功: 亮度=${d.backlight}, 息屏=${d.backlightTime}s, 关闭延时=${d.backlightCloseTime}s`);
+    setStatus(el.displayStatus, `保存成功: 亮度=${d.backlight}, 息屏=${d.backlightTime}s, 关闭延时=${d.backlightCloseTime}s, 熄屏休眠=${d.sleepAfterOffMin}min`);
   } catch (e) { setStatus(el.displayStatus, `保存失败: ${e.message}`, true); }
 }
 async function loadWireless() {

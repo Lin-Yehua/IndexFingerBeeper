@@ -1452,13 +1452,15 @@ bool persistEffectSettingsToSettingIni(int wrongProb3,
                                        bool enableReprint,
                                        float backlightLevel,
                                        int backlightTimeSec,
-                                       int backlightCloseTimeSec) {
+                                       int backlightCloseTimeSec,
+                                       int sleepTimeMin) {
   if (!fatMounted) return false;
 
   wrongProb3 = constrain(wrongProb3, 0, 100);
   wrongProb5 = constrain(wrongProb5, 0, 100);
   backlightLevel = clampGain(backlightLevel);
   if (backlightCloseTimeSec < 0) backlightCloseTimeSec = 0;
+  if (sleepTimeMin < 0) sleepTimeMin = 0;
 
   String original;
   if (FFat.exists("/setting.ini")) {
@@ -1474,8 +1476,9 @@ bool persistEffectSettingsToSettingIni(int wrongProb3,
   bool foundBacklight = false;
   bool foundBacklightTime = false;
   bool foundBacklightCloseTime = false;
+  bool foundSleepTime = false;
   String output;
-  output.reserve(original.length() + 200);
+  output.reserve(original.length() + 240);
 
   int start = 0;
   while (start <= original.length()) {
@@ -1508,6 +1511,9 @@ bool persistEffectSettingsToSettingIni(int wrongProb3,
         } else if (key == "backlightclosetime") {
           line = "BacklightCloseTime = " + String(backlightCloseTimeSec) + ";";
           foundBacklightCloseTime = true;
+        } else if (key == "sleeptime" || key == "sleepafteroffmin" || key == "backlightoffsleepmin") {
+          line = "SleepTime = " + String(sleepTimeMin) + ";";
+          foundSleepTime = true;
         }
       }
     }
@@ -1544,6 +1550,10 @@ bool persistEffectSettingsToSettingIni(int wrongProb3,
   if (!foundBacklightCloseTime) {
     if (output.length() && output[output.length() - 1] != '\n') output += '\n';
     output += "BacklightCloseTime = " + String(backlightCloseTimeSec) + ";\n";
+  }
+  if (!foundSleepTime) {
+    if (output.length() && output[output.length() - 1] != '\n') output += '\n';
+    output += "SleepTime = " + String(sleepTimeMin) + ";\n";
   }
 
   fs::File wf = FFat.open("/setting.ini", "w");
@@ -1637,6 +1647,8 @@ String statusJson() {
   out += String(gBacklightTimeSec);
   out += ",\"backlightCloseTime\":";
   out += String(gBacklightCloseTimeSec);
+  out += ",\"sleepAfterOffMin\":";
+  out += String(gSleepTimeMin);
   out += ",\"imagePending\":";
   out += imagePending ? "true" : "false";
   out += ",\"imageWidth\":";
@@ -1951,6 +1963,8 @@ void registerRoutes() {
     out += String(gBacklightTimeSec);
     out += ",\"backlightCloseTime\":";
     out += String(gBacklightCloseTimeSec);
+    out += ",\"sleepAfterOffMin\":";
+    out += String(gSleepTimeMin);
     out += "}";
     gWebServer->send(200, "application/json", out);
   });
@@ -1962,6 +1976,7 @@ void registerRoutes() {
     float nextBacklightLevel = gBacklightLevel;
     int nextBacklightTime = gBacklightTimeSec;
     int nextBacklightCloseTime = gBacklightCloseTimeSec;
+    int nextSleepTimeMin = gSleepTimeMin;
     bool hasAny = false;
 
     String wrong3Raw = gWebServer->arg("wrongProb3");
@@ -2039,6 +2054,21 @@ void registerRoutes() {
       hasAny = true;
     }
 
+    String sleepTimeRaw = gWebServer->arg("sleepAfterOffMin");
+    if (!sleepTimeRaw.length() && gWebServer->hasArg("SleepTime")) {
+      sleepTimeRaw = gWebServer->arg("SleepTime");
+    }
+    sleepTimeRaw.trim();
+    if (sleepTimeRaw.length()) {
+      int parsed = 0;
+      if (!parseIntString(sleepTimeRaw, parsed) || parsed < 0) {
+        gWebServer->send(400, "text/plain", "invalid sleepAfterOffMin");
+        return;
+      }
+      nextSleepTimeMin = parsed;
+      hasAny = true;
+    }
+
     String backlightLevelRaw = gWebServer->arg("backlight");
     if (!backlightLevelRaw.length() && gWebServer->hasArg("BackLight")) {
       backlightLevelRaw = gWebServer->arg("BackLight");
@@ -2065,13 +2095,15 @@ void registerRoutes() {
     setBacklightLevel(nextBacklightLevel);
     setBacklightTimeSeconds(nextBacklightTime);
     gBacklightCloseTimeSec = nextBacklightCloseTime;
+    gSleepTimeMin = nextSleepTimeMin;
 
     if (!persistEffectSettingsToSettingIni(gWrongProb3,
                                            gWrongProb5,
                                            gEnableReprint,
                                            gBacklightLevel,
                                            gBacklightTimeSec,
-                                           gBacklightCloseTimeSec)) {
+                                           gBacklightCloseTimeSec,
+                                           gSleepTimeMin)) {
       gWebServer->send(500, "text/plain", "settings applied but save /setting.ini failed");
       return;
     }
@@ -2088,6 +2120,8 @@ void registerRoutes() {
     out += String(gBacklightTimeSec);
     out += ",\"backlightCloseTime\":";
     out += String(gBacklightCloseTimeSec);
+    out += ",\"sleepAfterOffMin\":";
+    out += String(gSleepTimeMin);
     out += "}";
     gWebServer->send(200, "application/json", out);
   });

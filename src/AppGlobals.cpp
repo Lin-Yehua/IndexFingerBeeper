@@ -42,5 +42,6 @@ int gInsertSoundIncreaseProbability = 5;
 bool gEnableReprint = true;
 int gBacklightTimeSec = -1;
 int gBacklightCloseTimeSec = 20;
+int gSleepTimeMin = 1;
 bool firstFlag = false;
 uint8_t RUNSTATE = 0;

@@ -276,6 +276,10 @@ button:disabled {
   gap: 10px;
 }
 
+.sleep-after-off-field {
+  grid-column: 3;
+}
+
 .grid6 {
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
@@ -539,6 +543,10 @@ button:disabled {
   .grid2,
   .grid3 {
     grid-template-columns: 1fr;
+  }
+
+  .sleep-after-off-field {
+    grid-column: auto;
   }
 
   .input-btn {
