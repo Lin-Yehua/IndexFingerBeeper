@@ -1564,6 +1564,8 @@ String statusJson() {
   const UBaseType_t immediateQueued = immediatePendingCount();
   const UBaseType_t queued = regularQueued + immediateQueued;
   const UBaseType_t hostQueued = gHostMessageQueue ? uxQueueMessagesWaiting(gHostMessageQueue) : 0;
+  BatteryStatus batteryStatus{};
+  const bool batteryOk = appGetBatteryStatus(batteryStatus);
   bool pendingReload = false;
   bool imagePending = false;
   uint16_t imageWidth = 0;
@@ -1592,6 +1594,16 @@ String statusJson() {
   out += pendingReload ? "true" : "false";
   out += ",\"hostQueue\":";
   out += String(static_cast<unsigned int>(hostQueued));
+  out += ",\"batteryOk\":";
+  out += batteryOk ? "true" : "false";
+  out += ",\"batteryPercent\":";
+  out += String(batteryStatus.percent);
+  out += ",\"batteryCharging\":";
+  out += batteryStatus.charging ? "true" : "false";
+  out += ",\"batteryVin\":";
+  out += String(batteryStatus.vinVoltage, 3);
+  out += ",\"batteryVinFiltered\":";
+  out += String(batteryStatus.filteredVinVoltage, 3);
   out += ",\"volume\":";
   out += String(masterVolumePercent());
   out += ",\"insertVolume\":";
@@ -1763,7 +1775,29 @@ void registerRoutes() {
   });
 
   gWebServer->on("/api/battery", HTTP_GET, []() {
-    gWebServer->send(200, "application/json", "{\"ok\":false,\"message\":\"battery sensor not configured\"}");
+    BatteryStatus batteryStatus{};
+    const bool ok = appGetBatteryStatus(batteryStatus);
+    if (!ok) {
+      gWebServer->send(200, "application/json", "{\"ok\":false,\"message\":\"battery not ready\"}");
+      return;
+    }
+
+    String out = "{\"ok\":true,\"percent\":";
+    out += String(batteryStatus.percent);
+    out += ",\"charging\":";
+    out += batteryStatus.charging ? "true" : "false";
+    out += ",\"vinVoltage\":";
+    out += String(batteryStatus.vinVoltage, 3);
+    out += ",\"filteredVinVoltage\":";
+    out += String(batteryStatus.filteredVinVoltage, 3);
+    out += ",\"pinVoltage\":";
+    out += String(batteryStatus.pinVoltage, 3);
+    out += ",\"rawAdc\":";
+    out += String(batteryStatus.rawAdc);
+    out += ",\"updatedMs\":";
+    out += String(batteryStatus.updatedMs);
+    out += "}";
+    gWebServer->send(200, "application/json", out);
   });
 
   gWebServer->on("/api/volume", HTTP_GET, []() {

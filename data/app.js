@@ -976,8 +976,11 @@ async function saveHostMac() {
 async function loadBattery() {
   try {
     const r = await fetch("/api/battery"); const d = await r.json(); if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    if (!d.ok) return setStatus(el.batteryStatus, "未接入电池检测硬件", true);
-    setStatus(el.batteryStatus, `电量: ${d.percent}%`);
+    if (!d.ok) return setStatus(el.batteryStatus, "电池状态未就绪", true);
+    const chargingText = d.charging ? "充电中" : "放电中";
+    const vin = Number(d.filteredVinVoltage);
+    const vinText = Number.isFinite(vin) ? ` | VIN: ${vin.toFixed(2)}V` : "";
+    setStatus(el.batteryStatus, `电量: ${d.percent}% | ${chargingText}${vinText}`);
   } catch (e) { setStatus(el.batteryStatus, `读取失败: ${e.message}`, true); }
 }
 

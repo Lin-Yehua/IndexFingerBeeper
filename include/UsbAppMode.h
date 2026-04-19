@@ -44,6 +44,21 @@ void notifyBacklightActivity();
 void setBacklightTimeSeconds(int seconds);
 void setBacklightLevel(float level);
 
+struct BatteryStatus {
+  bool available = false;
+  bool initialized = false;
+  bool charging = false;
+  uint16_t rawAdc = 0;
+  float pinVoltage = 0.0f;
+  float vinVoltage = 0.0f;
+  float filteredVinVoltage = 0.0f;
+  int percent = 0;
+  uint32_t updatedMs = 0;
+};
+
+void serviceBatteryMonitor(bool force = false);
+bool appGetBatteryStatus(BatteryStatus &outStatus);
+
 bool appHandleRtcMaintenanceWakeIfNeeded();
 bool appShouldFastResumeFromDeepSleep();
 bool appRestoreFromDeepSleepSnapshot();

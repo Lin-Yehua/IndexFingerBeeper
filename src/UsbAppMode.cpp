@@ -436,6 +436,150 @@ void ensureBacklightTaskStarted() {
 
 }  // namespace
 
+namespace {
+
+constexpr uint8_t kBatteryAdcPin = 1;               // IO1
+constexpr float kBatteryDividerRatio = 2.0f;        // 47k:47k divider -> VIN = 2 * Vpin
+constexpr uint32_t kBatteryUpdateIntervalMs = 30000UL;
+constexpr uint8_t kBatterySampleCount = 8;
+constexpr uint32_t kBatterySampleGapMs = 2UL;
+constexpr float kBatteryFilterAlpha = 0.35f;
+constexpr float kBatteryVoltageEmpty = 3.30f;
+constexpr float kBatteryVoltageFull = 4.20f;
+constexpr float kBatteryChargingDetectVoltage = 4.60f;  // VIN around 5V when charging
+
+portMUX_TYPE gBatteryMux = portMUX_INITIALIZER_UNLOCKED;
+BatteryStatus gBatteryStatus;
+bool gBatteryPinConfigured = false;
+
+float clampBatteryVoltage(float value) {
+  return value < 0.0f ? 0.0f : value;
+}
+
+int batteryPercentFromVoltage(float vinVoltage) {
+  if (vinVoltage <= kBatteryVoltageEmpty) return 0;
+  if (vinVoltage >= kBatteryVoltageFull) return 100;
+  const float ratio = (vinVoltage - kBatteryVoltageEmpty) /
+                      (kBatteryVoltageFull - kBatteryVoltageEmpty);
+  const int percent = static_cast<int>(ratio * 100.0f + 0.5f);
+  if (percent < 0) return 0;
+  if (percent > 100) return 100;
+  return percent;
+}
+
+void ensureBatteryPinConfigured() {
+  if (gBatteryPinConfigured) return;
+  pinMode(kBatteryAdcPin, INPUT);
+#if defined(ARDUINO_ARCH_ESP32)
+  analogReadResolution(12);
+#if defined(ADC_11db)
+  analogSetPinAttenuation(kBatteryAdcPin, ADC_11db);
+#endif
+#endif
+  // Throw away one reading after configuration for better stability.
+  (void)analogRead(kBatteryAdcPin);
+#if defined(ARDUINO_ARCH_ESP32)
+  (void)analogReadMilliVolts(kBatteryAdcPin);
+#endif
+  delay(2);
+  gBatteryPinConfigured = true;
+}
+
+bool sampleBatteryVoltage(float &outPinVoltage, float &outVinVoltage, uint16_t &outRawAdc) {
+  ensureBatteryPinConfigured();
+
+  uint32_t rawSum = 0;
+  uint32_t mvSum = 0;
+  uint8_t mvCount = 0;
+
+  for (uint8_t i = 0; i < kBatterySampleCount; ++i) {
+    int raw = analogRead(kBatteryAdcPin);
+    if (raw < 0) raw = 0;
+    rawSum += static_cast<uint32_t>(raw);
+#if defined(ARDUINO_ARCH_ESP32)
+    const int mv = analogReadMilliVolts(kBatteryAdcPin);
+    if (mv > 0) {
+      mvSum += static_cast<uint32_t>(mv);
+      ++mvCount;
+    }
+#endif
+    if (kBatterySampleGapMs) {
+      delay(kBatterySampleGapMs);
+    }
+  }
+
+  outRawAdc = static_cast<uint16_t>(rawSum / kBatterySampleCount);
+
+  float pinVoltage = 0.0f;
+  if (mvCount > 0) {
+    pinVoltage = (static_cast<float>(mvSum) / static_cast<float>(mvCount)) / 1000.0f;
+  } else {
+    pinVoltage = (static_cast<float>(outRawAdc) / 4095.0f) * 3.3f;
+  }
+
+  outPinVoltage = clampBatteryVoltage(pinVoltage);
+  outVinVoltage = outPinVoltage * kBatteryDividerRatio;
+  return true;
+}
+
+}  // namespace
+
+void serviceBatteryMonitor(bool force) {
+  BatteryStatus previous;
+  portENTER_CRITICAL(&gBatteryMux);
+  previous = gBatteryStatus;
+  portEXIT_CRITICAL(&gBatteryMux);
+
+  const uint32_t now = millis();
+  if (!force && previous.initialized && (now - previous.updatedMs) < kBatteryUpdateIntervalMs) {
+    return;
+  }
+
+  float pinVoltage = 0.0f;
+  float vinVoltage = 0.0f;
+  uint16_t rawAdc = 0;
+  if (!sampleBatteryVoltage(pinVoltage, vinVoltage, rawAdc)) {
+    return;
+  }
+
+  const bool charging = vinVoltage >= kBatteryChargingDetectVoltage;
+  float filteredVin = vinVoltage;
+  if (previous.initialized) {
+    filteredVin = previous.filteredVinVoltage +
+                  (vinVoltage - previous.filteredVinVoltage) * kBatteryFilterAlpha;
+  }
+  filteredVin = clampBatteryVoltage(filteredVin);
+
+  int percent = batteryPercentFromVoltage(filteredVin);
+  if (previous.initialized && !charging && percent > previous.percent) {
+    // Not charging: ignore any upward jump from sampling noise/load rebound.
+    percent = previous.percent;
+    filteredVin = previous.filteredVinVoltage;
+  }
+
+  BatteryStatus next = previous;
+  next.available = true;
+  next.initialized = true;
+  next.charging = charging;
+  next.rawAdc = rawAdc;
+  next.pinVoltage = pinVoltage;
+  next.vinVoltage = vinVoltage;
+  next.filteredVinVoltage = filteredVin;
+  next.percent = percent;
+  next.updatedMs = now;
+
+  portENTER_CRITICAL(&gBatteryMux);
+  gBatteryStatus = next;
+  portEXIT_CRITICAL(&gBatteryMux);
+}
+
+bool appGetBatteryStatus(BatteryStatus &outStatus) {
+  portENTER_CRITICAL(&gBatteryMux);
+  outStatus = gBatteryStatus;
+  portEXIT_CRITICAL(&gBatteryMux);
+  return outStatus.available && outStatus.initialized;
+}
+
 static bool wlWriteRmw(size_t addr, const uint8_t *src, size_t len) {
   if (wlHandle == WL_INVALID_HANDLE) return false;
 
@@ -923,6 +1067,7 @@ bool initProjectResources() {
 
   Key_init();
   clearScheduleInterruptQueue();
+  serviceBatteryMonitor(true);
 
   if (!LittleFS.begin(false, "/littlefs", 10, kLittleFsPartitionLabel)) {
     Serial.println("[APP] LittleFS mount failed, trying format...");
@@ -3247,8 +3392,10 @@ void processAppLoop() {
     bool immediateKeyLatch = false;
     bool immediatePreemptedWeb = false;
   };
-  
-  
+
+  serviceBatteryMonitor(false);
+
+
   enum class ImageResumeTarget : uint8_t {
     kNone = 0,
     kWeb = 1,
