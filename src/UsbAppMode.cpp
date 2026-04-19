@@ -4155,6 +4155,7 @@ void onStaOnlyInit(AppLoopMode mode)
     Serial.println("[STA_ONLY] wirelessPortalStartEspNowOnly failed");
   }
   if (!consumeStartupPromptSkip(mode)) {
+    firstFlag = false;
     get_Keycode();
     playStaOnlyMessage(kStaonlyPromptMsg);
   }
