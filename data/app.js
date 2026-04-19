@@ -15,7 +15,10 @@ const st = {
   cmdAutoSaving: false,
   scheduleAutoSaving: false,
   cmdAutoResave: false,
-  scheduleAutoResave: false
+  scheduleAutoResave: false,
+  rtcBaseMs: 0,
+  rtcSyncedAtMs: 0,
+  scheduleDateTouched: false
 };
 const LS = {
   hist: "bb_msg_history",
@@ -86,6 +89,32 @@ const setScheduleRetryVisible = (show) => {
   if (el.btnScheduleRetry) el.btnScheduleRetry.hidden = !show;
   if (show && el.scheduleAdvanced) el.scheduleAdvanced.open = true;
 };
+
+function syncRtcClockFromDevice(d) {
+  const y = toInt(d?.year, 0);
+  const m = toInt(d?.month, 0);
+  const day = toInt(d?.day, 0);
+  const h = toInt(d?.hour, 0);
+  const min = toInt(d?.minute, 0);
+  const sec = toInt(d?.second, 0);
+  if (y < 2000 || y > 2099 || m < 1 || m > 12 || day < 1 || day > 31 || h < 0 || h > 23 || min < 0 || min > 59 || sec < 0 || sec > 59) {
+    return false;
+  }
+  const base = new Date(y, m - 1, day, h, min, sec, 0);
+  if (!Number.isFinite(base.getTime())) return false;
+  st.rtcBaseMs = base.getTime();
+  st.rtcSyncedAtMs = Date.now();
+  return true;
+}
+
+function nowByRtc() {
+  if (Number.isFinite(st.rtcBaseMs) && st.rtcBaseMs > 0 &&
+      Number.isFinite(st.rtcSyncedAtMs) && st.rtcSyncedAtMs > 0) {
+    const elapsed = Math.max(0, Date.now() - st.rtcSyncedAtMs);
+    return new Date(st.rtcBaseMs + elapsed);
+  }
+  return new Date();
+}
 
 function loadAutoSavePrefs() {
   try {
@@ -641,8 +670,8 @@ async function runScheduleAutoSave() {
 }
 
 function pickDay() {
-  const v = el.scheduleDate.value; if (!v) return new Date();
-  const p = v.split("-").map((x) => parseInt(x, 10)); if (p.length !== 3 || p.some((n) => !Number.isFinite(n))) return new Date();
+  const v = el.scheduleDate.value; if (!v) return nowByRtc();
+  const p = v.split("-").map((x) => parseInt(x, 10)); if (p.length !== 3 || p.some((n) => !Number.isFinite(n))) return nowByRtc();
   return new Date(p[0], p[1] - 1, p[2]);
 }
 function schMatch(it, day) {
@@ -651,9 +680,9 @@ function schMatch(it, day) {
   return it.Y === Y && it.M === M && it.D === D;
 }
 function schPast(it, day) {
-  const n = new Date(); const t0 = new Date(n.getFullYear(), n.getMonth(), n.getDate()); const d0 = new Date(day.getFullYear(), day.getMonth(), day.getDate());
+  const n = nowByRtc(); const t0 = new Date(n.getFullYear(), n.getMonth(), n.getDate()); const d0 = new Date(day.getFullYear(), day.getMonth(), day.getDate());
   if (d0 < t0) return true; if (d0 > t0) return false;
-  const due = new Date(n.getFullYear(), n.getMonth(), n.getDate(), it.h, it.i, 0, 0);
+  const due = new Date(day.getFullYear(), day.getMonth(), day.getDate(), it.h, it.i, 0, 0);
   return n.getTime() >= due.getTime();
 }
 function isScheduleEditorBusy() {
@@ -823,8 +852,8 @@ function addSchedule() {
     w: false,
     y: false,
     number: nextScheduleNumber(st.schedules),
-    interval: Math.max(0, toInt(el.scheduleAddInterval ? el.scheduleAddInterval.value : 0, 0)),
-    times: Math.max(0, toInt(el.scheduleAddTimes ? el.scheduleAddTimes.value : 0, 0)),
+    interval: Math.max(0, toInt(el.scheduleAddInterval ? el.scheduleAddInterval.value : 5, 5)),
+    times: Math.max(0, toInt(el.scheduleAddTimes ? el.scheduleAddTimes.value : 3, 3)),
     text: String(el.scheduleAddText.value || "").replace(/\r?\n+/g, " ").trim()
   };
   setSchRepeat(it, el.scheduleAddRepeat.value, d); st.schedules.push(it); el.scheduleAddText.value = ""; st.schedulePage = 1; renderSchedules(); queueScheduleAutoSave();
@@ -858,9 +887,14 @@ async function loadRtc() {
     const d = await r.json();
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     if (!d.ok) throw new Error("RTC读取失败");
+    syncRtcClockFromDevice(d);
     el.rtcNow.textContent = rtcText(d);
     if (!isRtcInputEditing()) {
       rtcFill(d);
+    }
+    if (!st.scheduleDateTouched && el.scheduleDate) {
+      el.scheduleDate.value = `${d.year}-${pad2(d.month)}-${pad2(d.day)}`;
+      st.schedulePage = 1;
     }
     if (!isScheduleEditorBusy()) {
       renderSchedules();
@@ -875,8 +909,13 @@ async function rtcSet() {
     if (!r.ok) throw new Error(raw || `HTTP ${r.status}`);
     const d = JSON.parse(raw);
     if (!d.ok) throw new Error("写后读失败");
+    syncRtcClockFromDevice(d);
     el.rtcNow.textContent = rtcText(d);
     rtcFill(d);
+    if (!st.scheduleDateTouched && el.scheduleDate) {
+      el.scheduleDate.value = `${d.year}-${pad2(d.month)}-${pad2(d.day)}`;
+      st.schedulePage = 1;
+    }
     renderSchedules();
     setStatus(el.rtcStatus, "RTC设置成功");
   }
@@ -890,8 +929,13 @@ async function rtcSyncPhone() {
     if (!r.ok) throw new Error(raw || `HTTP ${r.status}`);
     const d = JSON.parse(raw);
     if (!d.ok) throw new Error("写后读失败");
+    syncRtcClockFromDevice(d);
     el.rtcNow.textContent = rtcText(d);
     rtcFill(d);
+    if (!st.scheduleDateTouched && el.scheduleDate) {
+      el.scheduleDate.value = `${d.year}-${pad2(d.month)}-${pad2(d.day)}`;
+      st.schedulePage = 1;
+    }
     renderSchedules();
     setStatus(el.rtcStatus, "已同步手机时间");
   }
@@ -1048,7 +1092,7 @@ function bind() {
   if (el.btnCmdFoldAll) el.btnCmdFoldAll.addEventListener("click", () => setCmdCollapsedAll(true));
   if (el.btnCmdExpandAll) el.btnCmdExpandAll.addEventListener("click", () => setCmdCollapsedAll(false));
 
-  el.scheduleDate.addEventListener("change", () => { st.schedulePage = 1; renderSchedules(); });
+  el.scheduleDate.addEventListener("change", () => { st.scheduleDateTouched = true; st.schedulePage = 1; renderSchedules(); });
   el.btnScheduleAdd.addEventListener("click", addSchedule);
   if (el.btnScheduleSave) el.btnScheduleSave.addEventListener("click", async () => { await saveSchedulesManual(); });
   if (el.btnScheduleRetry) el.btnScheduleRetry.addEventListener("click", async () => { await saveSchedulesManual(); });

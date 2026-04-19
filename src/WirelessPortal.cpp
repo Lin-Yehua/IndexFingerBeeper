@@ -1746,6 +1746,8 @@ void registerRoutes() {
       gWebServer->send(500, "text/plain", "DS1302 write failed");
       return;
     }
+    // RTC adjusted manually, force schedule slots to rebuild against new time.
+    setScheduleReloadRequested();
     gWebServer->send(200, "application/json", rtcDateTimeJson());
   });
 
@@ -1771,6 +1773,8 @@ void registerRoutes() {
       gWebServer->send(500, "text/plain", msg);
       return;
     }
+    // RTC adjusted manually, force schedule slots to rebuild against new time.
+    setScheduleReloadRequested();
     gWebServer->send(200, "application/json", rtcDateTimeJson());
   });
 
