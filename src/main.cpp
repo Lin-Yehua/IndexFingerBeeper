@@ -13,20 +13,11 @@ static void logAppPartitionLine(const char *tag, const esp_partition_t *part) {
     return;
   }
 
-  const bool isFactory = (part->subtype == ESP_PARTITION_SUBTYPE_APP_FACTORY);
-  const bool isOta =
-      (part->subtype >= ESP_PARTITION_SUBTYPE_APP_OTA_MIN) &&
-      (part->subtype <= ESP_PARTITION_SUBTYPE_APP_OTA_MAX);
-  const int otaSlot = isOta
-                          ? static_cast<int>(part->subtype - ESP_PARTITION_SUBTYPE_APP_OTA_MIN)
-                          : -1;
-
-  if (isFactory) {
-    Serial.printf(
-        "[BOOT] %s partition: label=%s type=factory addr=0x%06lX size=0x%06lX\n",
-        tag, part->label, static_cast<unsigned long>(part->address),
-        static_cast<unsigned long>(part->size));
-  } else if (isOta) {
+  const bool isOta = (part->subtype >= ESP_PARTITION_SUBTYPE_APP_OTA_MIN) &&
+                     (part->subtype <= ESP_PARTITION_SUBTYPE_APP_OTA_MAX);
+  if (isOta) {
+    const int otaSlot =
+        static_cast<int>(part->subtype - ESP_PARTITION_SUBTYPE_APP_OTA_MIN);
     Serial.printf(
         "[BOOT] %s partition: label=%s type=ota_%d addr=0x%06lX size=0x%06lX\n",
         tag, part->label, otaSlot, static_cast<unsigned long>(part->address),
@@ -37,6 +28,7 @@ static void logAppPartitionLine(const char *tag, const esp_partition_t *part) {
         tag, part->label, static_cast<unsigned>(part->subtype),
         static_cast<unsigned long>(part->address),
         static_cast<unsigned long>(part->size));
+    Serial.printf("[BOOT] warning: %s is not an OTA slot in dual-OTA layout\n", tag);
   }
 }
 

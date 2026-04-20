@@ -120,6 +120,7 @@ BacklightState gBacklightState = kBacklightBright;
 TaskHandle_t gBootAnimWaiter = nullptr;
 bool gBootAnimRunning = false;
 bool gBootAnimUsbDetected = false;
+bool gBootAnimErrorHintSuppressed = false;
 bool gSimheiFontPreloaded = false;
 bool gSettingsPreloadedAtBoot = false;
 volatile bool gUpdateRebootRequested = false;
@@ -300,7 +301,6 @@ void logUpdatePartitionState() {
 
   auto partTypeText = [](esp_partition_subtype_t subtype, int &otaSlot) -> const char * {
     otaSlot = -1;
-    if (subtype == ESP_PARTITION_SUBTYPE_APP_FACTORY) return "factory";
     if (subtype >= ESP_PARTITION_SUBTYPE_APP_OTA_MIN &&
         subtype <= ESP_PARTITION_SUBTYPE_APP_OTA_MAX) {
       otaSlot = static_cast<int>(subtype - ESP_PARTITION_SUBTYPE_APP_OTA_MIN);
@@ -327,6 +327,7 @@ void logUpdatePartitionState() {
                   tag, part->label, type, static_cast<unsigned int>(part->subtype),
                   static_cast<unsigned int>(part->address),
                   static_cast<unsigned int>(part->size));
+    Serial.printf("[UPDATE] warning: %s is not an OTA slot under dual-OTA layout\n", tag);
   };
 
   logOne("running", running);
@@ -429,6 +430,60 @@ void drawUpdateResultUi(const String &title, const String &detail, bool success)
   tft.print(detail);
 }
 
+void showLittleFsCorruptHint(const char *detail) {
+  if (gBootAnimErrorHintSuppressed) {
+    Serial.println("[BOOT] suppress LittleFS hint before boot animation completes");
+    return;
+  }
+  ensureDisplayReady();
+  // Keep INDEX_B background visible; do not clear the screen.
+  tft.pushImage(160 - 60, 150 - 60, 120, 120, (uint16_t *)Index_B);
+  tft.setTextWrap(false, false);
+  tft.setTextSize(2);
+  tft.setTextColor(TFT_RED);
+  tft.setCursor(10, 96);
+  tft.print("LittleFS CORRUPTED");
+  tft.setCursor(10, 124);
+  tft.print("Please reflash");
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_YELLOW);
+  tft.setCursor(10, 152);
+  tft.print("Upload littlefs image");
+  if (detail && detail[0]) {
+    tft.setTextColor(TFT_WHITE);
+    tft.setCursor(10, 170);
+    tft.print(detail);
+  }
+  tft.setTextColor(TFT_WHITE);
+}
+
+void showFatFsMountFailedHint(const char *detail) {
+  if (gBootAnimErrorHintSuppressed) {
+    Serial.println("[BOOT] suppress FATFS hint before boot animation completes");
+    return;
+  }
+  ensureDisplayReady();
+  // Keep INDEX_B background visible; do not clear the screen.
+  tft.pushImage(160 - 60, 150 - 60, 120, 120, (uint16_t *)Index_B);
+  tft.setTextWrap(false, false);
+  tft.setTextSize(2);
+  tft.setTextColor(TFT_RED);
+  tft.setCursor(10, 98);
+  tft.print("FATFS mount failed");
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_YELLOW);
+  tft.setCursor(10, 132);
+  tft.print(u8"FATFS挂载失败");
+  tft.setCursor(10, 152);
+  tft.print("Please check storage");
+  if (detail && detail[0]) {
+    tft.setTextColor(TFT_WHITE);
+    tft.setCursor(10, 170);
+    tft.print(detail);
+  }
+  tft.setTextColor(TFT_WHITE);
+}
+
 bool applySingleFatBinUpdate(const String &path, int command, const char *label) {
   fs::File updateFile = FFat.open(path, FILE_READ);
   if (!updateFile || updateFile.isDirectory()) {
@@ -466,6 +521,30 @@ bool applySingleFatBinUpdate(const String &path, int command, const char *label)
       drawUpdateResultUi("Update Failed", String(label ? label : "update") + " image too large", false);
       updateFile.close();
       return false;
+    }
+  }
+  if (command == U_FLASH) {
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    const esp_partition_t *target = esp_ota_get_next_update_partition(nullptr);
+    auto otaSlotOf = [](const esp_partition_t *p) -> int {
+      if (!p) return -1;
+      if (p->subtype < ESP_PARTITION_SUBTYPE_APP_OTA_MIN ||
+          p->subtype > ESP_PARTITION_SUBTYPE_APP_OTA_MAX) {
+        return -1;
+      }
+      return static_cast<int>(p->subtype - ESP_PARTITION_SUBTYPE_APP_OTA_MIN);
+    };
+    const int runningSlot = otaSlotOf(running);
+    const int targetSlot = otaSlotOf(target);
+    if (runningSlot >= 0) {
+      Serial.printf("[UPDATE] running slot: ota_%d\n", runningSlot);
+    } else {
+      Serial.println("[UPDATE] warning: running slot is not OTA");
+    }
+    if (targetSlot >= 0) {
+      Serial.printf("[UPDATE] target slot: ota_%d\n", targetSlot);
+    } else {
+      Serial.println("[UPDATE] warning: target slot is not OTA");
     }
   }
 
@@ -1020,6 +1099,7 @@ static bool ensureMixerInitialized(const char *contextTag) {
 
   if (!mountFat()) {
     Serial.printf("[%s] mount FAT failed for mixer init\n", contextTag);
+    showFatFsMountFailedHint("while init mixer");
     return false;
   }
 
@@ -1035,6 +1115,7 @@ static bool ensureMixerInitialized(const char *contextTag) {
 
 void runBootAnimationTaskStart() {
   if (gBootAnimRunning) return;
+  gBootAnimErrorHintSuppressed = true;
 
   ensureDisplayReady();
   tft.fillScreen(TFT_BLACK);
@@ -1097,6 +1178,7 @@ void runBootAnimationTaskStart() {
     mixer.stopBG();
     gBootAnimWaiter = nullptr;
     gBootAnimRunning = false;
+    gBootAnimErrorHintSuppressed = false;
     return;
   }
   if (!usbHostActive && littleFsReady && !gSimheiFontPreloaded) {
@@ -1112,7 +1194,10 @@ void runBootAnimationTaskStart() {
 }
 
 void runBootAnimationTaskWait() {
-  if (!gBootAnimRunning) return;
+  if (!gBootAnimRunning) {
+    gBootAnimErrorHintSuppressed = false;
+    return;
+  }
 
   bool animDone = false;
   const uint32_t t0 = millis();
@@ -1138,6 +1223,7 @@ void runBootAnimationTaskWait() {
 
   gBootAnimRunning = false;
   gBootAnimWaiter = nullptr;
+  gBootAnimErrorHintSuppressed = false;
 }
 
 void runBootAnimationTaskAndWait() {
@@ -1446,7 +1532,11 @@ bool enterAppMode() {
     delay(200);
   }
   closeRawBackend();
-  return mountFat();
+  if (!mountFat()) {
+    showFatFsMountFailedHint("enter app mode");
+    return false;
+  }
+  return true;
 }
 
 bool appConsumeUpdateRebootRequest() {
@@ -1466,6 +1556,7 @@ void applyPendingFatUpdatesFromUpdateDir() {
   logUpdatePartitionState();
   if (!fatMounted && !mountFat()) {
     Serial.println("[UPDATE] skip: FAT not mounted");
+    showFatFsMountFailedHint("during update scan");
     return;
   }
 
@@ -1559,10 +1650,12 @@ bool initProjectResources() {
     Serial.println("[APP] LittleFS mount failed, trying format...");
     if (!LittleFS.format()) {
       Serial.println("[APP] LittleFS format failed");
+      showLittleFsCorruptHint("LittleFS format failed");
       return false;
     }
     if (!LittleFS.begin(false, "/littlefs", 10, kLittleFsPartitionLabel)) {
       Serial.println("[APP] LittleFS init failed after format");
+      showLittleFsCorruptHint("LittleFS mount failed");
       return false;
     }
     Serial.println("[APP] LittleFS formatted and mounted");
@@ -1572,6 +1665,7 @@ bool initProjectResources() {
   if (!LittleFS.exists("/simhei15.vlw")) {
     Serial.println("[APP] LittleFS font files missing");
     Serial.println("[APP] run: pio run -t uploadfs -e 4d_systems_esp32s3_gen4_r8n16");
+    showLittleFsCorruptHint("simhei15.vlw missing");
     return false;
   }
   if (!LittleFS.exists("/Oxta14.vlw")) {
@@ -1584,6 +1678,7 @@ bool initProjectResources() {
 
   if (!mountFat()) {
     Serial.println("[APP] mount FAT failed");
+    showFatFsMountFailedHint("in app init");
     return false;
   }
   if (!gSettingsPreloadedAtBoot) {
