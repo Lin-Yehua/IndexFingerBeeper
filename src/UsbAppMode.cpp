@@ -6,6 +6,8 @@
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
+#include <Update.h>
+#include <esp_ota_ops.h>
 #include <algorithm>
 #include <limits>
 #include <vector>
@@ -59,6 +61,13 @@ constexpr size_t kSleepStaQueueMax = 20;
 constexpr size_t kMaxReminderTimes = 128;
 constexpr size_t kScheduleInterruptQueueMax = 64;
 constexpr char kSleepSnapshotPath[] = "/sleep_state.bin";
+constexpr char kUpdateDirPath[] = "/Update";
+constexpr char kUpdateDirPathLower[] = "/update";
+constexpr char kUpdateFirmwarePath[] = "/Update/firmware.bin";
+constexpr char kUpdateAppPath[] = "/Update/app.bin";
+constexpr char kUpdateLittleFsPath[] = "/Update/littlefs.bin";
+constexpr char kUpdateFsPath[] = "/Update/fs.bin";
+constexpr char kUpdateSpiffsPath[] = "/Update/spiffs.bin";
 constexpr const char *kDefaultReminderMessage = u8"这个时候你似乎有什么事要干";
 constexpr uint32_t kSleepFileMagic = 0x53534E50UL;      // "SSNP"
 constexpr uint16_t kSleepFileVersion = 1;
@@ -95,6 +104,8 @@ struct SleepSnapshotHeader {
 };
 
 RTC_DATA_ATTR SleepRtcContext gSleepRtcCtx;
+RTC_DATA_ATTR uint32_t gForceAppUpdateBootTag = 0;
+constexpr uint32_t kForceAppUpdateBootMagic = 0x55504454UL;  // "UPDT"
 
 enum BacklightState : uint8_t {
   kBacklightBright = 0,
@@ -111,6 +122,7 @@ bool gBootAnimRunning = false;
 bool gBootAnimUsbDetected = false;
 bool gSimheiFontPreloaded = false;
 bool gSettingsPreloadedAtBoot = false;
+volatile bool gUpdateRebootRequested = false;
 char gLastDisplayedText[kSleepTextMaxLen + 1] = {0};
 
 struct ScheduleInterruptQueueItem {
@@ -183,6 +195,335 @@ bool normalizeScheduleQueueMessage(const String &rawText, String &outText) {
     outText.remove(kSleepTextMaxLen);
   }
   return outText.length() > 0;
+}
+
+String pickFirstExistingUpdatePath(const char *const *paths, size_t count) {
+  for (size_t i = 0; i < count; ++i) {
+    if (!paths[i]) continue;
+    if (FFat.exists(paths[i])) {
+      return String(paths[i]);
+    }
+  }
+  return String();
+}
+
+String leafNameFromPath(const String &path) {
+  const int slash = path.lastIndexOf('/');
+  if (slash < 0) return path;
+  return path.substring(slash + 1);
+}
+
+String chooseUpdateDirPath() {
+  if (FFat.exists(kUpdateDirPath)) return String(kUpdateDirPath);
+  if (FFat.exists(kUpdateDirPathLower)) return String(kUpdateDirPathLower);
+  if (FFat.mkdir(kUpdateDirPath)) {
+    Serial.printf("[UPDATE] created missing dir: %s\n", kUpdateDirPath);
+    return String(kUpdateDirPath);
+  }
+  Serial.println("[UPDATE] create /Update failed");
+  return String();
+}
+
+void logUpdateDirFiles(const String &dirPath) {
+  fs::File dir = FFat.open(dirPath, FILE_READ);
+  if (!dir || !dir.isDirectory()) {
+    Serial.printf("[UPDATE] open dir failed: %s\n", dirPath.c_str());
+    if (dir) dir.close();
+    return;
+  }
+  Serial.printf("[UPDATE] listing %s\n", dirPath.c_str());
+  fs::File item = dir.openNextFile();
+  if (!item) {
+    Serial.println("[UPDATE] dir is empty");
+  }
+  while (item) {
+    String name = item.name();
+    if (name.length()) {
+      Serial.printf("[UPDATE]   %s (%u bytes)%s\n",
+                    name.c_str(),
+                    static_cast<unsigned int>(item.size()),
+                    item.isDirectory() ? " [DIR]" : "");
+    }
+    item.close();
+    item = dir.openNextFile();
+  }
+  dir.close();
+}
+
+void detectUpdateFilesInDir(const String &dirPath, String &outFirmwarePath, String &outLittleFsPath) {
+  outFirmwarePath = "";
+  outLittleFsPath = "";
+  fs::File dir = FFat.open(dirPath, FILE_READ);
+  if (!dir || !dir.isDirectory()) {
+    if (dir) dir.close();
+    return;
+  }
+
+  auto maybePick = [&](const String &fullPath, const String &nameLower) {
+    if (!outFirmwarePath.length() &&
+        (nameLower == "firmware.bin" || nameLower == "app.bin" ||
+         nameLower.indexOf("firmware") >= 0)) {
+      outFirmwarePath = fullPath;
+    }
+    if (!outLittleFsPath.length() &&
+        (nameLower == "littlefs.bin" || nameLower == "littelfs.bin" ||
+         nameLower == "fs.bin" || nameLower == "spiffs.bin" ||
+         nameLower.indexOf("littlefs") >= 0 || nameLower.indexOf("spiffs") >= 0)) {
+      outLittleFsPath = fullPath;
+    }
+  };
+
+  fs::File item = dir.openNextFile();
+  while (item) {
+    if (!item.isDirectory()) {
+      String name = item.name();
+      const int slash = name.lastIndexOf('/');
+      if (slash >= 0) name = name.substring(slash + 1);
+      String lower = name;
+      lower.toLowerCase();
+      if (lower.endsWith(".bin")) {
+        String fullPath = dirPath;
+        if (!fullPath.endsWith("/")) fullPath += "/";
+        fullPath += name;
+        maybePick(fullPath, lower);
+      }
+    }
+    item.close();
+    item = dir.openNextFile();
+  }
+  dir.close();
+}
+
+void logUpdatePartitionState() {
+  const esp_partition_t *running = esp_ota_get_running_partition();
+  const esp_partition_t *boot = esp_ota_get_boot_partition();
+
+  auto partTypeText = [](esp_partition_subtype_t subtype, int &otaSlot) -> const char * {
+    otaSlot = -1;
+    if (subtype == ESP_PARTITION_SUBTYPE_APP_FACTORY) return "factory";
+    if (subtype >= ESP_PARTITION_SUBTYPE_APP_OTA_MIN &&
+        subtype <= ESP_PARTITION_SUBTYPE_APP_OTA_MAX) {
+      otaSlot = static_cast<int>(subtype - ESP_PARTITION_SUBTYPE_APP_OTA_MIN);
+      return "ota";
+    }
+    return "other";
+  };
+
+  auto logOne = [&](const char *tag, const esp_partition_t *part) {
+    if (!part) {
+      Serial.printf("[UPDATE] %s partition: <null>\n", tag);
+      return;
+    }
+    int otaSlot = -1;
+    const char *type = partTypeText(part->subtype, otaSlot);
+    if (otaSlot >= 0) {
+      Serial.printf("[UPDATE] %s partition: label=%s type=ota_%d addr=0x%06X size=0x%06X\n",
+                    tag, part->label, otaSlot,
+                    static_cast<unsigned int>(part->address),
+                    static_cast<unsigned int>(part->size));
+      return;
+    }
+    Serial.printf("[UPDATE] %s partition: label=%s type=%s subtype=0x%02X addr=0x%06X size=0x%06X\n",
+                  tag, part->label, type, static_cast<unsigned int>(part->subtype),
+                  static_cast<unsigned int>(part->address),
+                  static_cast<unsigned int>(part->size));
+  };
+
+  logOne("running", running);
+  logOne("configured boot", boot);
+}
+
+void drawUpdateStatusText(const String &text, uint16_t color) {
+  tft.fillRect(0, 190, 320, 40, TFT_BLACK);
+  tft.setTextSize(1);
+  tft.setTextColor(color, TFT_BLACK);
+  tft.setCursor(10, 198);
+  tft.print(text);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+}
+
+String updatePartTitle(const char *label) {
+  String lower = label ? String(label) : String("update");
+  lower.toLowerCase();
+  if (lower.indexOf("firmware") >= 0 || lower.indexOf("app") >= 0) {
+    return String(u8"正在更新：固件");
+  }
+  if (lower.indexOf("littlefs") >= 0 || lower.indexOf("spiffs") >= 0 || lower.indexOf("fs") >= 0) {
+    return String(u8"正在更新：文件系统");
+  }
+  return String(u8"正在更新：数据");
+}
+
+void drawUpdateProgressUi(const char *label,
+                          const String &path,
+                          size_t written,
+                          size_t total,
+                          bool forceRedraw) {
+  static int sLastPercent = -1;
+  static int sLastFillW = 0;
+  if (forceRedraw) {
+    sLastPercent = -1;
+    sLastFillW = 0;
+  }
+
+  int percent = 0;
+  if (total > 0) {
+    const uint64_t scaled = static_cast<uint64_t>(written) * 100ULL;
+    percent = static_cast<int>(scaled / static_cast<uint64_t>(total));
+  }
+  if (percent < 0) percent = 0;
+  if (percent > 100) percent = 100;
+  if (!forceRedraw && percent == sLastPercent) return;
+  sLastPercent = percent;
+
+  if (forceRedraw) {
+    ensureDisplayReady();
+    tft.fillScreen(TFT_BLACK);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.setTextSize(2);
+    tft.setCursor(10, 10);
+    tft.print(u8"更新中...");
+    tft.setTextSize(1);
+    tft.setCursor(10, 42);
+    tft.print(label ? label : "update");
+    tft.setCursor(10, 58);
+    tft.print(leafNameFromPath(path));
+    tft.drawRect(20, 118, 280, 20, TFT_WHITE);
+    tft.fillRect(22, 120, 276, 16, TFT_DARKGREY);
+
+    tft.setTextSize(2);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.setCursor(10, 148);
+    tft.print(updatePartTitle(label));
+
+    tft.setTextSize(1);
+    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    tft.setCursor(10, 208);
+    tft.print(u8"警告：更新过程中请勿断电");
+  }
+
+  const int fillW = (276 * percent) / 100;
+  if (fillW > sLastFillW) {
+    tft.fillRect(22 + sLastFillW, 120, fillW - sLastFillW, 16, TFT_GREEN);
+  } else if (fillW < sLastFillW) {
+    // Fallback for unexpected backward progress.
+    tft.fillRect(22 + fillW, 120, sLastFillW - fillW, 16, TFT_DARKGREY);
+  }
+  sLastFillW = fillW;
+
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  tft.setTextSize(2);
+  tft.setCursor(242, 148);
+  tft.printf("%3d%%", percent);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+}
+
+void drawUpdateResultUi(const String &title, const String &detail, bool success) {
+  ensureDisplayReady();
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextSize(2);
+  tft.setTextColor(success ? TFT_GREEN : TFT_RED, TFT_BLACK);
+  tft.setCursor(10, 20);
+  tft.print(title);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setTextSize(1);
+  tft.setCursor(10, 70);
+  tft.print(detail);
+}
+
+bool applySingleFatBinUpdate(const String &path, int command, const char *label) {
+  fs::File updateFile = FFat.open(path, FILE_READ);
+  if (!updateFile || updateFile.isDirectory()) {
+    Serial.printf("[UPDATE] %s open failed: %s\n", label, path.c_str());
+    drawUpdateResultUi("Update Failed", String(label ? label : "update") + " open failed", false);
+    if (updateFile) updateFile.close();
+    return false;
+  }
+
+  const size_t imageSize = static_cast<size_t>(updateFile.size());
+  if (imageSize == 0) {
+    Serial.printf("[UPDATE] %s file is empty: %s\n", label, path.c_str());
+    drawUpdateResultUi("Update Failed", String(label ? label : "update") + " file empty", false);
+    updateFile.close();
+    return false;
+  }
+
+  if (command == U_SPIFFS) {
+    LittleFS.end();
+    const esp_partition_t *littleFsPart = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA,
+        ESP_PARTITION_SUBTYPE_DATA_SPIFFS,
+        kLittleFsPartitionLabel);
+    if (!littleFsPart) {
+      littleFsPart = esp_partition_find_first(
+          ESP_PARTITION_TYPE_DATA,
+          ESP_PARTITION_SUBTYPE_DATA_SPIFFS,
+          nullptr);
+    }
+    if (littleFsPart && imageSize > littleFsPart->size) {
+      Serial.printf("[UPDATE] %s image too large (%u > %u)\n",
+                    label,
+                    static_cast<unsigned int>(imageSize),
+                    static_cast<unsigned int>(littleFsPart->size));
+      drawUpdateResultUi("Update Failed", String(label ? label : "update") + " image too large", false);
+      updateFile.close();
+      return false;
+    }
+  }
+
+  Serial.printf("[UPDATE] start %s update: %s (%u bytes)\n",
+                label,
+                path.c_str(),
+                static_cast<unsigned int>(imageSize));
+  if (!Update.begin(imageSize, command)) {
+    Serial.printf("[UPDATE] %s begin failed\n", label);
+    Update.printError(Serial);
+    drawUpdateResultUi("Update Failed", String(label ? label : "update") + " begin failed", false);
+    updateFile.close();
+    return false;
+  }
+
+  drawUpdateProgressUi(label, path, 0, imageSize, true);
+  static uint8_t writeBuf[4096];
+  size_t written = 0;
+  while (written < imageSize) {
+    const size_t remaining = imageSize - written;
+    const size_t want = (remaining > sizeof(writeBuf)) ? sizeof(writeBuf) : remaining;
+    const size_t readBytes = updateFile.read(writeBuf, want);
+    if (readBytes == 0) {
+      break;
+    }
+    const size_t wrote = Update.write(writeBuf, readBytes);
+    if (wrote != readBytes) {
+      break;
+    }
+    written += wrote;
+    drawUpdateProgressUi(label, path, written, imageSize, false);
+    delay(1);
+  }
+  updateFile.close();
+  if (written != imageSize) {
+    Serial.printf("[UPDATE] %s write failed (%u/%u)\n",
+                  label,
+                  static_cast<unsigned int>(written),
+                  static_cast<unsigned int>(imageSize));
+    Update.printError(Serial);
+    Update.abort();
+    drawUpdateResultUi("Update Failed", String(label ? label : "update") + " write failed", false);
+    return false;
+  }
+
+  if (!Update.end(true) || !Update.isFinished()) {
+    Serial.printf("[UPDATE] %s finalize failed\n", label);
+    Update.printError(Serial);
+    Update.abort();
+    drawUpdateResultUi("Update Failed", String(label ? label : "update") + " finalize failed", false);
+    return false;
+  }
+
+  Serial.printf("[UPDATE] %s update success\n", label);
+  drawUpdateStatusText(String(label ? label : "update") + " OK", TFT_GREEN);
+  return true;
 }
 
 void clearScheduleInterruptQueue() {
@@ -852,6 +1193,11 @@ int32_t onWrite(uint32_t lba, uint32_t offset, uint8_t *buffer, uint32_t bufsize
 bool onStartStop(uint8_t power_condition, bool start, bool load_eject) {
   (void)power_condition;
   Serial.printf("[MSC] start=%d eject=%d\n", start, load_eject);
+  if (load_eject) {
+    gForceAppUpdateBootTag = kForceAppUpdateBootMagic;
+    gUpdateRebootRequested = true;
+    Serial.println("[UPDATE] USB eject detected, schedule reboot for update scan");
+  }
   return true;
 }
 
@@ -1103,6 +1449,98 @@ bool enterAppMode() {
   }
   closeRawBackend();
   return mountFat();
+}
+
+bool appConsumeUpdateRebootRequest() {
+  const bool requested = gUpdateRebootRequested;
+  gUpdateRebootRequested = false;
+  return requested;
+}
+
+bool appConsumeForceAppUpdateBoot() {
+  if (gForceAppUpdateBootTag != kForceAppUpdateBootMagic) return false;
+  gForceAppUpdateBootTag = 0;
+  return true;
+}
+
+void applyPendingFatUpdatesFromUpdateDir() {
+  Serial.println("[UPDATE] scan begin");
+  logUpdatePartitionState();
+  if (!fatMounted && !mountFat()) {
+    Serial.println("[UPDATE] skip: FAT not mounted");
+    return;
+  }
+
+  const String updateDir = chooseUpdateDirPath();
+  if (!updateDir.length()) {
+    Serial.println("[UPDATE] skip: update dir unavailable");
+    return;
+  }
+  logUpdateDirFiles(updateDir);
+
+  String firmwarePath;
+  String littleFsPath;
+  detectUpdateFilesInDir(updateDir, firmwarePath, littleFsPath);
+
+  if (!firmwarePath.length() && !littleFsPath.length()) {
+    Serial.println("[UPDATE] no update files in /Update");
+    return;
+  }
+
+  Serial.printf("[UPDATE] pending files: firmware=%s littlefs=%s\n",
+                firmwarePath.length() ? firmwarePath.c_str() : "<none>",
+                littleFsPath.length() ? littleFsPath.c_str() : "<none>");
+  ensureDisplayReady();
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextSize(2);
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.setCursor(10, 20);
+  tft.print("Update package found");
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.setCursor(10, 70);
+  tft.printf("firmware: %s", firmwarePath.length() ? leafNameFromPath(firmwarePath).c_str() : "<none>");
+  tft.setCursor(10, 88);
+  tft.printf("littlefs: %s", littleFsPath.length() ? leafNameFromPath(littleFsPath).c_str() : "<none>");
+  tft.setCursor(10, 120);
+  tft.print("Do not power off...");
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.setCursor(10, 138);
+  tft.print(u8"警告：更新过程中请勿断电");
+  delay(600);
+
+  if (littleFsPath.length()) {
+    if (!applySingleFatBinUpdate(littleFsPath, U_SPIFFS, "littlefs")) {
+      Serial.println("[UPDATE] littlefs update failed, keep current firmware");
+      delay(1800);
+      return;
+    }
+  }
+
+  if (firmwarePath.length()) {
+    if (!applySingleFatBinUpdate(firmwarePath, U_FLASH, "firmware")) {
+      Serial.println("[UPDATE] firmware update failed");
+      delay(1800);
+      return;
+    }
+  }
+
+  if (littleFsPath.length()) {
+    if (!FFat.remove(littleFsPath)) {
+      Serial.printf("[UPDATE] warning: remove failed %s\n", littleFsPath.c_str());
+    }
+  }
+  if (firmwarePath.length()) {
+    if (!FFat.remove(firmwarePath)) {
+      Serial.printf("[UPDATE] warning: remove failed %s\n", firmwarePath.c_str());
+    }
+  }
+
+  Serial.println("[UPDATE] update done, restarting...");
+  drawUpdateResultUi("Update Success", "Rebooting now...", true);
+  delay(1200);
+  delay(200);
+  esp_restart();
 }
 
 bool initProjectResources() {

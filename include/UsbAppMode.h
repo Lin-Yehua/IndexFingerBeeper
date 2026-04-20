@@ -29,6 +29,9 @@ bool openRawBackend();
 void closeRawBackend();
 bool enterUsbMode();
 bool enterAppMode();
+void applyPendingFatUpdatesFromUpdateDir();
+bool appConsumeUpdateRebootRequest();
+bool appConsumeForceAppUpdateBoot();
 
 bool initProjectResources();
 void processAppLoop();

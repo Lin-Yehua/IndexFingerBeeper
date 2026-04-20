@@ -1,15 +1,60 @@
 #include <Arduino.h>
 #include <USB.h>
+#include <esp_ota_ops.h>
 #include "esp_system.h"
 #include "AppGlobals.h"
 #include "UsbAppMode.h"
 #include "WirelessPortal.h"
 #include "Ds1302Rtc.h"
 
+static void logAppPartitionLine(const char *tag, const esp_partition_t *part) {
+  if (!part) {
+    Serial.printf("[BOOT] %s partition: <null>\n", tag);
+    return;
+  }
+
+  const bool isFactory = (part->subtype == ESP_PARTITION_SUBTYPE_APP_FACTORY);
+  const bool isOta =
+      (part->subtype >= ESP_PARTITION_SUBTYPE_APP_OTA_MIN) &&
+      (part->subtype <= ESP_PARTITION_SUBTYPE_APP_OTA_MAX);
+  const int otaSlot = isOta
+                          ? static_cast<int>(part->subtype - ESP_PARTITION_SUBTYPE_APP_OTA_MIN)
+                          : -1;
+
+  if (isFactory) {
+    Serial.printf(
+        "[BOOT] %s partition: label=%s type=factory addr=0x%06lX size=0x%06lX\n",
+        tag, part->label, static_cast<unsigned long>(part->address),
+        static_cast<unsigned long>(part->size));
+  } else if (isOta) {
+    Serial.printf(
+        "[BOOT] %s partition: label=%s type=ota_%d addr=0x%06lX size=0x%06lX\n",
+        tag, part->label, otaSlot, static_cast<unsigned long>(part->address),
+        static_cast<unsigned long>(part->size));
+  } else {
+    Serial.printf(
+        "[BOOT] %s partition: label=%s subtype=0x%02X addr=0x%06lX size=0x%06lX\n",
+        tag, part->label, static_cast<unsigned>(part->subtype),
+        static_cast<unsigned long>(part->address),
+        static_cast<unsigned long>(part->size));
+  }
+}
+
+static void logBootPartitionInfo() {
+  const esp_partition_t *running = esp_ota_get_running_partition();
+  const esp_partition_t *configuredBoot = esp_ota_get_boot_partition();
+  logAppPartitionLine("running", running);
+  logAppPartitionLine("configured boot", configuredBoot);
+  if (running && configuredBoot && running != configuredBoot) {
+    Serial.println("[BOOT] warning: running partition != configured boot partition");
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   //delay(300);
   Serial.println("\n[BOOT] project + USB MSC + FAT CSV");
+  logBootPartitionInfo();
   setAppModeInitCallback(APP_MODE_AP_STA,onApStaInit);
   setAppModeInitCallback(APP_MODE_STA_ONLINE,onStaOnlineInit);
   setAppModeInitCallback(APP_MODE_STA_ONLY,onStaOnlyInit);
@@ -29,7 +74,10 @@ void setup() {
     usbHostActive = false;
     usbHostActivePrev = false;
     usbModeActive = false;
+    Serial.println("[BOOT] partition check (fast-resume path)");
+    logBootPartitionInfo();
     if (enterAppMode()) {
+      applyPendingFatUpdatesFromUpdateDir();
       if (initProjectResources()) {
         if (!appRestoreFromDeepSleepSnapshot()) {
           applyStartupModeFromSettingIni();
@@ -62,19 +110,27 @@ void setup() {
 
     runBootAnimationTaskStart();
     runBootAnimationTaskWait();
+    Serial.println("[BOOT] partition check (post-animation)");
+    logBootPartitionInfo();
 
-    const uint32_t t0 = millis();
-    while (millis() - t0 < 300) {
-      if (usbHostActive) break;
-      delay(10);
+    const bool forceAppUpdateBoot = appConsumeForceAppUpdateBoot();
+    if (!forceAppUpdateBoot) {
+      const uint32_t t0 = millis();
+      while (millis() - t0 < 300) {
+        if (usbHostActive) break;
+        delay(10);
+      }
+    } else {
+      Serial.println("[UPDATE] force APP boot after USB eject");
     }
 
-    if (usbHostActive) {
+    if (!forceAppUpdateBoot && usbHostActive) {
       Serial.println("[BOOT] USB detected -> USB mode");
       enterUsbMode();
     } else {
       Serial.println("[BOOT] USB not detected -> APP mode");
       if (enterAppMode()) {
+        applyPendingFatUpdatesFromUpdateDir();
         if (initProjectResources()) {
           applyStartupModeFromSettingIni();
         }
@@ -86,6 +142,11 @@ void setup() {
 
 void loop() 
 {
+  if (appConsumeUpdateRebootRequest()) {
+    Serial.println("[UPDATE] rebooting to enter APP update flow");
+    delay(120);
+    esp_restart();
+  }
   //检测USB模式
   if (usbHostActive != usbHostActivePrev) {
     if (usbHostActive) {
