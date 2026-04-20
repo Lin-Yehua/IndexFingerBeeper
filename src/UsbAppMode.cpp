@@ -334,10 +334,10 @@ void logUpdatePartitionState() {
 }
 
 void drawUpdateStatusText(const String &text, uint16_t color) {
-  tft.fillRect(0, 190, 320, 40, TFT_BLACK);
+  tft.fillRect(0, 170, 320, 20, TFT_BLACK);
   tft.setTextSize(1);
   tft.setTextColor(color, TFT_BLACK);
-  tft.setCursor(10, 198);
+  tft.setCursor(10, 176);
   tft.print(text);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
 }
@@ -381,39 +381,37 @@ void drawUpdateProgressUi(const char *label,
     tft.fillScreen(TFT_BLACK);
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
     tft.setTextSize(2);
-    tft.setCursor(10, 10);
+    tft.setCursor(10, 92);
     tft.print(u8"更新中...");
     tft.setTextSize(1);
-    tft.setCursor(10, 42);
-    tft.print(label ? label : "update");
-    tft.setCursor(10, 58);
+    tft.setCursor(10, 112);
     tft.print(leafNameFromPath(path));
-    tft.drawRect(20, 118, 280, 20, TFT_WHITE);
-    tft.fillRect(22, 120, 276, 16, TFT_DARKGREY);
+    tft.drawRect(20, 126, 280, 20, TFT_WHITE);
+    tft.fillRect(22, 128, 276, 16, TFT_DARKGREY);
 
     tft.setTextSize(2);
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.setCursor(10, 148);
+    tft.setCursor(10, 152);
     tft.print(updatePartTitle(label));
 
     tft.setTextSize(1);
     tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-    tft.setCursor(10, 208);
+    tft.setCursor(10, 178);
     tft.print(u8"警告：更新过程中请勿断电");
   }
 
   const int fillW = (276 * percent) / 100;
   if (fillW > sLastFillW) {
-    tft.fillRect(22 + sLastFillW, 120, fillW - sLastFillW, 16, TFT_GREEN);
+    tft.fillRect(22 + sLastFillW, 128, fillW - sLastFillW, 16, TFT_GREEN);
   } else if (fillW < sLastFillW) {
     // Fallback for unexpected backward progress.
-    tft.fillRect(22 + fillW, 120, sLastFillW - fillW, 16, TFT_DARKGREY);
+    tft.fillRect(22 + fillW, 128, sLastFillW - fillW, 16, TFT_DARKGREY);
   }
   sLastFillW = fillW;
 
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   tft.setTextSize(2);
-  tft.setCursor(242, 148);
+  tft.setCursor(230, 92);
   tft.printf("%3d%%", percent);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
 }
@@ -423,11 +421,11 @@ void drawUpdateResultUi(const String &title, const String &detail, bool success)
   tft.fillScreen(TFT_BLACK);
   tft.setTextSize(2);
   tft.setTextColor(success ? TFT_GREEN : TFT_RED, TFT_BLACK);
-  tft.setCursor(10, 20);
+  tft.setCursor(10, 98);
   tft.print(title);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.setTextSize(1);
-  tft.setCursor(10, 70);
+  tft.setCursor(10, 134);
   tft.print(detail);
 }
 
@@ -1494,18 +1492,18 @@ void applyPendingFatUpdatesFromUpdateDir() {
   tft.fillScreen(TFT_BLACK);
   tft.setTextSize(2);
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-  tft.setCursor(10, 20);
+  tft.setCursor(10, 94);
   tft.print("Update package found");
   tft.setTextSize(1);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.setCursor(10, 70);
+  tft.setCursor(10, 124);
   tft.printf("firmware: %s", firmwarePath.length() ? leafNameFromPath(firmwarePath).c_str() : "<none>");
-  tft.setCursor(10, 88);
+  tft.setCursor(10, 140);
   tft.printf("littlefs: %s", littleFsPath.length() ? leafNameFromPath(littleFsPath).c_str() : "<none>");
-  tft.setCursor(10, 120);
+  tft.setCursor(10, 156);
   tft.print("Do not power off...");
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-  tft.setCursor(10, 138);
+  tft.setCursor(10, 178);
   tft.print(u8"警告：更新过程中请勿断电");
   delay(600);
 
