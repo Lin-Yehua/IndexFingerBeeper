@@ -195,77 +195,72 @@ bool testRtcDs1302(String &detail) {
   const bool beforeOk = rtc.readDateTime(before) && ds1302IsValidDateTime(before);
 
   Ds1302DateTime writeDt = {};
-  if (beforeOk) {
-    writeDt = before;
-    if (writeDt.second <= 54) {
-      writeDt.second = static_cast<uint8_t>(writeDt.second + 5);
-    } else {
-      writeDt.second = static_cast<uint8_t>(writeDt.second - 5);
-    }
-  } else {
-    writeDt.year = 2026;
-    writeDt.month = 4;
-    writeDt.day = 19;
-    writeDt.hour = 12;
-    writeDt.minute = 34;
-    writeDt.second = 50;
-  }
+  writeDt.year = 2026;
+  writeDt.month = 4;
+  writeDt.day = 21;
+  writeDt.hour = 12;
+  writeDt.minute = 0;
+  writeDt.second = 0;
 
   if (!rtc.writeDateTime(writeDt)) {
     detail = "write failed";
     return false;
   }
 
-  delay(20);
-
-  Ds1302DateTime readDt = {};
-  if (!rtc.readDateTime(readDt) || !ds1302IsValidDateTime(readDt)) {
-    detail = "read back invalid";
+  Ds1302DateTime startDt = {};
+  if (!rtc.readDateTime(startDt) || !ds1302IsValidDateTime(startDt)) {
+    detail = "read start invalid";
     return false;
   }
 
-  const bool match =
-      (readDt.year == writeDt.year) &&
-      (readDt.month == writeDt.month) &&
-      (readDt.day == writeDt.day) &&
-      (readDt.hour == writeDt.hour) &&
-      (readDt.minute == writeDt.minute) &&
-      (readDt.second == writeDt.second);
+  delay(5000);
+
+  Ds1302DateTime endDt = {};
+  if (!rtc.readDateTime(endDt) || !ds1302IsValidDateTime(endDt)) {
+    detail = "read end invalid";
+    return false;
+  }
+
+  const int startSec =
+      static_cast<int>(startDt.hour) * 3600 +
+      static_cast<int>(startDt.minute) * 60 +
+      static_cast<int>(startDt.second);
+  const int endSec =
+      static_cast<int>(endDt.hour) * 3600 +
+      static_cast<int>(endDt.minute) * 60 +
+      static_cast<int>(endDt.second);
+  const int elapsed = endSec - startSec;
 
   if (beforeOk) {
     (void)rtc.writeDateTime(before);
   }
 
-  char buf[128] = {0};
-  if (!match) {
+  char buf[160] = {0};
+  if (elapsed < 4 || elapsed > 6) {
     snprintf(buf,
              sizeof(buf),
-             "mismatch wr=%04u-%02u-%02u %02u:%02u:%02u rd=%04u-%02u-%02u %02u:%02u:%02u",
-             static_cast<unsigned int>(writeDt.year),
-             static_cast<unsigned int>(writeDt.month),
-             static_cast<unsigned int>(writeDt.day),
-             static_cast<unsigned int>(writeDt.hour),
-             static_cast<unsigned int>(writeDt.minute),
-             static_cast<unsigned int>(writeDt.second),
-             static_cast<unsigned int>(readDt.year),
-             static_cast<unsigned int>(readDt.month),
-             static_cast<unsigned int>(readDt.day),
-             static_cast<unsigned int>(readDt.hour),
-             static_cast<unsigned int>(readDt.minute),
-             static_cast<unsigned int>(readDt.second));
+             "elapsed=%ds out of range [4..6] start=%02u:%02u:%02u end=%02u:%02u:%02u",
+             elapsed,
+             static_cast<unsigned int>(startDt.hour),
+             static_cast<unsigned int>(startDt.minute),
+             static_cast<unsigned int>(startDt.second),
+             static_cast<unsigned int>(endDt.hour),
+             static_cast<unsigned int>(endDt.minute),
+             static_cast<unsigned int>(endDt.second));
     detail = buf;
     return false;
   }
 
   snprintf(buf,
            sizeof(buf),
-           "wr/rd ok %04u-%02u-%02u %02u:%02u:%02u%s",
-           static_cast<unsigned int>(readDt.year),
-           static_cast<unsigned int>(readDt.month),
-           static_cast<unsigned int>(readDt.day),
-           static_cast<unsigned int>(readDt.hour),
-           static_cast<unsigned int>(readDt.minute),
-           static_cast<unsigned int>(readDt.second),
+           "elapsed=%ds ok start=%02u:%02u:%02u end=%02u:%02u:%02u%s",
+           elapsed,
+           static_cast<unsigned int>(startDt.hour),
+           static_cast<unsigned int>(startDt.minute),
+           static_cast<unsigned int>(startDt.second),
+           static_cast<unsigned int>(endDt.hour),
+           static_cast<unsigned int>(endDt.minute),
+           static_cast<unsigned int>(endDt.second),
            beforeOk ? " (restored)" : "");
   detail = buf;
   return true;
