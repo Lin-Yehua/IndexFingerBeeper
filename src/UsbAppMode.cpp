@@ -72,7 +72,7 @@ constexpr const char *kDefaultReminderMessage = u8"这个时候你似乎有什�
 constexpr uint32_t kSleepFileMagic = 0x53534E50UL;      // "SSNP"
 constexpr uint16_t kSleepFileVersion = 1;
 constexpr uint32_t kSleepRtcCtxMagic = 0x54534654UL;    // "TSFT"
-constexpr uint16_t kSleepRtcCtxVersion = 1;
+constexpr uint16_t kSleepRtcCtxVersion = 2;
 
 struct SleepRtcContext {
   uint32_t magic = 0;
@@ -81,6 +81,8 @@ struct SleepRtcContext {
   uint8_t appMode = 0;
   uint32_t nextWakeSec = 0;
   uint8_t pendingReminder = 0;
+  uint16_t reminderIntervalSec = 0;
+  uint16_t reminderTimes = 0;
   uint64_t expectedUnix = 0;
   char reminderMessage[kSleepTextMaxLen + 1] = {0};
 };
@@ -702,6 +704,8 @@ void clearSleepRtcContext() {
   gSleepRtcCtx.appMode = 0;
   gSleepRtcCtx.nextWakeSec = 0;
   gSleepRtcCtx.pendingReminder = 0;
+  gSleepRtcCtx.reminderIntervalSec = 0;
+  gSleepRtcCtx.reminderTimes = 0;
   gSleepRtcCtx.expectedUnix = 0;
   gSleepRtcCtx.reminderMessage[0] = '\0';
 }
@@ -2538,7 +2542,15 @@ static bool markCurrentMinuteScheduleAsTriggeredFromRtc() {
 bool computeNextReminderDelta(const ReminderSchedule &schedule,
                               uint64_t nowUnix,
                               uint32_t &outDeltaSec,
-                              char outMessage[kSleepTextMaxLen + 1]) {
+                              char outMessage[kSleepTextMaxLen + 1],
+                              uint16_t *outIntervalSec,
+                              uint16_t *outReminderTimes) {
+  if (outIntervalSec) {
+    *outIntervalSec = 0;
+  }
+  if (outReminderTimes) {
+    *outReminderTimes = 0;
+  }
   if (schedule.count == 0) return false;
 
   Ds1302DateTime nowDt;
@@ -2684,10 +2696,20 @@ bool computeNextReminderDelta(const ReminderSchedule &schedule,
   }
 
   outDeltaSec = bestDelta;
+  const ReminderSchedule::Entry *bestEntry =
+      (bestScheduleIndex < schedule.count) ? &schedule.entries[bestScheduleIndex] : nullptr;
+  if (bestEntry) {
+    if (outIntervalSec) {
+      *outIntervalSec = bestEntry->intervalSec;
+    }
+    if (outReminderTimes) {
+      *outReminderTimes = bestEntry->reminderTimes;
+    }
+  }
   if (outMessage) {
     String message = kDefaultReminderMessage;
-    if (bestScheduleIndex < schedule.count) {
-      message = String(schedule.entries[bestScheduleIndex].message);
+    if (bestEntry) {
+      message = String(bestEntry->message);
       message.trim();
       if (!message.length()) {
         message = kDefaultReminderMessage;
@@ -3013,6 +3035,8 @@ void markSleepRtcContextForSleep() {
   gSleepRtcCtx.appMode = static_cast<uint8_t>(gAppLoopMode);
   gSleepRtcCtx.nextWakeSec = kRtcWakeDefaultSec;
   gSleepRtcCtx.pendingReminder = 0;
+  gSleepRtcCtx.reminderIntervalSec = 0;
+  gSleepRtcCtx.reminderTimes = 0;
   gSleepRtcCtx.reminderMessage[0] = '\0';
 
   uint64_t nowUnix = 0;
@@ -3054,6 +3078,8 @@ bool handleRtcMaintenanceWake() {
   rtc.begin();
 
   gSleepRtcCtx.pendingReminder = 0;
+  gSleepRtcCtx.reminderIntervalSec = 0;
+  gSleepRtcCtx.reminderTimes = 0;
   gSleepRtcCtx.reminderMessage[0] = '\0';
 
   uint32_t nextWakeSec = kRtcWakeDefaultSec;
@@ -3068,19 +3094,30 @@ bool handleRtcMaintenanceWake() {
     ReminderSchedule &schedule = scheduleScratchBuffer();
     uint32_t nextReminderDelta = 0;
     char nextReminderMessage[kSleepTextMaxLen + 1] = {0};
+    uint16_t nextReminderIntervalSec = 0;
+    uint16_t nextReminderTimes = 0;
     const bool hasSchedule = loadReminderSchedule(schedule);
     if (hasSchedule &&
-        computeNextReminderDelta(schedule, nowUnix, nextReminderDelta, nextReminderMessage)) {
+        computeNextReminderDelta(schedule,
+                                 nowUnix,
+                                 nextReminderDelta,
+                                 nextReminderMessage,
+                                 &nextReminderIntervalSec,
+                                 &nextReminderTimes)) {
       if (nextReminderDelta <= kReminderTriggerWindowSec) {
         gSleepRtcCtx.pendingReminder = 1;
+        gSleepRtcCtx.reminderIntervalSec = nextReminderIntervalSec;
+        gSleepRtcCtx.reminderTimes = nextReminderTimes;
         memcpy(gSleepRtcCtx.reminderMessage,
                nextReminderMessage,
                sizeof(gSleepRtcCtx.reminderMessage));
         gSleepRtcCtx.reminderMessage[sizeof(gSleepRtcCtx.reminderMessage) - 1] = '\0';
         gSleepRtcCtx.expectedUnix = nowUnix;
         gSleepRtcCtx.nextWakeSec = 0;
-        Serial.printf("[SLEEP] reminder due now (delta=%u sec), continue boot\n",
-                      static_cast<unsigned int>(nextReminderDelta));
+        Serial.printf("[SLEEP] reminder due now (delta=%u sec, interval=%u, times=%u), continue boot\n",
+                      static_cast<unsigned int>(nextReminderDelta),
+                      static_cast<unsigned int>(nextReminderIntervalSec),
+                      static_cast<unsigned int>(nextReminderTimes));
         return true;
       }
 
@@ -3982,7 +4019,11 @@ void processAppLoop() {
   const bool instantRefreshNoKey = wirelessPortalInstantRefreshNoKeyEnabled();
   dispatchModeEnterIfNeeded();
   static AppLoopMode lastLoopMode = APP_MODE_AP_STA;
-  if (lastLoopMode != gAppLoopMode) {
+  static bool lastLoopModeInitialized = false;
+  if (!lastLoopModeInitialized) {
+    lastLoopMode = gAppLoopMode;
+    lastLoopModeInitialized = true;
+  } else if (lastLoopMode != gAppLoopMode) {
     irq = InterruptController{};
     clearScheduleInterruptQueue();
     lastLoopMode = gAppLoopMode;
@@ -4723,11 +4764,15 @@ bool appRestoreFromDeepSleepSnapshot() {
       (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) &&
       (gSleepRtcCtx.pendingReminder != 0);
   char reminderMessage[kSleepTextMaxLen + 1] = {0};
+  uint16_t reminderIntervalSec = 0;
+  uint16_t reminderTimes = 0;
   if (timerReminderWake) {
     memcpy(reminderMessage,
            gSleepRtcCtx.reminderMessage,
            sizeof(reminderMessage));
     reminderMessage[sizeof(reminderMessage) - 1] = '\0';
+    reminderIntervalSec = gSleepRtcCtx.reminderIntervalSec;
+    reminderTimes = gSleepRtcCtx.reminderTimes;
     if (!reminderMessage[0]) {
       sanitizeMessageForSnapshot(String(kDefaultReminderMessage), reminderMessage);
     }
@@ -4748,7 +4793,26 @@ bool appRestoreFromDeepSleepSnapshot() {
 
   if (timerReminderWake) {
     (void)markCurrentMinuteScheduleAsTriggeredFromRtc();
-    playMessageWithGlitch(reminderMessage);
+    clearScheduleInterruptQueue();
+    if (appendScheduleInterruptQueueItem(String(reminderMessage),
+                                         reminderIntervalSec,
+                                         reminderTimes,
+                                         false)) {
+      // Keep legacy behavior: timer reminder wake should play immediately
+      // without waiting for processAppLoop state gates.
+      gScheduleInterruptPendingStart = false;
+      gScheduleInterruptActive = true;
+      gScheduleInterruptKeyLatch = false;
+      gScheduleInterruptQueue[0].reminderCount = 0;
+      playMessageWithGlitch(gScheduleInterruptQueue[0].text);
+      gScheduleInterruptLastPlayMs = millis();
+      Serial.printf("[SLEEP] reminder played immediately and queued (interval=%u, times=%u)\n",
+                    static_cast<unsigned int>(reminderIntervalSec),
+                    static_cast<unsigned int>(reminderTimes));
+    } else {
+      Serial.println("[SLEEP] reminder queue restore failed, fallback single play");
+      playMessageWithGlitch(reminderMessage);
+    }
   }
 
   (void)FFat.remove(kSleepSnapshotPath);
