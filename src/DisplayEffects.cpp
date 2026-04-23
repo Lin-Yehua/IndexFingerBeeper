@@ -541,7 +541,10 @@ void task_LogoFadeInAndMove(void *pvParameters) {
   tft.fillRect(0, 50, 320, 160, 0x0000);
   tft.pushImage(160 - 60, 150 - 60, 120, 120, (uint16_t *)Index_B);
   delay(50);
-  ledcWrite(0, scaledBacklightDuty(255));
+  for(uint8_t N = 0 ;N <= scaledBacklightDuty(255); N++) {
+    ledcWrite(0, N);
+    delay(5);
+  }
   
   if (notifyTask) {
     xTaskNotifyGive(notifyTask);
