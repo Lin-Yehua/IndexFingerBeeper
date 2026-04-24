@@ -2,6 +2,7 @@
 #include <TFT_eSPI.h>
 #include <USB.h>
 #include "driver/i2s.h"
+#include "esp_timer.h"
 #include "Ds1302Rtc.h"
 #include <math.h>
 
@@ -23,6 +24,15 @@ constexpr uint16_t kHeaderY = 4;
 constexpr uint16_t kLogStartY = 24;
 constexpr uint16_t kRowHeight = 16;
 
+constexpr int kGpio2AdcMinMilliVolts = 2400;
+constexpr int kGpio2AdcMaxPeakToPeakMilliVolts = 180;
+constexpr int kGpio2AdcMaxAbsDeviationMilliVolts = 90;
+constexpr uint16_t kGpio2AdcSampleCount = 40;
+constexpr uint16_t kGpio2AdcSampleIntervalMs = 20;
+
+constexpr uint16_t kDs1302DriftObserveSeconds = 40;
+constexpr int64_t kDs1302MaxAbsDriftMsPerDay = 45000;  // 45s/day
+
 TFT_eSPI tft = TFT_eSPI();
 
 uint16_t gLogY = kLogStartY;
@@ -43,6 +53,80 @@ void appendScreenLine(const String &line, uint16_t color = TFT_WHITE) {
 void logBoth(const String &line, uint16_t color = TFT_WHITE) {
   Serial.println(line);
   appendScreenLine(line, color);
+}
+
+bool isLeapYear(uint16_t year) {
+  if ((year % 4U) != 0U) return false;
+  if ((year % 100U) != 0U) return true;
+  return (year % 400U) == 0U;
+}
+
+uint8_t daysInMonth(uint16_t year, uint8_t month) {
+  static const uint8_t kDays[12] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  if (month < 1 || month > 12) return 0;
+  if (month == 2 && isLeapYear(year)) return 29;
+  return kDays[month - 1];
+}
+
+bool ds1302DateTimeToSecondsSince2000(const Ds1302DateTime &dt, int64_t &outSeconds) {
+  if (!ds1302IsValidDateTime(dt)) return false;
+
+  int64_t days = 0;
+  for (uint16_t year = 2000; year < dt.year; ++year) {
+    days += isLeapYear(year) ? 366 : 365;
+  }
+  for (uint8_t month = 1; month < dt.month; ++month) {
+    days += daysInMonth(dt.year, month);
+  }
+  days += static_cast<int64_t>(dt.day) - 1;
+
+  outSeconds =
+      days * 86400LL +
+      static_cast<int64_t>(dt.hour) * 3600LL +
+      static_cast<int64_t>(dt.minute) * 60LL +
+      static_cast<int64_t>(dt.second);
+  return true;
+}
+
+bool isDateTimeSecondChanged(const Ds1302DateTime &a, const Ds1302DateTime &b) {
+  return a.year != b.year ||
+         a.month != b.month ||
+         a.day != b.day ||
+         a.hour != b.hour ||
+         a.minute != b.minute ||
+         a.second != b.second;
+}
+
+bool waitForRtcSecondTick(Ds1302DateTime &tickDt, uint64_t &tickUs, uint32_t timeoutMs) {
+  Ds1302DateTime prev = {};
+  if (!rtc.readDateTime(prev) || !ds1302IsValidDateTime(prev)) {
+    return false;
+  }
+
+  const uint32_t t0 = millis();
+  while (millis() - t0 < timeoutMs) {
+    Ds1302DateTime now = {};
+    if (rtc.readDateTime(now) && ds1302IsValidDateTime(now)) {
+      if (isDateTimeSecondChanged(now, prev)) {
+        tickDt = now;
+        tickUs = static_cast<uint64_t>(esp_timer_get_time());
+        return true;
+      }
+      prev = now;
+    }
+    delay(2);
+  }
+
+  return false;
+}
+
+int readGpio2MilliVolts() {
+  int mv = analogReadMilliVolts(kKeyPin);
+  if (mv > 0) return mv;
+
+  const int raw = analogRead(kKeyPin);
+  if (raw < 0) return -1;
+  return (raw * 3300) / 4095;
 }
 
 bool initI2sOutput() {
@@ -191,78 +275,146 @@ bool testUsb(String &detail) {
 bool testRtcDs1302(String &detail) {
   rtc.begin();
 
-  Ds1302DateTime before = {};
-  const bool beforeOk = rtc.readDateTime(before) && ds1302IsValidDateTime(before);
+  Ds1302DateTime backup = {};
+  const bool backupOk = rtc.readDateTime(backup) && ds1302IsValidDateTime(backup);
+  auto appendRestoreStatus = [&](String &text) {
+    if (!backupOk) return;
+    if (rtc.writeDateTime(backup)) {
+      text += " | restored";
+    } else {
+      text += " | restore failed";
+    }
+  };
 
   Ds1302DateTime writeDt = {};
   writeDt.year = 2026;
   writeDt.month = 4;
-  writeDt.day = 21;
+  writeDt.day = 24;
   writeDt.hour = 12;
   writeDt.minute = 0;
   writeDt.second = 0;
 
   if (!rtc.writeDateTime(writeDt)) {
     detail = "write failed";
+    appendRestoreStatus(detail);
+    return false;
+  }
+
+  delay(30);
+  Ds1302DateTime verifyDt = {};
+  if (!rtc.readDateTime(verifyDt) || !ds1302IsValidDateTime(verifyDt)) {
+    detail = "verify read invalid";
+    appendRestoreStatus(detail);
+    return false;
+  }
+
+  int64_t writeSec = 0;
+  int64_t verifySec = 0;
+  if (!ds1302DateTimeToSecondsSince2000(writeDt, writeSec) ||
+      !ds1302DateTimeToSecondsSince2000(verifyDt, verifySec)) {
+    detail = "verify convert failed";
+    appendRestoreStatus(detail);
+    return false;
+  }
+  if (llabs(verifySec - writeSec) > 1LL) {
+    char buf[128] = {0};
+    snprintf(buf,
+             sizeof(buf),
+             "verify mismatch set=%02u:%02u:%02u read=%02u:%02u:%02u",
+             static_cast<unsigned int>(writeDt.hour),
+             static_cast<unsigned int>(writeDt.minute),
+             static_cast<unsigned int>(writeDt.second),
+             static_cast<unsigned int>(verifyDt.hour),
+             static_cast<unsigned int>(verifyDt.minute),
+             static_cast<unsigned int>(verifyDt.second));
+    detail = buf;
+    appendRestoreStatus(detail);
     return false;
   }
 
   Ds1302DateTime startDt = {};
-  if (!rtc.readDateTime(startDt) || !ds1302IsValidDateTime(startDt)) {
-    detail = "read start invalid";
+  uint64_t startUs = 0;
+  if (!waitForRtcSecondTick(startDt, startUs, 3000U)) {
+    detail = "tick start timeout";
+    appendRestoreStatus(detail);
     return false;
   }
 
-  delay(5000);
+  Ds1302DateTime endDt = startDt;
+  uint64_t endUs = startUs;
+  for (uint16_t i = 0; i < kDs1302DriftObserveSeconds; ++i) {
+    if (!waitForRtcSecondTick(endDt, endUs, 2500U)) {
+      char buf[64] = {0};
+      snprintf(buf, sizeof(buf), "tick timeout at %u/%u", static_cast<unsigned int>(i), static_cast<unsigned int>(kDs1302DriftObserveSeconds));
+      detail = buf;
+      appendRestoreStatus(detail);
+      return false;
+    }
+  }
 
-  Ds1302DateTime endDt = {};
-  if (!rtc.readDateTime(endDt) || !ds1302IsValidDateTime(endDt)) {
-    detail = "read end invalid";
+  int64_t startSec = 0;
+  int64_t endSec = 0;
+  if (!ds1302DateTimeToSecondsSince2000(startDt, startSec) ||
+      !ds1302DateTimeToSecondsSince2000(endDt, endSec)) {
+    detail = "elapsed convert failed";
+    appendRestoreStatus(detail);
+    return false;
+  }
+  const int64_t rtcElapsedSec = endSec - startSec;
+  if (rtcElapsedSec <= 0) {
+    detail = "elapsed <= 0";
+    appendRestoreStatus(detail);
     return false;
   }
 
-  const int startSec =
-      static_cast<int>(startDt.hour) * 3600 +
-      static_cast<int>(startDt.minute) * 60 +
-      static_cast<int>(startDt.second);
-  const int endSec =
-      static_cast<int>(endDt.hour) * 3600 +
-      static_cast<int>(endDt.minute) * 60 +
-      static_cast<int>(endDt.second);
-  const int elapsed = endSec - startSec;
-
-  if (beforeOk) {
-    (void)rtc.writeDateTime(before);
+  const uint64_t mcuElapsedUs = endUs - startUs;
+  if (mcuElapsedUs == 0U) {
+    detail = "elapsed us=0";
+    appendRestoreStatus(detail);
+    return false;
   }
 
-  char buf[160] = {0};
-  if (elapsed < 4 || elapsed > 6) {
+  const int64_t rtcElapsedUs = rtcElapsedSec * 1000000LL;
+  const int64_t driftUs = rtcElapsedUs - static_cast<int64_t>(mcuElapsedUs);
+  const int64_t driftPpm = (driftUs * 1000000LL) / static_cast<int64_t>(mcuElapsedUs);
+  const int64_t driftMsPerDay = (driftUs * 86400000LL) / static_cast<int64_t>(mcuElapsedUs);
+  const bool driftOk = llabs(driftMsPerDay) <= kDs1302MaxAbsDriftMsPerDay;
+  char buf[192] = {0};
+
+  if (rtcElapsedSec < static_cast<int64_t>(kDs1302DriftObserveSeconds - 1) ||
+      rtcElapsedSec > static_cast<int64_t>(kDs1302DriftObserveSeconds + 1)) {
     snprintf(buf,
              sizeof(buf),
-             "elapsed=%ds out of range [4..6] start=%02u:%02u:%02u end=%02u:%02u:%02u",
-             elapsed,
-             static_cast<unsigned int>(startDt.hour),
-             static_cast<unsigned int>(startDt.minute),
-             static_cast<unsigned int>(startDt.second),
-             static_cast<unsigned int>(endDt.hour),
-             static_cast<unsigned int>(endDt.minute),
-             static_cast<unsigned int>(endDt.second));
+             "rtc elapsed out of range=%llds expect~%us",
+             static_cast<long long>(rtcElapsedSec),
+             static_cast<unsigned int>(kDs1302DriftObserveSeconds));
     detail = buf;
+    appendRestoreStatus(detail);
+    return false;
+  }
+
+  if (!driftOk) {
+    snprintf(buf,
+             sizeof(buf),
+             "drift too large rtc=%llds mcu=%llums day=%lldms ppm=%lld",
+             static_cast<long long>(rtcElapsedSec),
+             static_cast<unsigned long long>(mcuElapsedUs / 1000ULL),
+             static_cast<long long>(driftMsPerDay),
+             static_cast<long long>(driftPpm));
+    detail = buf;
+    appendRestoreStatus(detail);
     return false;
   }
 
   snprintf(buf,
            sizeof(buf),
-           "elapsed=%ds ok start=%02u:%02u:%02u end=%02u:%02u:%02u%s",
-           elapsed,
-           static_cast<unsigned int>(startDt.hour),
-           static_cast<unsigned int>(startDt.minute),
-           static_cast<unsigned int>(startDt.second),
-           static_cast<unsigned int>(endDt.hour),
-           static_cast<unsigned int>(endDt.minute),
-           static_cast<unsigned int>(endDt.second),
-           beforeOk ? " (restored)" : "");
+           "drift ok rtc=%llds mcu=%llums day=%lldms ppm=%lld",
+           static_cast<long long>(rtcElapsedSec),
+           static_cast<unsigned long long>(mcuElapsedUs / 1000ULL),
+           static_cast<long long>(driftMsPerDay),
+           static_cast<long long>(driftPpm));
   detail = buf;
+  appendRestoreStatus(detail);
   return true;
 }
 
@@ -290,25 +442,63 @@ bool testKey(String &detail) {
   return false;
 }
 
-bool testSerialRx(String &detail) {
-  logBoth("[ACTION] Send any byte in Serial Monitor within 8s", TFT_YELLOW);
-  const uint32_t t0 = millis();
-  while (millis() - t0 < 8000U) {
-    if (Serial.available() > 0) {
-      const uint8_t b = static_cast<uint8_t>(Serial.read());
-      while (Serial.available() > 0) {
-        Serial.read();
-      }
-      char buf[24] = {0};
-      snprintf(buf, sizeof(buf), "rx byte=0x%02X", static_cast<unsigned int>(b));
-      detail = buf;
-      return true;
+bool testGpio2Adc(String &detail) {
+  pinMode(kKeyPin, INPUT);
+#if defined(ARDUINO_ARCH_ESP32)
+  analogReadResolution(12);
+  analogSetPinAttenuation(kKeyPin, ADC_11db);
+#endif
+
+  int samples[kGpio2AdcSampleCount] = {0};
+  int minMv = 5000;
+  int maxMv = 0;
+  int64_t sumMv = 0;
+
+  for (uint16_t i = 0; i < kGpio2AdcSampleCount; ++i) {
+    const int mv = readGpio2MilliVolts();
+    if (mv <= 0) {
+      detail = "adc read failed";
+      return false;
     }
-    delay(10);
+    samples[i] = mv;
+    if (mv < minMv) minMv = mv;
+    if (mv > maxMv) maxMv = mv;
+    sumMv += mv;
+
+    if (i + 1 < kGpio2AdcSampleCount) {
+      delay(kGpio2AdcSampleIntervalMs);
+    }
   }
 
-  detail = "rx timeout";
-  return false;
+  const int avgMv = static_cast<int>((sumMv + (kGpio2AdcSampleCount / 2)) / kGpio2AdcSampleCount);
+  int maxAbsDevMv = 0;
+  for (uint16_t i = 0; i < kGpio2AdcSampleCount; ++i) {
+    const int dev = abs(samples[i] - avgMv);
+    if (dev > maxAbsDevMv) maxAbsDevMv = dev;
+  }
+  const int ppMv = maxMv - minMv;
+
+  char buf[160] = {0};
+  snprintf(buf,
+           sizeof(buf),
+           "avg=%dmV min=%dmV max=%dmV pp=%dmV dev=%dmV",
+           avgMv,
+           minMv,
+           maxMv,
+           ppMv,
+           maxAbsDevMv);
+  detail = buf;
+
+  if (avgMv < kGpio2AdcMinMilliVolts) {
+    detail += " (<2400mV)";
+    return false;
+  }
+  if (ppMv > kGpio2AdcMaxPeakToPeakMilliVolts || maxAbsDevMv > kGpio2AdcMaxAbsDeviationMilliVolts) {
+    detail += " (unstable)";
+    return false;
+  }
+
+  return true;
 }
 
 }  // namespace
@@ -336,7 +526,7 @@ void setup() {
   tft.println("HW SELF TEST");
   tft.drawFastHLine(0, kLogStartY - 2, 320, TFT_DARKGREY);
 
-  logBoth("Hardware map: BL14 KEY2 AMP42 I2S(40,39,41) RTC(47,48,45)", TFT_CYAN);
+  logBoth("Hardware map: BL14 KEY2/ADC2 AMP42 I2S(40,39,41) RTC(47,48,45)", TFT_CYAN);
 
   int total = 0;
   int pass = 0;
@@ -373,8 +563,8 @@ void setup() {
   ++total;
   if (ok) ++pass;
 
-  ok = testSerialRx(detail);
-  reportResult("Serial RX", ok, detail);
+  ok = testGpio2Adc(detail);
+  reportResult("GPIO2 ADC", ok, detail);
   ++total;
   if (ok) ++pass;
 
@@ -393,13 +583,6 @@ void loop() {
     }
   } else {
     keyLatch = false;
-  }
-
-  if (Serial.available() > 0) {
-    const uint8_t b = static_cast<uint8_t>(Serial.read());
-    Serial.printf("[ECHO] 0x%02X\n", static_cast<unsigned int>(b));
-    appendScreenLine(String("[ECHO] 0x") + String(b, HEX), TFT_YELLOW);
-    playTone(900, 60);
   }
 
   delay(20);
