@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
+import hmac
 import math
 import os
 import random
 import re
+import secrets
 import threading
 import time
 from typing import Dict, List, Optional, Tuple
 
 from flask import (
     Flask,
+    Response,
     abort,
     jsonify,
     redirect,
@@ -43,17 +46,39 @@ UUID_RE = re.compile(r"^UUID\d{14}$")
 MAC_COMPACT_RE = re.compile(r"^[0-9A-F]{12}$")
 
 API_HOST = os.environ.get("CSV_API_HOST", "0.0.0.0")
-API_HTTP_PORT = int(os.environ.get("API_HTTP_PORT", "80"))
-# HTTP-only mode:
-# - prefer WEB_HTTP_PORT
-# - fallback to legacy WEB_HTTPS_PORT for compatibility
-WEB_HTTP_PORT = int(os.environ.get("WEB_HTTP_PORT", os.environ.get("WEB_HTTPS_PORT", "8080")))
+API_HTTP_PORT = int(os.environ.get("API_HTTP_PORT", "8080"))
+WEB_HTTP_PORT = int(os.environ.get("WEB_HTTP_PORT", "80"))
+WEB_HTTP_REDIRECT_TO_HTTPS = (os.environ.get("WEB_HTTP_REDIRECT_TO_HTTPS", "1").strip().lower() in {"1", "true", "yes", "on"})
+WEB_PUBLIC_HOST = (os.environ.get("WEB_PUBLIC_HOST") or "").strip()
+# Web UI must be served over HTTPS:
+# - WEB_HTTP_PORT serves redirect entry (http -> https)
+# - WEB_HTTPS_PORT serves actual pages
+WEB_HTTPS_PORT = int(os.environ.get("WEB_HTTPS_PORT", "443"))
+WEB_HTTPS_CERT_FILE = (os.environ.get("WEB_HTTPS_CERT_FILE") or "").strip()
+WEB_HTTPS_KEY_FILE = (os.environ.get("WEB_HTTPS_KEY_FILE") or "").strip()
+WEB_HTTPS_USE_ADHOC = (os.environ.get("WEB_HTTPS_USE_ADHOC", "1").strip().lower() in {"1", "true", "yes", "on"})
+WEB_AUTH_USER = (os.environ.get("WEB_AUTH_USER", "admin") or "admin").strip()
+WEB_AUTH_PASSWORD = (os.environ.get("WEB_AUTH_PASSWORD") or "").strip()
+WEB_AUTH_PASSWORD_IS_TEMP = False
+if not WEB_AUTH_PASSWORD:
+    WEB_AUTH_PASSWORD = secrets.token_urlsafe(18)
+    WEB_AUTH_PASSWORD_IS_TEMP = True
 CLIENT_SOCKET_TIMEOUT_SEC = float(os.environ.get("CSV_API_CLIENT_TIMEOUT_SEC", "8"))
 
 NOTICE_LEVELS = {"info", "ok", "warn", "error"}
 
 api_app = Flask("csv_api_http")
+web_http_app = Flask("csv_api_web_http_redirect")
 web_app = Flask("csv_api_web", template_folder=WEB_UI_DIR, static_folder=None)
+PROTECTED_WEB_ENDPOINTS = {
+    "admin_page",
+    "admin_add",
+    "admin_update",
+    "admin_delete",
+    "review_page",
+    "approve",
+    "reject",
+}
 
 
 class TimeoutWSGIRequestHandler(WSGIRequestHandler):
@@ -295,6 +320,93 @@ class ServerThread(threading.Thread):
         self._server.shutdown()
 
 
+def resolve_web_ssl_context():
+    cert_file = WEB_HTTPS_CERT_FILE
+    key_file = WEB_HTTPS_KEY_FILE
+
+    if cert_file or key_file:
+        if not cert_file or not key_file:
+            raise RuntimeError("Both WEB_HTTPS_CERT_FILE and WEB_HTTPS_KEY_FILE must be set.")
+        if not os.path.isfile(cert_file):
+            raise RuntimeError(f"WEB_HTTPS_CERT_FILE not found: {cert_file}")
+        if not os.path.isfile(key_file):
+            raise RuntimeError(f"WEB_HTTPS_KEY_FILE not found: {key_file}")
+        return cert_file, key_file
+
+    if WEB_HTTPS_USE_ADHOC:
+        # Development fallback: Werkzeug generates a temporary self-signed cert.
+        return "adhoc"
+
+    raise RuntimeError(
+        "HTTPS is required for Web UI. Set WEB_HTTPS_CERT_FILE and WEB_HTTPS_KEY_FILE,"
+        " or enable WEB_HTTPS_USE_ADHOC=1."
+    )
+
+
+def web_auth_failed_response() -> Response:
+    return Response(
+        "Authentication required",
+        401,
+        {"WWW-Authenticate": 'Basic realm="CSV Admin", charset="UTF-8"'},
+    )
+
+
+def is_web_auth_ok() -> bool:
+    auth = request.authorization
+    if not auth or (auth.type or "").lower() != "basic":
+        return False
+
+    username = auth.username or ""
+    password = auth.password or ""
+    return hmac.compare_digest(username, WEB_AUTH_USER) and hmac.compare_digest(password, WEB_AUTH_PASSWORD)
+
+
+@web_app.before_request
+def protect_admin_review_routes():
+    if request.endpoint not in PROTECTED_WEB_ENDPOINTS:
+        return None
+    if is_web_auth_ok():
+        return None
+    return web_auth_failed_response()
+
+
+def _host_without_port(raw_host: str) -> str:
+    host = (raw_host or "").strip()
+    if not host:
+        return ""
+    if host.startswith("["):
+        close_idx = host.find("]")
+        return host if close_idx < 0 else host[: close_idx + 1]
+    if ":" in host:
+        return host.split(":", 1)[0]
+    return host
+
+
+def build_https_redirect_target(path: str) -> str:
+    preferred_host = WEB_PUBLIC_HOST or request.host
+    host = _host_without_port(preferred_host)
+    if not host:
+        host = "localhost"
+    if WEB_HTTPS_PORT == 443:
+        host_part = host
+    else:
+        host_part = f"{host}:{WEB_HTTPS_PORT}"
+
+    target = f"https://{host_part}{path}"
+    if request.query_string:
+        target += "?" + request.query_string.decode("utf-8", errors="ignore")
+    return target
+
+
+@web_http_app.route("/", defaults={"subpath": ""}, methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
+@web_http_app.route("/<path:subpath>", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
+def web_http_redirect(subpath: str):
+    if not WEB_HTTP_REDIRECT_TO_HTTPS:
+        return Response("Web HTTP redirect disabled.", 404)
+    path = f"/{subpath}" if subpath else "/"
+    return redirect(build_https_redirect_target(path), code=308)
+
+
 @api_app.route("/", methods=["GET"])
 def api_index():
     return jsonify(
@@ -303,7 +415,10 @@ def api_index():
             "service": "csv_api",
             "api": ["/random", "/health"],
             "web": ["/admin", "/submit", "/review", "/bottle"],
+            "api_http_port": API_HTTP_PORT,
             "web_http_port": WEB_HTTP_PORT,
+            "web_https_port": WEB_HTTPS_PORT,
+            "web_http_redirect_to_https": WEB_HTTP_REDIRECT_TO_HTTPS,
         }
     ), 200
 
@@ -703,17 +818,41 @@ def reject():
     )
 
 
+def validate_server_ports() -> None:
+    ports = {
+        "API_HTTP_PORT": API_HTTP_PORT,
+        "WEB_HTTP_PORT": WEB_HTTP_PORT,
+        "WEB_HTTPS_PORT": WEB_HTTPS_PORT,
+    }
+    seen: Dict[int, str] = {}
+    for name, port in ports.items():
+        if port in seen:
+            raise RuntimeError(f"Port conflict: {name} and {seen[port]} both use {port}.")
+        seen[port] = name
+
+
 def run_servers() -> None:
     ensure_data_dir()
+    validate_server_ports()
+    web_ssl_context = resolve_web_ssl_context()
 
     api_server = ServerThread(api_app, API_HOST, API_HTTP_PORT)
-    web_server = ServerThread(web_app, API_HOST, WEB_HTTP_PORT)
+    web_http_server = ServerThread(web_http_app, API_HOST, WEB_HTTP_PORT)
+    web_server = ServerThread(web_app, API_HOST, WEB_HTTPS_PORT, ssl_context=web_ssl_context)
 
     api_server.start()
+    web_http_server.start()
     web_server.start()
 
     print(f"[API ] http://{API_HOST}:{API_HTTP_PORT}")
-    print(f"[WEB ] http://{API_HOST}:{WEB_HTTP_PORT}")
+    if WEB_HTTP_REDIRECT_TO_HTTPS:
+        print(f"[WEB ] http://{API_HOST}:{WEB_HTTP_PORT} -> https://{WEB_PUBLIC_HOST or API_HOST}:{WEB_HTTPS_PORT}")
+    else:
+        print(f"[WEB ] http://{API_HOST}:{WEB_HTTP_PORT} (redirect disabled)")
+    print(f"[WEB ] https://{API_HOST}:{WEB_HTTPS_PORT}")
+    if WEB_AUTH_PASSWORD_IS_TEMP:
+        print(f"[WEB ] WEB_AUTH_USER={WEB_AUTH_USER}")
+        print(f"[WEB ] WEB_AUTH_PASSWORD={WEB_AUTH_PASSWORD} (temporary, set WEB_AUTH_PASSWORD to override)")
 
     try:
         while True:
@@ -722,6 +861,7 @@ def run_servers() -> None:
         print("Shutting down...")
     finally:
         api_server.shutdown()
+        web_http_server.shutdown()
         web_server.shutdown()
 
 
