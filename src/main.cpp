@@ -24,8 +24,8 @@ constexpr uint16_t kHeaderY = 4;
 constexpr uint16_t kLogStartY = 24;
 constexpr uint16_t kRowHeight = 16;
 
-constexpr int kGpio2AdcMinMilliVolts = 2400;
-constexpr int kGpio2AdcMaxPeakToPeakMilliVolts = 180;
+constexpr int kGpio2AdcMinMilliVolts = 2000;
+constexpr int kGpio2AdcMaxPeakToPeakMilliVolts = 380;
 constexpr int kGpio2AdcMaxAbsDeviationMilliVolts = 90;
 constexpr uint16_t kGpio2AdcSampleCount = 40;
 constexpr uint16_t kGpio2AdcSampleIntervalMs = 20;
