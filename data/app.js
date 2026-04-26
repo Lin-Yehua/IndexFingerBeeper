@@ -13,9 +13,8 @@ const st = {
   cmdAutoTimer: null,
   scheduleAutoTimer: null,
   cmdAutoSaving: false,
-  scheduleAutoSaving: false,
   cmdAutoResave: false,
-  scheduleAutoResave: false,
+  scheduleSaveChain: null,
   rtcBaseMs: 0,
   rtcSyncedAtMs: 0,
   scheduleDateTouched: false
@@ -88,6 +87,15 @@ const setCmdRetryVisible = (show) => {
 const setScheduleRetryVisible = (show) => {
   if (el.btnScheduleRetry) el.btnScheduleRetry.hidden = !show;
   if (show && el.scheduleAdvanced) el.scheduleAdvanced.open = true;
+};
+const enqueueScheduleSave = (options = {}) => {
+  const reload = options.reload !== false;
+  const showStatus = options.showStatus !== false;
+  const run = () => saveSchedules({ reload, showStatus });
+  st.scheduleSaveChain = Promise.resolve(st.scheduleSaveChain)
+    .catch(() => ({ ok: false, message: "schedule save chain recovered" }))
+    .then(run);
+  return st.scheduleSaveChain;
 };
 
 function syncRtcClockFromDevice(d) {
@@ -645,27 +653,13 @@ async function runScheduleAutoSave() {
     setStatus(el.scheduleStatus, "自动保存已关闭");
     return;
   }
-  if (st.scheduleAutoSaving) {
-    st.scheduleAutoResave = true;
-    return;
-  }
-  st.scheduleAutoSaving = true;
-  const ret = await saveSchedules({ reload: false, showStatus: false });
+  const ret = await enqueueScheduleSave({ reload: false, showStatus: false });
   if (ret.ok) {
     setStatus(el.scheduleStatus, "日程表已自动保存");
     setScheduleRetryVisible(false);
   } else {
     setStatus(el.scheduleStatus, `日程自动保存失败: ${ret.message}`, true);
     setScheduleRetryVisible(true);
-  }
-  st.scheduleAutoSaving = false;
-  if (st.scheduleAutoResave) {
-    st.scheduleAutoResave = false;
-    if (st.scheduleAutoTimer) clearTimeout(st.scheduleAutoTimer);
-    st.scheduleAutoTimer = setTimeout(() => {
-      st.scheduleAutoTimer = null;
-      void runScheduleAutoSave();
-    }, AUTO_SAVE_DELAY_MS);
   }
 }
 
@@ -831,13 +825,15 @@ async function saveSchedulesManual() {
     clearTimeout(st.scheduleAutoTimer);
     st.scheduleAutoTimer = null;
   }
-  st.scheduleAutoResave = false;
-  const ret = await saveSchedules({ reload: true, showStatus: true });
+  const ret = await enqueueScheduleSave({ reload: true, showStatus: true });
   setScheduleRetryVisible(!ret.ok);
   return ret;
 }
 
 function addSchedule() {
+  // Once user adds a schedule, keep the selected date stable and stop
+  // background RTC polling from auto-switching the day filter.
+  st.scheduleDateTouched = true;
   const d = pickDay(); const [h, m] = (el.scheduleAddTime.value || "09:00").split(":").map((x) => toInt(x, 0));
   const it = {
     id: `sc_${Date.now()}_${Math.random().toString(16).slice(2, 6)}`,
@@ -1106,7 +1102,6 @@ function bind() {
       saveAutoSavePrefs();
       if (!isScheduleAutoSaveEnabled()) {
         if (st.scheduleAutoTimer) { clearTimeout(st.scheduleAutoTimer); st.scheduleAutoTimer = null; }
-        st.scheduleAutoResave = false;
         setStatus(el.scheduleStatus, "日程自动保存已关闭");
       } else {
         setStatus(el.scheduleStatus, "日程自动保存已开启");
