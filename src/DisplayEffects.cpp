@@ -541,14 +541,29 @@ void task_LogoFadeInAndMove(void *pvParameters) {
   tft.fillRect(0, 50, 320, 160, 0x0000);
   tft.pushImage(160 - 60, 150 - 60, 120, 120, (uint16_t *)Index_B);
   delay(50);
-  for(uint8_t N = 0 ;N <= scaledBacklightDuty(255); N++) {
-    ledcWrite(0, N);
-    delay(5);
-  }
-  
+
+  // Release boot wait first so APP init / warning UI can run in parallel.
   if (notifyTask) {
     xTaskNotifyGive(notifyTask);
+    notifyTask = nullptr;
   }
+
+  const uint16_t targetDuty = scaledBacklightDuty(255);
+  uint16_t duty = static_cast<uint16_t>(ledcRead(0));
+  if (duty > targetDuty) {
+    duty = targetDuty;
+  }
+  while (duty < targetDuty) {
+    const uint16_t liveDuty = static_cast<uint16_t>(ledcRead(0));
+    if (liveDuty > duty) {
+      duty = (liveDuty > targetDuty) ? targetDuty : liveDuty;
+    }
+    if (duty >= targetDuty) break;
+    ++duty;
+    ledcWrite(0, static_cast<uint8_t>(duty));
+    delay(2);
+  }
+  
   vTaskDelete(NULL);
 }
 
