@@ -67,6 +67,13 @@ CLIENT_SOCKET_TIMEOUT_SEC = float(os.environ.get("CSV_API_CLIENT_TIMEOUT_SEC", "
 
 NOTICE_LEVELS = {"info", "ok", "warn", "error"}
 
+_PATH_LOCKS: Dict[str, threading.RLock] = {}
+_PATH_LOCKS_GUARD = threading.Lock()
+_MAIN_FILE_ABS = os.path.abspath(MAIN_FILE)
+_MAIN_CACHE_LOCK = threading.RLock()
+_MAIN_CACHE_MTIME_NS = -1
+_MAIN_CACHE_LINES: List[str] = []
+
 api_app = Flask("csv_api_http")
 web_http_app = Flask("csv_api_web_http_redirect")
 web_app = Flask("csv_api_web", template_folder=WEB_UI_DIR, static_folder=None)
@@ -90,12 +97,40 @@ class TimeoutWSGIRequestHandler(WSGIRequestHandler):
             pass
 
 
-@api_app.after_request
-def force_close_api_connection(response):
-    # ESP abrupt power-off during HTTP receive can leave keep-alive sockets hanging.
-    # For the API server, prefer short stateless requests and always close connection.
+def _force_close_connection(response):
+    # Keep long-running service stable: avoid keep-alive socket accumulation.
     response.headers["Connection"] = "close"
     return response
+
+
+api_app.after_request(_force_close_connection)
+web_http_app.after_request(_force_close_connection)
+web_app.after_request(_force_close_connection)
+
+
+def _normalize_path(path: str) -> str:
+    return os.path.abspath(path)
+
+
+def _is_main_file(path: str) -> bool:
+    return _normalize_path(path) == _MAIN_FILE_ABS
+
+
+def _get_path_lock(path: str) -> threading.RLock:
+    normalized = _normalize_path(path)
+    with _PATH_LOCKS_GUARD:
+        lock = _PATH_LOCKS.get(normalized)
+        if lock is None:
+            lock = threading.RLock()
+            _PATH_LOCKS[normalized] = lock
+        return lock
+
+
+def _invalidate_main_lines_cache() -> None:
+    global _MAIN_CACHE_MTIME_NS, _MAIN_CACHE_LINES
+    with _MAIN_CACHE_LOCK:
+        _MAIN_CACHE_MTIME_NS = -1
+        _MAIN_CACHE_LINES = []
 
 
 def ensure_data_dir() -> None:
@@ -107,7 +142,7 @@ def ensure_data_dir() -> None:
                 pass
 
 
-def read_nonempty_lines(file_path: str) -> List[str]:
+def _read_nonempty_lines_unlocked(file_path: str) -> List[str]:
     lines: List[str] = []
     if not os.path.isfile(file_path):
         return lines
@@ -120,18 +155,56 @@ def read_nonempty_lines(file_path: str) -> List[str]:
     return lines
 
 
+def read_nonempty_lines(file_path: str) -> List[str]:
+    lock = _get_path_lock(file_path)
+    with lock:
+        return _read_nonempty_lines_unlocked(file_path)
+
+
 def append_line(file_path: str, text: str) -> None:
     safe_text = text.replace("\r", " ").replace("\n", " ").strip()
-    with open(file_path, "a", encoding="utf-8", newline="") as f:
-        f.write(safe_text + "\n")
+    lock = _get_path_lock(file_path)
+    with lock:
+        with open(file_path, "a", encoding="utf-8", newline="") as f:
+            f.write(safe_text + "\n")
+    if _is_main_file(file_path):
+        _invalidate_main_lines_cache()
 
 
-def write_lines(file_path: str, lines: List[str]) -> None:
+def _write_lines_unlocked(file_path: str, lines: List[str]) -> None:
     with open(file_path, "w", encoding="utf-8", newline="") as f:
         for line in lines:
             safe_text = line.replace("\r", " ").replace("\n", " ").strip()
             if safe_text:
                 f.write(safe_text + "\n")
+
+
+def write_lines(file_path: str, lines: List[str]) -> None:
+    lock = _get_path_lock(file_path)
+    with lock:
+        _write_lines_unlocked(file_path, lines)
+    if _is_main_file(file_path):
+        _invalidate_main_lines_cache()
+
+
+def get_main_lines_cached() -> List[str]:
+    global _MAIN_CACHE_MTIME_NS, _MAIN_CACHE_LINES
+    ensure_data_dir()
+    lock = _get_path_lock(MAIN_FILE)
+    with lock:
+        try:
+            stat = os.stat(MAIN_FILE)
+            mtime_ns = getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))
+        except FileNotFoundError:
+            mtime_ns = -1
+
+        with _MAIN_CACHE_LOCK:
+            if _MAIN_CACHE_MTIME_NS == mtime_ns:
+                return list(_MAIN_CACHE_LINES)
+            lines = _read_nonempty_lines_unlocked(MAIN_FILE)
+            _MAIN_CACHE_LINES = list(lines)
+            _MAIN_CACHE_MTIME_NS = mtime_ns
+            return lines
 
 
 def normalize_uuid(raw: Optional[str]) -> str:
@@ -228,22 +301,26 @@ def ensure_device_file(uuid: str, mac_compact: str) -> str:
 
 
 def append_device_message(path: str, message: str) -> None:
-    lines = read_nonempty_lines(path)
-    lines.append(message)
-    if len(lines) > DEVICE_MESSAGE_LIMIT:
-        lines = lines[-DEVICE_MESSAGE_LIMIT:]
-    write_lines(path, lines)
+    lock = _get_path_lock(path)
+    with lock:
+        lines = _read_nonempty_lines_unlocked(path)
+        lines.append(message)
+        if len(lines) > DEVICE_MESSAGE_LIMIT:
+            lines = lines[-DEVICE_MESSAGE_LIMIT:]
+        _write_lines_unlocked(path, lines)
 
 
 def pop_oldest_device_message(path: str) -> Optional[str]:
-    if not os.path.isfile(path):
-        return None
-    lines = read_nonempty_lines(path)
-    if not lines:
-        return None
-    oldest = lines[0]
-    write_lines(path, lines[1:])
-    return oldest
+    lock = _get_path_lock(path)
+    with lock:
+        if not os.path.isfile(path):
+            return None
+        lines = _read_nonempty_lines_unlocked(path)
+        if not lines:
+            return None
+        oldest = lines[0]
+        _write_lines_unlocked(path, lines[1:])
+        return oldest
 
 
 def parse_positive_int(raw_value: Optional[str], default: int = 1) -> int:
@@ -434,7 +511,7 @@ def random_text():
         if queued:
             return jsonify({"ok": True, "text": queued, "source": "device_queue"}), 200
 
-    lines = read_nonempty_lines(MAIN_FILE)
+    lines = get_main_lines_cached()
     if not lines:
         return jsonify({"ok": False, "error": "No approved text found"}), 404
 
@@ -462,7 +539,7 @@ def home_page():
 def admin_page():
     ensure_data_dir()
 
-    approved_lines = read_nonempty_lines(MAIN_FILE)
+    approved_lines = get_main_lines_cached()
     pending_count = len(read_nonempty_lines(PENDING_FILE))
     device_overview = collect_device_overview()
 
@@ -514,7 +591,7 @@ def admin_add():
 
     append_line(MAIN_FILE, text)
 
-    approved_count = len(read_nonempty_lines(MAIN_FILE))
+    approved_count = len(get_main_lines_cached())
     target_index = max(approved_count - 1, 0)
     target_page = (target_index // PAGE_SIZE) + 1
 
@@ -532,7 +609,7 @@ def admin_update():
     ensure_data_dir()
 
     current_page = parse_positive_int(request.form.get("page"), 1)
-    approved_lines = read_nonempty_lines(MAIN_FILE)
+    approved_lines = get_main_lines_cached()
 
     try:
         index = int((request.form.get("index") or "").strip())
@@ -572,7 +649,7 @@ def admin_delete():
     ensure_data_dir()
 
     current_page = parse_positive_int(request.form.get("page"), 1)
-    approved_lines = read_nonempty_lines(MAIN_FILE)
+    approved_lines = get_main_lines_cached()
 
     try:
         index = int((request.form.get("index") or "").strip())
@@ -636,7 +713,7 @@ def review_page():
     ensure_data_dir()
 
     pending_lines = read_nonempty_lines(PENDING_FILE)
-    approved_count = len(read_nonempty_lines(MAIN_FILE))
+    approved_count = len(get_main_lines_cached())
 
     requested_page = parse_positive_int(request.args.get("page"), 1)
     page_lines, page, total_pages, start_index = paginate(pending_lines, requested_page, PAGE_SIZE)
@@ -702,7 +779,7 @@ def bottle_send():
 
     final_message = message
     if username:
-        final_message = f"[{username}]：{message}"
+        final_message = f"[{username}] {message}"
 
     devices = list_known_devices()
     target: Optional[Dict[str, str]] = None
@@ -720,7 +797,7 @@ def bottle_send():
         if target_uuid:
             uuid_matches = [item for item in devices if item["uuid"] == target_uuid]
             if not uuid_matches:
-                return redirect_with_notice("bottle_page", msg="UUID不存在", level="warn")
+                return redirect_with_notice("bottle_page", msg="UUID does not exist.", level="warn")
             target = uuid_matches[0]
         elif target_mac:
             mac_matches = [item for item in devices if item["mac_compact"] == target_mac]
