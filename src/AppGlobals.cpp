@@ -4,6 +4,11 @@ const char *kFatPartitionLabel = "fatfs";
 const char *kFatMountPoint = "/fat";
 const char *kLittleFsPartitionLabel = "littlefs";
 
+namespace {
+portMUX_TYPE sFatFsWriteMutexCreateMux = portMUX_INITIALIZER_UNLOCKED;
+SemaphoreHandle_t sFatFsWriteMutex = nullptr;
+}
+
 TFT_eSPI tft = TFT_eSPI();
 TFT_eSprite Text = TFT_eSprite(&tft);
 TFT_eSprite spriteBoot = TFT_eSprite(&tft);
@@ -45,3 +50,31 @@ int gBacklightCloseTimeSec = 20;
 int gSleepTimeMin = 1;
 bool firstFlag = false;
 uint8_t RUNSTATE = 0;
+
+bool fatFsTakeWriteMutex(uint32_t timeoutMs) {
+  SemaphoreHandle_t mutex = sFatFsWriteMutex;
+  if (!mutex) {
+    SemaphoreHandle_t created = xSemaphoreCreateMutex();
+    if (!created) return false;
+
+    portENTER_CRITICAL(&sFatFsWriteMutexCreateMux);
+    if (!sFatFsWriteMutex) {
+      sFatFsWriteMutex = created;
+      created = nullptr;
+    }
+    mutex = sFatFsWriteMutex;
+    portEXIT_CRITICAL(&sFatFsWriteMutexCreateMux);
+
+    if (created) {
+      vSemaphoreDelete(created);
+    }
+  }
+
+  return xSemaphoreTake(mutex, pdMS_TO_TICKS(timeoutMs)) == pdTRUE;
+}
+
+void fatFsGiveWriteMutex() {
+  if (sFatFsWriteMutex) {
+    xSemaphoreGive(sFatFsWriteMutex);
+  }
+}

@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <TFT_eSPI.h>
 #include <USBMSC.h>
+#include <freertos/semphr.h>
 #include "CsvTextReader.h"
 #include "WavMixerI2S.h"
 
@@ -57,3 +58,6 @@ extern int gBacklightCloseTimeSec;
 extern int gSleepTimeMin;
 extern bool firstFlag;
 extern uint8_t RUNSTATE;
+
+bool fatFsTakeWriteMutex(uint32_t timeoutMs = 1000);
+void fatFsGiveWriteMutex();

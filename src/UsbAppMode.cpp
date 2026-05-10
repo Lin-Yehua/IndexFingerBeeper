@@ -61,6 +61,7 @@ constexpr size_t kSleepStaQueueMax = 20;
 constexpr size_t kMaxReminderTimes = 128;
 constexpr size_t kScheduleInterruptQueueMax = 64;
 constexpr char kSleepSnapshotPath[] = "/sleep_state.bin";
+constexpr char kSleepSnapshotTmpPath[] = "/sleep_state.tmp";
 constexpr char kUpdateDirPath[] = "/Update";
 constexpr char kUpdateDirPathLower[] = "/update";
 constexpr char kUpdateFirmwarePath[] = "/Update/firmware.bin";
@@ -216,14 +217,40 @@ String leafNameFromPath(const String &path) {
   return path.substring(slash + 1);
 }
 
+bool writeTextFileAtomicallyToFat(const char *path, const char *tmpPath, const String &content) {
+  if (!path || !tmpPath || !fatMounted) return false;
+  if (!fatFsTakeWriteMutex(2000)) return false;
+
+  bool ok = false;
+  (void)FFat.remove(tmpPath);
+  fs::File f = FFat.open(tmpPath, "w");
+  if (!f) {
+    fatFsGiveWriteMutex();
+    return false;
+  }
+
+  const size_t written = f.print(content);
+  f.flush();
+  f.close();
+
+  if (written == content.length()) {
+    if ((!FFat.exists(path) || FFat.remove(path)) && FFat.rename(tmpPath, path)) {
+      ok = true;
+    }
+  }
+
+  if (!ok) {
+    (void)FFat.remove(tmpPath);
+  }
+
+  fatFsGiveWriteMutex();
+  return ok;
+}
+
 String chooseUpdateDirPath() {
   if (FFat.exists(kUpdateDirPath)) return String(kUpdateDirPath);
   if (FFat.exists(kUpdateDirPathLower)) return String(kUpdateDirPathLower);
-  if (FFat.mkdir(kUpdateDirPath)) {
-    Serial.printf("[UPDATE] created missing dir: %s\n", kUpdateDirPath);
-    return String(kUpdateDirPath);
-  }
-  Serial.println("[UPDATE] create /Update failed");
+  Serial.println("[UPDATE] skip: /Update dir missing");
   return String();
 }
 
@@ -251,6 +278,39 @@ void logUpdateDirFiles(const String &dirPath) {
     item = dir.openNextFile();
   }
   dir.close();
+}
+
+void logFatRootFiles() {
+  fs::File root = FFat.open("/", FILE_READ);
+  if (!root || !root.isDirectory()) {
+    Serial.println("[FAT] root open failed");
+    if (root) root.close();
+    return;
+  }
+
+  Serial.printf("[FAT] total=%u used=%u\n",
+                static_cast<unsigned int>(FFat.totalBytes()),
+                static_cast<unsigned int>(FFat.usedBytes()));
+  fs::File item = root.openNextFile();
+  if (!item) {
+    Serial.println("[FAT] root is empty");
+  }
+  int count = 0;
+  while (item && count < 64) {
+    String name = item.name();
+    Serial.printf("[FAT]   %s (%u bytes)%s\n",
+                  name.c_str(),
+                  static_cast<unsigned int>(item.size()),
+                  item.isDirectory() ? " [DIR]" : "");
+    item.close();
+    ++count;
+    item = root.openNextFile();
+  }
+  if (item) {
+    Serial.println("[FAT]   ...");
+    item.close();
+  }
+  root.close();
 }
 
 void detectUpdateFilesInDir(const String &dirPath, String &outFirmwarePath, String &outLittleFsPath) {
@@ -804,6 +864,10 @@ bool staOnlySleepTimeoutReached() {
 
 [[noreturn]] void enterStaOnlyDeepSleep() {
   Serial.printf("[STA_ONLY] backlight off for %d min, entering deep sleep\n", gSleepTimeMin);
+  // Stop FAT readers before writing the sleep snapshot; FatFS is not
+  // journaled, so avoid concurrent audio reads during metadata updates.
+  mixer.stopBG();
+  mixer.stopInsert();
   const bool snapshotOk = saveSleepSnapshotToFat();
   if (snapshotOk) {
     markSleepRtcContextForSleep();
@@ -811,10 +875,9 @@ bool staOnlySleepTimeoutReached() {
     Serial.println("[SLEEP] snapshot save failed, fallback to plain sleep");
     clearSleepRtcContext();
   }
-  mixer.stopBG();
-  mixer.stopInsert();
   wirelessPortalStop();
   WiFi.mode(WIFI_OFF);
+  unmountFat();
   waitWakeKeyReleaseBeforeSleep();
   enterDeepSleepNow(kRtcWakeDefaultSec);
 }
@@ -1563,6 +1626,7 @@ void applyPendingFatUpdatesFromUpdateDir() {
     showFatFsMountFailedHint("during update scan");
     return;
   }
+  logFatRootFiles();
 
   const String updateDir = chooseUpdateDirPath();
   if (!updateDir.length()) {
@@ -2823,8 +2887,16 @@ bool saveSleepSnapshotToFat() {
   header.regularQueueCount = static_cast<uint8_t>(regularQueue.size());
   header.hostQueueCount = static_cast<uint8_t>(hostQueue.size());
 
-  fs::File f = FFat.open(kSleepSnapshotPath, "w");
+  if (!fatFsTakeWriteMutex(3000)) {
+    restorePortalQueuesFromCapture(regularQueue, hasImmediate, immediateMessage, hostQueue);
+    Serial.println("[SLEEP] snapshot write lock failed");
+    return false;
+  }
+
+  (void)FFat.remove(kSleepSnapshotTmpPath);
+  fs::File f = FFat.open(kSleepSnapshotTmpPath, "w");
   if (!f) {
+    fatFsGiveWriteMutex();
     restorePortalQueuesFromCapture(regularQueue, hasImmediate, immediateMessage, hostQueue);
     Serial.println("[SLEEP] open snapshot file failed");
     return false;
@@ -2858,14 +2930,32 @@ bool saveSleepSnapshotToFat() {
       }
     }
   }
+  f.flush();
   f.close();
 
   if (!ok) {
-    (void)FFat.remove(kSleepSnapshotPath);
+    (void)FFat.remove(kSleepSnapshotTmpPath);
+    fatFsGiveWriteMutex();
     restorePortalQueuesFromCapture(regularQueue, hasImmediate, immediateMessage, hostQueue);
     Serial.println("[SLEEP] snapshot write failed");
     return false;
   }
+
+  if (FFat.exists(kSleepSnapshotPath) && !FFat.remove(kSleepSnapshotPath)) {
+    (void)FFat.remove(kSleepSnapshotTmpPath);
+    fatFsGiveWriteMutex();
+    restorePortalQueuesFromCapture(regularQueue, hasImmediate, immediateMessage, hostQueue);
+    Serial.println("[SLEEP] old snapshot remove failed");
+    return false;
+  }
+  if (!FFat.rename(kSleepSnapshotTmpPath, kSleepSnapshotPath)) {
+    (void)FFat.remove(kSleepSnapshotTmpPath);
+    fatFsGiveWriteMutex();
+    restorePortalQueuesFromCapture(regularQueue, hasImmediate, immediateMessage, hostQueue);
+    Serial.println("[SLEEP] snapshot rename failed");
+    return false;
+  }
+  fatFsGiveWriteMutex();
 
   Serial.printf("[SLEEP] snapshot saved mode=%u staQ=%u webQ=%u hostQ=%u\n",
                 static_cast<unsigned int>(header.appMode),
@@ -3755,11 +3845,7 @@ static bool persistAppModeToSettingIni(AppLoopMode mode) {
     output += '\n';
   }
 
-  fs::File wf = FFat.open("/setting.ini", "w");
-  if (!wf) return false;
-  const size_t written = wf.print(output);
-  wf.close();
-  return written == output.length();
+  return writeTextFileAtomicallyToFat("/setting.ini", "/setting.tmp", output);
 }
 
 static bool loadStaCredentialsFromSettingIni(String &outSsid, String &outPassword, String &outNet) {

@@ -67,6 +67,36 @@ struct ImageUploadState {
   char error[96] = {0};
 };
 
+bool writeTextFileAtomically(const char *path, const char *tmpPath, const String &content) {
+  if (!path || !tmpPath || !fatMounted) return false;
+  if (!fatFsTakeWriteMutex(2000)) return false;
+
+  bool ok = false;
+  (void)FFat.remove(tmpPath);
+  fs::File f = FFat.open(tmpPath, "w");
+  if (!f) {
+    fatFsGiveWriteMutex();
+    return false;
+  }
+
+  const size_t written = f.print(content);
+  f.flush();
+  f.close();
+
+  if (written == content.length()) {
+    if ((!FFat.exists(path) || FFat.remove(path)) && FFat.rename(tmpPath, path)) {
+      ok = true;
+    }
+  }
+
+  if (!ok) {
+    (void)FFat.remove(tmpPath);
+  }
+
+  fatFsGiveWriteMutex();
+  return ok;
+}
+
 class PortalWebServer final : public WebServer {
  public:
   explicit PortalWebServer(uint16_t port)
@@ -701,10 +731,7 @@ void removeLegacyInstantRefreshModeFromSettingIni() {
   }
 
   if (!removed) return;
-  fs::File wf = FFat.open("/setting.ini", "w");
-  if (!wf) return;
-  wf.print(output);
-  wf.close();
+  if (!writeTextFileAtomically("/setting.ini", "/setting.tmp", output)) return;
   Serial.println("[WEB] removed legacy InstantRefreshNoKey from /setting.ini");
 }
 
@@ -892,11 +919,7 @@ bool persistHostMacToSettingIni(const String &hostMacRaw) {
     output += "HostMAC = \"" + hostMac + "\";\n";
   }
 
-  fs::File wf = FFat.open("/setting.ini", "w");
-  if (!wf) return false;
-  const size_t written = wf.print(output);
-  wf.close();
-  return written == output.length();
+  return writeTextFileAtomically("/setting.ini", "/setting.tmp", output);
 }
 
 bool persistApConfigToSettingIni(const String &ssidRaw, const String &passwordRaw, uint8_t channel) {
@@ -982,11 +1005,7 @@ bool persistApConfigToSettingIni(const String &ssidRaw, const String &passwordRa
     if (output.length() && output[output.length() - 1] != '\n') output += '\n';
     output += "EspNowChannel = " + String(static_cast<unsigned int>(channel)) + ";\n";
   }
-  fs::File wf = FFat.open("/setting.ini", "w");
-  if (!wf) return false;
-  const size_t written = wf.print(output);
-  wf.close();
-  return written == output.length();
+  return writeTextFileAtomically("/setting.ini", "/setting.tmp", output);
 }
 
 void onEspNowRecv(const uint8_t *macAddr, const uint8_t *data, int dataLen) {
@@ -1093,11 +1112,7 @@ String readDataCsvText() {
 
 bool saveDataCsvText(const String &content) {
   if (!fatMounted) return false;
-  fs::File f = FFat.open("/data.csv", "w");
-  if (!f) return false;
-  const size_t written = f.print(content);
-  f.close();
-  if (written != content.length()) return false;
+  if (!writeTextFileAtomically("/data.csv", "/data.tmp", content)) return false;
   setCsvReloadRequested();
   return true;
 }
@@ -1113,11 +1128,7 @@ String readScheduleCsvText() {
 
 bool saveScheduleCsvText(const String &content) {
   if (!fatMounted) return false;
-  fs::File f = FFat.open("/schedule.csv", "w");
-  if (!f) return false;
-  const size_t written = f.print(content);
-  f.close();
-  if (written != content.length()) return false;
+  if (!writeTextFileAtomically("/schedule.csv", "/schedule.tmp", content)) return false;
   setScheduleReloadRequested();
   return true;
 }
@@ -1237,11 +1248,7 @@ bool persistStaConfigToSettingIni(const String &ssidRaw, const String &passwordR
     output += "Net = \"" + net + "\";\n";
   }
 
-  fs::File wf = FFat.open("/setting.ini", "w");
-  if (!wf) return false;
-  const size_t written = wf.print(output);
-  wf.close();
-  return written == output.length();
+  return writeTextFileAtomically("/setting.ini", "/setting.tmp", output);
 }
 
 String rtcDateTimeJson() {
@@ -1440,11 +1447,7 @@ bool persistAudioGainsToSettingIni() {
     output += "BackGroundGain = " + String(gBgGain, 3) + ";\n";
   }
 
-  fs::File wf = FFat.open("/setting.ini", "w");
-  if (!wf) return false;
-  const size_t written = wf.print(output);
-  wf.close();
-  return written == output.length();
+  return writeTextFileAtomically("/setting.ini", "/setting.tmp", output);
 }
 
 bool persistEffectSettingsToSettingIni(int wrongProb3,
@@ -1556,11 +1559,7 @@ bool persistEffectSettingsToSettingIni(int wrongProb3,
     output += "SleepTime = " + String(sleepTimeMin) + ";\n";
   }
 
-  fs::File wf = FFat.open("/setting.ini", "w");
-  if (!wf) return false;
-  const size_t written = wf.print(output);
-  wf.close();
-  return written == output.length();
+  return writeTextFileAtomically("/setting.ini", "/setting.tmp", output);
 }
 
 String statusJson() {
