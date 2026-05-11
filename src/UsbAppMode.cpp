@@ -600,6 +600,8 @@ bool playPostRecoveryManualMessageByKey(uint8_t key)
     return false;
   playMessageWithGlitch(gPostRecoveryManualMessage);
   gPostRecoveryManualMessage[0] = '\0';
+  // Manual recovery hint must exit to idle and wait for the next explicit key trigger.
+  firstFlag = false;
   return true;
 }
 
