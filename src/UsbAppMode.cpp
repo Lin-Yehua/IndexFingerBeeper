@@ -241,6 +241,21 @@ String leafNameFromPath(const String &path) {
   return path.substring(slash + 1);
 }
 
+enum class FatPathKind : uint8_t {
+  Missing = 0,
+  File = 1,
+  Directory = 2,
+};
+
+FatPathKind probeFatPathKind(const char *path) {
+  if (!path || !path[0]) return FatPathKind::Missing;
+  fs::File f = FFat.open(path, FILE_READ);
+  if (!f) return FatPathKind::Missing;
+  const bool isDir = f.isDirectory();
+  f.close();
+  return isDir ? FatPathKind::Directory : FatPathKind::File;
+}
+
 bool writeTextFileAtomicallyToFat(const char *path, const char *tmpPath, const String &content) {
   if (!path || !tmpPath || !fatMounted) return false;
   if (!fatFsTakeWriteMutex(2000)) return false;
@@ -272,8 +287,8 @@ bool writeTextFileAtomicallyToFat(const char *path, const char *tmpPath, const S
 }
 
 String chooseUpdateDirPath() {
-  if (FFat.exists(kUpdateDirPath)) return String(kUpdateDirPath);
-  if (FFat.exists(kUpdateDirPathLower)) return String(kUpdateDirPathLower);
+  if (probeFatPathKind(kUpdateDirPath) == FatPathKind::Directory) return String(kUpdateDirPath);
+  if (probeFatPathKind(kUpdateDirPathLower) == FatPathKind::Directory) return String(kUpdateDirPathLower);
   if (FFat.mkdir(kUpdateDirPath)) {
     Serial.printf("[UPDATE] created missing dir: %s\n", kUpdateDirPath);
     return String(kUpdateDirPath);
@@ -299,8 +314,13 @@ bool ensureFatDirectoryRecursive(const String &dirPath) {
   while (cursor < normalized.length()) {
     const int slash = normalized.indexOf('/', cursor);
     const String partial = (slash >= 0) ? normalized.substring(0, slash) : normalized;
-    if (partial.length() && !FFat.exists(partial.c_str())) {
-      if (!FFat.mkdir(partial.c_str())) {
+    if (partial.length()) {
+      const FatPathKind partialKind = probeFatPathKind(partial.c_str());
+      if (partialKind == FatPathKind::File) {
+        Serial.printf("[RECOVERY] path exists as file, not dir: %s\n", partial.c_str());
+        return false;
+      }
+      if (partialKind == FatPathKind::Missing && !FFat.mkdir(partial.c_str())) {
         Serial.printf("[RECOVERY] mkdir failed: %s\n", partial.c_str());
         return false;
       }
@@ -426,12 +446,9 @@ bool restoreFatFromLittleFsBackup(size_t &outCopiedFiles) {
 }
 
 bool fatPathMatchesExpectedType(const FatRecoveryTarget &target) {
-  if (!target.fatPath || !FFat.exists(target.fatPath)) return false;
-  fs::File f = FFat.open(target.fatPath, FILE_READ);
-  if (!f) return false;
-  const bool ok = target.isDirectory ? f.isDirectory() : !f.isDirectory();
-  f.close();
-  return ok;
+  const FatPathKind kind = probeFatPathKind(target.fatPath);
+  return target.isDirectory ? (kind == FatPathKind::Directory)
+                            : (kind == FatPathKind::File);
 }
 
 void collectMissingFatRecoveryTargets(std::vector<size_t> &outMissing) {
