@@ -36,6 +36,7 @@ static bool parseAppModeFromIniValue(String value, AppLoopMode &outMode);
 static const char *appModeToIniValue(AppLoopMode mode);
 static bool loadAppModeFromSettingIni(AppLoopMode &outMode);
 static bool persistAppModeToSettingIni(AppLoopMode mode);
+static void playMessageWithGlitch(const char *text);
 void waitWakeKeyReleaseBeforeSleep();
 bool saveSleepSnapshotToFat();
 void markSleepRtcContextForSleep();
@@ -69,6 +70,12 @@ constexpr char kUpdateAppPath[] = "/Update/app.bin";
 constexpr char kUpdateLittleFsPath[] = "/Update/littlefs.bin";
 constexpr char kUpdateFsPath[] = "/Update/fs.bin";
 constexpr char kUpdateSpiffsPath[] = "/Update/spiffs.bin";
+constexpr char kLittleFsBackupDirPath[] = "/Backup";
+constexpr const char *kCsvEmptyFallbackMessage = u8"痛苦啊，你是我的唯一...";
+constexpr const char *kFatRecoveryNoticeLine1 = u8"你的设备出现了一些问题";
+constexpr const char *kFatRecoveryNoticeLine2 = u8"我们已经为你恢复到了初始状态";
+constexpr const char *kFatRecoveryNoticeLine3 = u8"不过我还是建议你去连续你的部门主管";
+constexpr const char *kFatRecoveryFailedLine = u8"我们遇到了不可逆转的错误，请联系部门主管";
 constexpr const char *kDefaultReminderMessage = u8"这个时候你似乎有什么事要干";
 constexpr uint32_t kSleepFileMagic = 0x53534E50UL;      // "SSNP"
 constexpr uint16_t kSleepFileVersion = 1;
@@ -146,6 +153,21 @@ struct DailyReminderSlot {
   bool triggered = false;
 };
 
+struct FatRecoveryTarget {
+  const char *name;
+  const char *fatPath;
+  const char *backupPath;
+  bool isDirectory;
+};
+
+constexpr FatRecoveryTarget kFatRecoveryTargets[] = {
+    {"data.csv", "/data.csv", "/Backup/data.csv", false},
+    // Project uses setting.ini (not setting.csv).
+    {"setting.ini", "/setting.ini", "/Backup/setting.ini", false},
+    {"schedule.csv", "/schedule.csv", "/Backup/schedule.csv", false},
+    {"sound", "/sound", "/Backup/sound", true},
+};
+
 ScheduleInterruptQueueItem gScheduleInterruptQueue[kScheduleInterruptQueueMax];
 size_t gScheduleInterruptCount = 0;
 bool gScheduleInterruptActive = false;
@@ -156,6 +178,8 @@ DailyReminderSlot gTodayReminderSlots[kMaxReminderTimes];
 size_t gTodayReminderCount = 0;
 uint32_t gTodayReminderDateKey = 0;
 uint16_t gTodayReminderLastCheckedMinute = 0xFFFFU;
+char gPostRecoveryManualMessage[kSleepTextMaxLen + 1] = {0};
+
 
 void sanitizeMessageForSnapshot(const String &in, char out[kSleepTextMaxLen + 1]) {
   if (!out) return;
@@ -250,8 +274,228 @@ bool writeTextFileAtomicallyToFat(const char *path, const char *tmpPath, const S
 String chooseUpdateDirPath() {
   if (FFat.exists(kUpdateDirPath)) return String(kUpdateDirPath);
   if (FFat.exists(kUpdateDirPathLower)) return String(kUpdateDirPathLower);
-  Serial.println("[UPDATE] skip: /Update dir missing");
+  if (FFat.mkdir(kUpdateDirPath)) {
+    Serial.printf("[UPDATE] created missing dir: %s\n", kUpdateDirPath);
+    return String(kUpdateDirPath);
+  }
+  Serial.println("[UPDATE] create /Update failed");
   return String();
+}
+
+String joinFsPath(const String &base, const String &name) {
+  String out = base.length() ? base : String("/");
+  if (!out.endsWith("/")) out += "/";
+  out += name;
+  return out;
+}
+
+bool ensureFatDirectoryRecursive(const String &dirPath) {
+  if (!dirPath.length() || dirPath == "/") return true;
+
+  String normalized = dirPath;
+  if (!normalized.startsWith("/")) normalized = "/" + normalized;
+
+  int cursor = 1;
+  while (cursor < normalized.length()) {
+    const int slash = normalized.indexOf('/', cursor);
+    const String partial = (slash >= 0) ? normalized.substring(0, slash) : normalized;
+    if (partial.length() && !FFat.exists(partial.c_str())) {
+      if (!FFat.mkdir(partial.c_str())) {
+        Serial.printf("[RECOVERY] mkdir failed: %s\n", partial.c_str());
+        return false;
+      }
+    }
+    if (slash < 0) break;
+    cursor = slash + 1;
+  }
+  return true;
+}
+
+bool copyLittleFsFileToFat(const String &srcPath, const String &dstPath) {
+  fs::File src = LittleFS.open(srcPath, FILE_READ);
+  if (!src || src.isDirectory()) {
+    Serial.printf("[RECOVERY] backup source open failed: %s\n", srcPath.c_str());
+    if (src) src.close();
+    return false;
+  }
+
+  const int slash = dstPath.lastIndexOf('/');
+  if (slash > 0) {
+    const String parentDir = dstPath.substring(0, slash);
+    if (!ensureFatDirectoryRecursive(parentDir)) {
+      src.close();
+      return false;
+    }
+  }
+
+  fs::File dst = FFat.open(dstPath, "w");
+  if (!dst) {
+    Serial.printf("[RECOVERY] backup target open failed: %s\n", dstPath.c_str());
+    src.close();
+    return false;
+  }
+
+  uint8_t buffer[1024];
+  bool ok = true;
+  while (true) {
+    const size_t readBytes = src.read(buffer, sizeof(buffer));
+    if (readBytes == 0) break;
+    if (dst.write(buffer, readBytes) != readBytes) {
+      ok = false;
+      break;
+    }
+  }
+
+  dst.flush();
+  dst.close();
+  src.close();
+
+  if (!ok) {
+    Serial.printf("[RECOVERY] write failed: %s -> %s\n", srcPath.c_str(), dstPath.c_str());
+    (void)FFat.remove(dstPath.c_str());
+  }
+  return ok;
+}
+
+bool restoreFatFromLittleFsBackupTree(const String &srcDirPath,
+                                      const String &dstDirPath,
+                                      size_t &outCopiedFiles) {
+  fs::File srcDir = LittleFS.open(srcDirPath, FILE_READ);
+  if (!srcDir || !srcDir.isDirectory()) {
+    Serial.printf("[RECOVERY] backup dir missing or invalid: %s\n", srcDirPath.c_str());
+    if (srcDir) srcDir.close();
+    return false;
+  }
+
+  if (dstDirPath.length() && dstDirPath != "/") {
+    if (!ensureFatDirectoryRecursive(dstDirPath)) {
+      srcDir.close();
+      return false;
+    }
+  }
+
+  bool ok = true;
+  fs::File item = srcDir.openNextFile();
+  while (item) {
+    String leafName = item.name();
+    const int slash = leafName.lastIndexOf('/');
+    if (slash >= 0) leafName = leafName.substring(slash + 1);
+
+    if (leafName.length()) {
+      const bool isDir = item.isDirectory();
+      item.close();
+
+      const String srcChild = joinFsPath(srcDirPath, leafName);
+      const String dstChild = joinFsPath(dstDirPath, leafName);
+      if (isDir) {
+        if (!restoreFatFromLittleFsBackupTree(srcChild, dstChild, outCopiedFiles)) {
+          ok = false;
+          break;
+        }
+      } else {
+        if (!copyLittleFsFileToFat(srcChild, dstChild)) {
+          ok = false;
+          break;
+        }
+        ++outCopiedFiles;
+      }
+    } else {
+      item.close();
+    }
+    item = srcDir.openNextFile();
+  }
+
+  srcDir.close();
+  return ok;
+}
+
+bool restoreFatFromLittleFsBackup(size_t &outCopiedFiles) {
+  outCopiedFiles = 0;
+  if (!LittleFS.exists(kLittleFsBackupDirPath)) {
+    Serial.printf("[RECOVERY] LittleFS backup dir not found: %s\n", kLittleFsBackupDirPath);
+    return false;
+  }
+  fs::File backupRoot = LittleFS.open(kLittleFsBackupDirPath, FILE_READ);
+  if (!backupRoot || !backupRoot.isDirectory()) {
+    Serial.printf("[RECOVERY] LittleFS backup dir invalid: %s\n", kLittleFsBackupDirPath);
+    if (backupRoot) backupRoot.close();
+    return false;
+  }
+  backupRoot.close();
+  return restoreFatFromLittleFsBackupTree(kLittleFsBackupDirPath, "/", outCopiedFiles);
+}
+
+bool fatPathMatchesExpectedType(const FatRecoveryTarget &target) {
+  if (!target.fatPath || !FFat.exists(target.fatPath)) return false;
+  fs::File f = FFat.open(target.fatPath, FILE_READ);
+  if (!f) return false;
+  const bool ok = target.isDirectory ? f.isDirectory() : !f.isDirectory();
+  f.close();
+  return ok;
+}
+
+void collectMissingFatRecoveryTargets(std::vector<size_t> &outMissing) {
+  outMissing.clear();
+  for (size_t i = 0; i < (sizeof(kFatRecoveryTargets) / sizeof(kFatRecoveryTargets[0])); ++i) {
+    if (!fatPathMatchesExpectedType(kFatRecoveryTargets[i])) {
+      outMissing.push_back(i);
+    }
+  }
+}
+
+bool restoreSingleFatRecoveryTarget(const FatRecoveryTarget &target, size_t &outCopiedFiles) {
+  outCopiedFiles = 0;
+  if (!target.backupPath || !target.backupPath[0]) return false;
+  if (target.isDirectory) {
+    return restoreFatFromLittleFsBackupTree(String(target.backupPath), String(target.fatPath), outCopiedFiles);
+  }
+  if (!copyLittleFsFileToFat(String(target.backupPath), String(target.fatPath))) {
+    return false;
+  }
+  outCopiedFiles = 1;
+  return true;
+}
+
+bool restoreFatByMissingTargets(const std::vector<size_t> &missingTargets,
+                                size_t &outCopiedFiles,
+                                bool &outUsedFullRestore) {
+  outCopiedFiles = 0;
+  outUsedFullRestore = false;
+  if (missingTargets.empty()) return true;
+
+  if (missingTargets.size() == 1) {
+    const FatRecoveryTarget &target = kFatRecoveryTargets[missingTargets[0]];
+    Serial.printf("[RECOVERY] single target missing: %s\n", target.name ? target.name : "<unknown>");
+    return restoreSingleFatRecoveryTarget(target, outCopiedFiles);
+  }
+
+  outUsedFullRestore = true;
+  Serial.printf("[RECOVERY] multiple targets missing (%u), run full restore\n",
+                static_cast<unsigned int>(missingTargets.size()));
+  return restoreFatFromLittleFsBackup(outCopiedFiles);
+}
+
+void setPostRecoveryManualMessage(const char *text) {
+  gPostRecoveryManualMessage[0] = '\0';
+
+  if (!text || !text[0]) return;
+
+  String normalized;
+  if (!normalizeScheduleQueueMessage(String(text), normalized)) return;
+  normalized.toCharArray(gPostRecoveryManualMessage, sizeof(gPostRecoveryManualMessage));
+  gPostRecoveryManualMessage[kSleepTextMaxLen] = '\0';
+
+}
+
+bool hasPostRecoveryManualMessage() {
+  return gPostRecoveryManualMessage[0] != '\0';
+}
+
+bool playPostRecoveryManualMessageByKey(uint8_t key) {
+  if (key != 2 || !hasPostRecoveryManualMessage()) return false;
+  playMessageWithGlitch(gPostRecoveryManualMessage);
+  gPostRecoveryManualMessage[0] = '\0';
+  return true;
 }
 
 void logUpdateDirFiles(const String &dirPath) {
@@ -1749,30 +1993,67 @@ bool initProjectResources() {
     showFatFsMountFailedHint("in app init");
     return false;
   }
+
   if (!gSettingsPreloadedAtBoot) {
     applyAudioGainsFromSettingIni();
   } else {
     Serial.printf("[APP] setting.ini already preloaded, backlight=%.3f\n", gBacklightLevel);
   }
 
-  if (!csv.load(FFat, "/data.csv")) {
-    Serial.println("[APP] /data.csv load failed from FAT");
-    return false;
-  }
-  (void)refreshTodayReminderSlotsFromRtc(true, true);
-
   Text.createSprite(320, 120);
   Text.fillSprite(TFT_BLACK);
   Text.setTextDatum(MC_DATUM);
   Text.setTextColor(0x07ff, TFT_BLACK);
   Text.setTextWrap(true, true);
-  message = csv.getTextById(1);
   if (!gSimheiFontPreloaded) {
     Text.loadFont("simhei15", LittleFS);
     gSimheiFontPreloaded = true;
     Serial.println("[APP] simhei15 loaded in app init");
   } else {
     Serial.println("[APP] simhei15 already preloaded");
+  }
+
+  std::vector<size_t> missingTargets;
+  collectMissingFatRecoveryTargets(missingTargets);
+  if (!missingTargets.empty()) {
+    Serial.printf("[APP] FAT important targets missing: %u\n",
+                  static_cast<unsigned int>(missingTargets.size()));
+    for (size_t i = 0; i < missingTargets.size(); ++i) {
+      const FatRecoveryTarget &target = kFatRecoveryTargets[missingTargets[i]];
+      Serial.printf("[APP] missing: %s (%s)\n",
+                    target.fatPath ? target.fatPath : "<null>",
+                    target.name ? target.name : "<unnamed>");
+    }
+    // Recovery flow runs during init phase before app loop, key actions won't trigger.
+    playMessageWithGlitch(kFatRecoveryNoticeLine1);
+
+    size_t recoveredFileCount = 0;
+    bool usedFullRestore = false;
+    if (restoreFatByMissingTargets(missingTargets, recoveredFileCount, usedFullRestore)) {
+      Serial.printf("[APP] FAT restore finished, copied files=%u\n",
+                    static_cast<unsigned int>(recoveredFileCount));
+      Serial.printf("[APP] FAT restore mode=%s\n", usedFullRestore ? "full" : "single-target");
+      playMessageWithGlitch(kFatRecoveryNoticeLine2);
+      setPostRecoveryManualMessage(kFatRecoveryNoticeLine3);
+    } else {
+      Serial.println("[APP] FAT restore from LittleFS backup failed");
+      playMessageWithGlitch(kFatRecoveryFailedLine);
+      setPostRecoveryManualMessage(nullptr);
+    }
+  } else {
+    setPostRecoveryManualMessage(nullptr);
+  }
+
+  if (!csv.load(FFat, "/data.csv")) {
+    Serial.println("[APP] /data.csv load failed from FAT, fallback message enabled");
+  }
+  if (csv.size() <= 0) {
+    Serial.println("[APP] /data.csv is empty, fallback message enabled");
+  }
+  (void)refreshTodayReminderSlotsFromRtc(true, true);
+  message = csv.getTextById(1);
+  if (!message || !message[0]) {
+    message = kCsvEmptyFallbackMessage;
   }
 
   ensureBacklightTaskStarted();
@@ -4256,6 +4537,9 @@ void processAppLoop() {
     if (csv.load(FFat, "/data.csv")) {
       csvCount = 0;
       RUNSTATE = 0;
+      if (csv.size() <= 0) {
+        Serial.println("[WEB] /data.csv is empty, fallback message enabled");
+      }
       if (instantRefreshNoKey) {
         firstFlag = true;
       }
@@ -4485,6 +4769,43 @@ void processAppLoop() {
       csvTotal = kCsvArrayCapacity;
     }
     if (csvTotal <= 0) {
+      uint8_t key = 255;
+      if (syntheticKeyPress)
+      {
+        key = 2;
+        syntheticKeyPress = false;
+      }
+      else
+      {
+        Key_loop();
+        key = get_Keycode();
+      }
+      if ((key == 2 || key == 3) && wakeBacklightByKeyIfNeeded())
+      {
+        return;
+      }
+      if (key == 3)
+      {
+        switchAppMode(APP_MODE_STA_ONLINE);
+        return;
+      }
+      if (playPostRecoveryManualMessageByKey(key))
+      {
+        return;
+      }
+      if (hasPostRecoveryManualMessage())
+      {
+        return;
+      }
+      if (key == 2 || firstFlag)
+      {
+        if (firstFlag)
+        {
+          firstFlag = false;
+        }
+        message = kCsvEmptyFallbackMessage;
+        playMessageWithGlitch(message);
+      }
       return;
     }
     if (RUNSTATE == 0) {
@@ -4512,6 +4833,14 @@ void processAppLoop() {
       if (key == 3) 
       {
         switchAppMode(APP_MODE_STA_ONLINE);
+        return;
+      }
+      if (playPostRecoveryManualMessageByKey(key))
+      {
+        return;
+      }
+      if (hasPostRecoveryManualMessage())
+      {
         return;
       }
 
@@ -4663,15 +4992,6 @@ void processAppLoop() {
     if (csvTotal > kCsvArrayCapacity) {
       csvTotal = kCsvArrayCapacity;
     }
-    if (csvTotal <= 0) {
-      return;
-    }
-    if (RUNSTATE == 0) {
-      generateUniqueRandomNumbers(1, csv.size(), csvTotal, csvArray);
-      csvCount = 0;
-      RUNSTATE = 1;
-    }
-
     uint8_t key = 255;
     if (syntheticKeyPress)
     {
@@ -4696,6 +5016,32 @@ void processAppLoop() {
 
     if (staOnlySleepTimeoutReached()) {
       enterStaOnlyDeepSleep();
+    }
+    if (playPostRecoveryManualMessageByKey(key))
+    {
+      return;
+    }
+    if (hasPostRecoveryManualMessage())
+    {
+      return;
+    }
+
+    if (csvTotal <= 0) {
+      if (key == 2 || firstFlag)
+      {
+        if (firstFlag)
+        {
+          firstFlag = false;
+        }
+        message = kCsvEmptyFallbackMessage;
+        playMessageWithGlitch(message);
+      }
+      return;
+    }
+    if (RUNSTATE == 0) {
+      generateUniqueRandomNumbers(1, csv.size(), csvTotal, csvArray);
+      csvCount = 0;
+      RUNSTATE = 1;
     }
 
     if (key == 2 || firstFlag)
