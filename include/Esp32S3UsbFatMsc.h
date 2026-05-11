@@ -1,19 +1,22 @@
 #pragma once
 
 #include <Arduino.h>
-#include <USBMSC.h>
 #include <FS.h>
+#include <USBMSC.h>
 #include <wear_levelling.h>
 
-class Esp32S3UsbFatMsc {
+class Esp32S3UsbFatMsc
+{
 public:
-  enum class ReleaseAction {
+  enum class ReleaseAction
+  {
     None,
     RemountFat,
     Restart
   };
 
-  enum class UsbState {
+  enum class UsbState
+  {
     NotStarted,
     Started,
     Resumed,
@@ -21,7 +24,8 @@ public:
     Stopped
   };
 
-  class Config {
+  class Config
+  {
   public:
     const char *fatPartitionLabel;
     const char *fatMountPoint;
@@ -36,19 +40,12 @@ public:
     const char *productId;
     const char *productRevision;
 
-    Config() :
-      fatPartitionLabel("ffat"),
-      fatMountPoint("/ffat"),
-      formatFatOnFail(true),
-      autoStartUsb(true),
-      exposeFatOnBoot(true),
-      remountOnUsbStopped(true),
-      remountOnEject(true),
-      restartAfterRelease(false),
-      maxOpenFiles(10),
-      vendorId("ESP32"),
-      productId("S3_FAT_DISK"),
-      productRevision("1.0") {}
+    Config()
+        : fatPartitionLabel("ffat"), fatMountPoint("/ffat"), formatFatOnFail(true), autoStartUsb(true),
+          exposeFatOnBoot(true), remountOnUsbStopped(true), remountOnEject(true), restartAfterRelease(false),
+          maxOpenFiles(10), vendorId("ESP32"), productId("S3_FAT_DISK"), productRevision("1.0")
+    {
+    }
   };
 
   typedef void (*StateCallback)(Esp32S3UsbFatMsc &mgr);

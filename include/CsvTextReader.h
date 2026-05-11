@@ -7,33 +7,33 @@
 #define CSV_MAX_ROWS 200
 #define CSV_TEXT_LEN 256
 
-struct CsvTextRow {
-    int id;
-    char text[CSV_TEXT_LEN];
+struct CsvTextRow
+{
+  int id;
+  char text[CSV_TEXT_LEN];
 };
 
-class CsvTextReader {
+class CsvTextReader
+{
 public:
+  CsvTextReader();
 
-    CsvTextReader();
+  bool load(fs::FS &fs, const char *path);
 
-    bool load(fs::FS &fs, const char *path);
+  int size();
+  int getMaxRows();
 
-    int size();
-    int getMaxRows();
+  const char *getTextByIndex(int index);
 
-    const char* getTextByIndex(int index);
+  const char *getTextById(int id);
 
-    const char* getTextById(int id);
-
-    const char* getRandomText();
+  const char *getRandomText();
 
 private:
+  CsvTextRow rows[CSV_MAX_ROWS];
+  int rowCount;
 
-    CsvTextRow rows[CSV_MAX_ROWS];
-    int rowCount;
-
-    void trimQuotes(char *str);
+  void trimQuotes(char *str);
 };
 
 #endif

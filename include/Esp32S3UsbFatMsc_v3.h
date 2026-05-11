@@ -1,13 +1,15 @@
 #pragma once
 
 #include <Arduino.h>
-#include <USBMSC.h>
 #include <FS.h>
+#include <USBMSC.h>
 #include <wear_levelling.h>
 
-class Esp32S3UsbFatMsc {
+class Esp32S3UsbFatMsc
+{
 public:
-  enum class UsbState {
+  enum class UsbState
+  {
     NotStarted,
     Started,
     Resumed,
@@ -15,7 +17,8 @@ public:
     Stopped
   };
 
-  struct Config {
+  struct Config
+  {
     const char *fatPartitionLabel;
     const char *fatMountPoint;
     bool formatFatOnFail;

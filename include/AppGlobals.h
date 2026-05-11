@@ -1,15 +1,16 @@
 #pragma once
 
+#include "CsvTextReader.h"
+#include "WavMixerI2S.h"
 #include <Arduino.h>
 #include <TFT_eSPI.h>
 #include <USBMSC.h>
 #include <freertos/semphr.h>
-#include "CsvTextReader.h"
-#include "WavMixerI2S.h"
 
-extern "C" {
-#include "wear_levelling.h"
+extern "C"
+{
 #include "esp_partition.h"
+#include "wear_levelling.h"
 }
 
 extern const char *kFatPartitionLabel;

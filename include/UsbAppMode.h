@@ -2,7 +2,8 @@
 
 #include <Arduino.h>
 
-enum AppLoopMode : uint8_t {
+enum AppLoopMode : uint8_t
+{
   APP_MODE_AP_STA = 0,
   APP_MODE_STA_ONLINE = 1,
   APP_MODE_STA_ONLY = 2,
@@ -47,7 +48,8 @@ void notifyBacklightActivity();
 void setBacklightTimeSeconds(int seconds);
 void setBacklightLevel(float level);
 
-struct BatteryStatus {
+struct BatteryStatus
+{
   bool available = false;
   bool initialized = false;
   bool charging = false;

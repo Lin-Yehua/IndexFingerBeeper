@@ -2,7 +2,8 @@
 
 #include <Arduino.h>
 
-struct Ds1302DateTime {
+struct Ds1302DateTime
+{
   uint16_t year = 2000;
   uint8_t month = 1;
   uint8_t day = 1;
@@ -13,15 +14,14 @@ struct Ds1302DateTime {
 
 bool ds1302IsValidDateTime(const Ds1302DateTime &dt);
 
-class Ds1302Rtc {
- public:
+class Ds1302Rtc
+{
+public:
   static constexpr uint8_t kDefaultClkPin = 47;
   static constexpr uint8_t kDefaultDatPin = 48;
   static constexpr uint8_t kDefaultRstPin = 45;
 
-  Ds1302Rtc(uint8_t clkPin = kDefaultClkPin,
-            uint8_t datPin = kDefaultDatPin,
-            uint8_t rstPin = kDefaultRstPin);
+  Ds1302Rtc(uint8_t clkPin = kDefaultClkPin, uint8_t datPin = kDefaultDatPin, uint8_t rstPin = kDefaultRstPin);
 
   void begin();
 
@@ -47,7 +47,7 @@ class Ds1302Rtc {
   bool writeMinute(uint8_t minute);
   bool writeSecond(uint8_t second);
 
- private:
+private:
   static bool decodeBurstDateTime(const uint8_t *raw, Ds1302DateTime &out);
   static uint8_t decToBcd(uint8_t value);
   static uint8_t bcdToDec(uint8_t value);
