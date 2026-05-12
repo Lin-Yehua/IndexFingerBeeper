@@ -1,4 +1,45 @@
-﻿#include "HostWirelessPortal.h"
+/*
+ * 文件说明: 模块实现文件。
+ * 文件功能: 实现对应模块的运行逻辑和内部辅助函数。
+ *
+ * 函数表:
+ * - copyStringToBuf: 模块内部辅助函数。
+ * - clampApChannel: 计算、判断或转换对应结果。
+ * - parseApChannel: 解析、规范化或格式化对应内容。
+ * - parseBoolString: 解析、规范化或格式化对应内容。
+ * - forceWifiChannel: 应用配置或切换运行状态。
+ * - stripIniValue: 解析、规范化或格式化对应内容。
+ * - formatMacString: 解析、规范化或格式化对应内容。
+ * - parseMacString: 解析、规范化或格式化对应内容。
+ * - jsonEscape: 解析、规范化或格式化对应内容。
+ * - onEspNowSend: 事件回调处理函数。
+ * - ensureWhitelistCsvExists: 初始化或确保对应资源可用。
+ * - readWhitelistCsvText: 读取、获取或消费对应数据。
+ * - saveWhitelistCsvText: 保存、写入或更新对应数据。
+ * - parseWhitelistCsv: 解析、规范化或格式化对应内容。
+ * - reloadWhitelistFromFat: 模块内部辅助函数。
+ * - persistWhitelistEnabledToSettingIni: 保存、写入或更新对应数据。
+ * - loadApCredentialsFromSettingIni: 读取、获取或消费对应数据。
+ * - persistHostConfigToSettingIni: 保存、写入或更新对应数据。
+ * - apRootUrl: 模块内部辅助函数。
+ * - redirectToPortal: 绘制界面、输出内容或响应请求。
+ * - initEspNowBroadcaster: 初始化或确保对应资源可用。
+ * - deinitEspNowBroadcaster: 停止、释放或清理对应状态。
+ * - ensureEspNowPeer: 初始化或确保对应资源可用。
+ * - buildPacketFromText: 模块内部辅助函数。
+ * - sendPacketToMac: 模块内部辅助函数。
+ * - findWhitelistEntryByMac: 模块内部辅助函数。
+ * - collectSelectedTargets: 模块内部辅助函数。
+ * - sendTextByCurrentMode: 模块内部辅助函数。
+ * - targetsJson: 模块内部辅助函数。
+ * - statusJson: 模块内部辅助函数。
+ * - sendPortalPage: 模块内部辅助函数。
+ * - registerRoutes: 统一注册无线门户 HTTP 路由。
+ * - webServerTask: FreeRTOS 任务入口或任务控制函数。
+ * - hostPortalStart: 模块内部辅助函数。
+ * - hostPortalStop: 模块内部辅助函数。
+ */
+#include "HostWirelessPortal.h"
 
 #include <Arduino.h>
 #include <DNSServer.h>

@@ -1,4 +1,16 @@
-﻿#include "UsbAppMode.h"
+/*
+ * 文件说明: APP 模式聚合编译单元。
+ * 文件功能: 引入 usb_app 私有实现片段，并保留 APP 模式初始化、深睡恢复相关对外入口。
+ *
+ * 函数表:
+ * - onApStaInit: 事件回调处理函数。
+ * - onStaOnlineInit: 事件回调处理函数。
+ * - onStaOnlyInit: 事件回调处理函数。
+ * - appHandleRtcMaintenanceWakeIfNeeded: 模块内部辅助函数。
+ * - appShouldFastResumeFromDeepSleep: 模块内部辅助函数。
+ * - appRestoreFromDeepSleepSnapshot: 模块内部辅助函数。
+ */
+#include "UsbAppMode.h"
 #include "AppGlobals.h"
 #include "DeviceUuid.h"
 #include "DisplayEffects.h"
@@ -74,9 +86,9 @@ constexpr char kUpdateSpiffsPath[] = "/Update/spiffs.bin";
 constexpr char kLittleFsBackupDirPath[] = "/Backup";
 constexpr const char *kCsvEmptyFallbackMessage = u8"痛苦啊，你是我的唯一...";
 constexpr const char *kFatRecoveryNoticeLine1 = u8"你的设备出现了一些问题";
-constexpr const char *kFatRecoveryNoticeLine2 = u8"我们已经为你恢复到了初始状态";
-constexpr const char *kFatRecoveryNoticeLine3 = u8"不过我还是建议你去连续你的部门主管";
-constexpr const char *kFatRecoveryFailedLine = u8"我们遇到了不可逆转的错误，请联系部门主管";
+constexpr const char *kFatRecoveryNoticeLine2 = u8"不必担心,我们已经为你恢复到了初始状态";
+constexpr const char *kFatRecoveryNoticeLine3 = u8"尽管如此,我们还是建议你去联系你的部门主管";
+constexpr const char *kFatRecoveryFailedLine = u8"我们遇到了不可逆转的熔毁，请联系部门主管";
 constexpr const char *kDefaultReminderMessage = u8"这个时候你似乎有什么事要干";
 constexpr uint32_t kSleepFileMagic = 0x53534E50UL; // "SSNP"
 constexpr uint16_t kSleepFileVersion = 1;

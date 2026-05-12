@@ -1,3 +1,39 @@
+/*
+ * 文件说明: 公共接口头文件。
+ * 文件功能: 声明对应模块的类型、常量和可被其他编译单元调用的函数接口。
+ *
+ * 函数表:
+ * - begin: 初始化或确保对应资源可用。
+ * - loop: Arduino 主循环，周期处理运行任务。
+ * - end: 模块内部辅助函数。
+ * - startTransferMode: 模块内部辅助函数。
+ * - stopTransferMode: 停止、释放或清理对应状态。
+ * - remountFat: 模块内部辅助函数。
+ * - unmountFat: 挂载或卸载对应文件系统。
+ * - fatExists: 模块内部辅助函数。
+ * - readTextFile: 读取、获取或消费对应数据。
+ * - onTransferStart: 事件回调处理函数。
+ * - onTransferStop: 事件回调处理函数。
+ * - onFatMounted: 事件回调处理函数。
+ * - onUsbState: 事件回调处理函数。
+ * - usbEventThunk: 模块内部辅助函数。
+ * - onReadThunk: 事件回调处理函数。
+ * - onWriteThunk: 事件回调处理函数。
+ * - onStartStopThunk: 事件回调处理函数。
+ * - handleUsbEvent: 处理对应业务流程或事件分支。
+ * - onRead: 事件回调处理函数。
+ * - onWrite: 事件回调处理函数。
+ * - onStartStop: 事件回调处理函数。
+ * - ensureFatFilesystem: 初始化或确保对应资源可用。
+ * - openRawFatBackend: 初始化或确保对应资源可用。
+ * - closeRawFatBackend: 停止、释放或清理对应状态。
+ * - applyPendingReleaseAction: 应用配置或切换运行状态。
+ * - notifyTransferStart: 模块内部辅助函数。
+ * - notifyTransferStop: 模块内部辅助函数。
+ * - notifyFatMounted: 模块内部辅助函数。
+ * - notifyUsbState: 模块内部辅助函数。
+ * - Config: 模块内部辅助函数。
+ */
 #pragma once
 
 #include <Arduino.h>

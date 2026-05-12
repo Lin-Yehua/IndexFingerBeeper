@@ -1,3 +1,24 @@
+/*
+ * 文件说明: 模块实现文件。
+ * 文件功能: 实现对应模块的运行逻辑和内部辅助函数。
+ *
+ * 函数表:
+ * - wlWriteRmw: 模块内部辅助函数。
+ * - onRead: 事件回调处理函数。
+ * - onWrite: 事件回调处理函数。
+ * - onStartStop: 事件回调处理函数。
+ * - onUsbEvent: 事件回调处理函数。
+ * - mountFat: 挂载或卸载对应文件系统。
+ * - unmountFat: 挂载或卸载对应文件系统。
+ * - openRawBackend: 初始化或确保对应资源可用。
+ * - closeRawBackend: 停止、释放或清理对应状态。
+ * - enterUsbMode: 模块内部辅助函数。
+ * - enterAppMode: 模块内部辅助函数。
+ * - TaskPowerLED: FreeRTOS 任务入口或任务控制函数。
+ * - LED_Blitz: 模块内部辅助函数。
+ * - setup: Arduino 启动入口，完成系统初始化。
+ * - loop: Arduino 主循环，周期处理运行任务。
+ */
 #include <Arduino.h>
 #include <FFat.h>
 #include <USB.h>

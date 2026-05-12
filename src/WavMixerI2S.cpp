@@ -1,3 +1,11 @@
+/*
+ * 文件说明: 模块实现文件。
+ * 文件功能: 实现对应模块的运行逻辑和内部辅助函数。
+ *
+ * 函数表:
+ * - WavMixerI2S::WavMixerI2S: 模块内部辅助函数。
+ * - WavMixerI2S::~WavMixerI2S: 模块内部辅助函数。
+ */
 #include "WavMixerI2S.h"
 #include <FFat.h>
 #include <stdlib.h>

@@ -1,4 +1,14 @@
-﻿#include "Ds1302Rtc.h"
+/*
+ * 文件说明: 模块实现文件。
+ * 文件功能: 实现对应模块的运行逻辑和内部辅助函数。
+ *
+ * 函数表:
+ * - isLeapYear: 计算、判断或转换对应结果。
+ * - maxDayInMonth: 计算、判断或转换对应结果。
+ * - ds1302IsValidDateTime: 模块内部辅助函数。
+ * - Ds1302Rtc::Ds1302Rtc: 模块内部辅助函数。
+ */
+#include "Ds1302Rtc.h"
 Ds1302Rtc rtc(47, 48, 45); // CLK, DAT, RST
 namespace
 {

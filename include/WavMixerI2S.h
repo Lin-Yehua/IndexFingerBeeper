@@ -1,3 +1,30 @@
+/*
+ * 文件说明: 公共接口头文件。
+ * 文件功能: 声明对应模块的类型、常量和可被其他编译单元调用的函数接口。
+ *
+ * 函数表:
+ * - begin: 初始化或确保对应资源可用。
+ * - startOnCore: 模块内部辅助函数。
+ * - stop: 停止、释放或清理对应状态。
+ * - playBG: 播放对应消息或音频流程。
+ * - playBGnoLoop: 播放对应消息或音频流程。
+ * - stopBG: 停止、释放或清理对应状态。
+ * - playInsert: 播放对应消息或音频流程。
+ * - stopInsert: 停止、释放或清理对应状态。
+ * - setBgGain: 保存、写入或更新对应数据。
+ * - setInsertGain: 保存、写入或更新对应数据。
+ * - audioTaskEntry: FreeRTOS 任务入口或任务控制函数。
+ * - audioTask: FreeRTOS 任务入口或任务控制函数。
+ * - initFS: 初始化或确保对应资源可用。
+ * - initI2S: 初始化或确保对应资源可用。
+ * - openAndValidateWav: 初始化或确保对应资源可用。
+ * - readWavHeader: 读取、获取或消费对应数据。
+ * - readSamplesLoop: 读取、获取或消费对应数据。
+ * - readSamplesOneShot: 读取、获取或消费对应数据。
+ * - readSamplesOneShotPlain: 读取、获取或消费对应数据。
+ * - mixAudio: 模块内部辅助函数。
+ * - AudioConfig: 模块内部辅助函数。
+ */
 #pragma once
 
 #include "driver/i2s.h"

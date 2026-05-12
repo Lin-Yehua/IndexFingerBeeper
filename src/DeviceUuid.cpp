@@ -1,3 +1,16 @@
+/*
+ * 文件说明: 模块实现文件。
+ * 文件功能: 实现对应模块的运行逻辑和内部辅助函数。
+ *
+ * 函数表:
+ * - normalizeUuid: 解析、规范化或格式化对应内容。
+ * - isUuidDigit: 计算、判断或转换对应结果。
+ * - isDeviceUuidValid: 计算、判断或转换对应结果。
+ * - buildDeviceUuidFromDateTime: 模块内部辅助函数。
+ * - deviceUuidRead: 模块内部辅助函数。
+ * - deviceUuidEnsureFromDateTime: 模块内部辅助函数。
+ * - deviceUuidEnsureFromRtc: 模块内部辅助函数。
+ */
 #include "DeviceUuid.h"
 
 #include <Preferences.h>

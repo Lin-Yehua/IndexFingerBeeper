@@ -1,3 +1,13 @@
+/*
+ * 文件说明: 模块实现文件。
+ * 文件功能: 实现对应模块的运行逻辑和内部辅助函数。
+ *
+ * 函数表:
+ * - Key_init: 模块内部辅助函数。
+ * - get_Keystate: 读取、获取或消费对应数据。
+ * - Key_loop: 模块内部辅助函数。
+ * - get_Keycode: 读取、获取或消费对应数据。
+ */
 #include <Key_Drv.h>
 
 #define LEFT_PIN 2

@@ -1,4 +1,14 @@
-﻿#include "DisplayEffects.h"
+/*
+ * 文件说明: 模块实现文件。
+ * 文件功能: 实现对应模块的运行逻辑和内部辅助函数。
+ *
+ * 函数表:
+ * - scaledBacklightDuty: 模块内部辅助函数。
+ * - showGlitchEffectUTF8: 绘制界面、输出内容或响应请求。
+ * - task_LogoFadeInAndMove: FreeRTOS 任务入口或任务控制函数。
+ * - generateUniqueRandomNumbers: 模块内部辅助函数。
+ */
+#include "DisplayEffects.h"
 #include "AppGlobals.h"
 #include "Hanchi_Index.h"
 #include "Index_B.h"

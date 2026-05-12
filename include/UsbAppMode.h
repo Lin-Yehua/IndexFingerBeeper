@@ -1,3 +1,45 @@
+/*
+ * 文件说明: 公共接口头文件。
+ * 文件功能: 声明对应模块的类型、常量和可被其他编译单元调用的函数接口。
+ *
+ * 函数表:
+ * - ensureDisplayReady: 初始化或确保对应资源可用。
+ * - showUsbModeScreen: 绘制界面、输出内容或响应请求。
+ * - applyAudioGainsFromSettingIni: 应用配置或切换运行状态。
+ * - onRead: 事件回调处理函数。
+ * - onWrite: 事件回调处理函数。
+ * - onStartStop: 事件回调处理函数。
+ * - onUsbEvent: 事件回调处理函数。
+ * - onApStaInit: 事件回调处理函数。
+ * - onStaOnlineInit: 事件回调处理函数。
+ * - onStaOnlyInit: 事件回调处理函数。
+ * - mountFat: 挂载或卸载对应文件系统。
+ * - unmountFat: 挂载或卸载对应文件系统。
+ * - openRawBackend: 初始化或确保对应资源可用。
+ * - closeRawBackend: 停止、释放或清理对应状态。
+ * - enterUsbMode: 模块内部辅助函数。
+ * - enterAppMode: 模块内部辅助函数。
+ * - applyPendingFatUpdatesFromUpdateDir: 应用配置或切换运行状态。
+ * - appConsumeUpdateRebootRequest: 模块内部辅助函数。
+ * - appConsumeForceAppUpdateBoot: 模块内部辅助函数。
+ * - initProjectResources: 初始化或确保对应资源可用。
+ * - processAppLoop: 执行 APP 主循环调度。
+ * - setAppModeEnterCallback: 保存、写入或更新对应数据。
+ * - setAppModeInitCallback: 保存、写入或更新对应数据。
+ * - getAppLoopMode: 读取、获取或消费对应数据。
+ * - applyStartupModeFromSettingIni: 应用配置或切换运行状态。
+ * - runBootAnimationTaskStart: FreeRTOS 任务入口或任务控制函数。
+ * - runBootAnimationTaskWait: FreeRTOS 任务入口或任务控制函数。
+ * - runBootAnimationTaskAndWait: FreeRTOS 任务入口或任务控制函数。
+ * - notifyBacklightActivity: 模块内部辅助函数。
+ * - setBacklightTimeSeconds: 保存、写入或更新对应数据。
+ * - setBacklightLevel: 保存、写入或更新对应数据。
+ * - serviceBatteryMonitor: 周期服务函数，维护对应后台状态。
+ * - appGetBatteryStatus: 模块内部辅助函数。
+ * - appHandleRtcMaintenanceWakeIfNeeded: 模块内部辅助函数。
+ * - appShouldFastResumeFromDeepSleep: 模块内部辅助函数。
+ * - appRestoreFromDeepSleepSnapshot: 模块内部辅助函数。
+ */
 #pragma once
 
 #include <Arduino.h>
