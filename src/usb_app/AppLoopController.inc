@@ -343,7 +343,8 @@ static void reloadCsvIfNeeded(bool instantRefreshNoKey)
     }
     if (instantRefreshNoKey)
     {
-      firstFlag = true;
+      firstFlag = false;
+      playLocalText(csvTotal());
     }
     Serial.println("[WEB] /data.csv reloaded");
   }
@@ -482,6 +483,9 @@ static bool handleWebIrq(LoopIrqState &irq, bool &syntheticKeyPress)
   {
     startImmediate(irq);
     playMessageWithGlitch(immediateMessage.c_str());
+    irq.immediateActive = false;
+    irq.immediateKeyLatch = false;
+    irq.immediatePreemptedWeb = false;
     return true;
   }
 
@@ -552,53 +556,25 @@ static bool handleWebIrq(LoopIrqState &irq, bool &syntheticKeyPress)
 
   if (!irq.webActive && wirelessPortalHasPendingMessage())
   {
-    String queuedMessage;
-    if (wirelessPortalPopMessage(queuedMessage))
-    {
-      irq.webActive = true;
-      irq.webKeyLatch = false;
-      Serial.println("[WEB] interrupt started");
-      playMessageWithGlitch(queuedMessage.c_str());
-      return true;
-    }
+    irq.webActive = true;
+    irq.webKeyLatch = false;
+    Serial.println("[WEB] interrupt started");
   }
 
   if (irq.webActive)
   {
-    const uint8_t key = readLoopKey(syntheticKeyPress);
-    if (key == 2 && !irq.webKeyLatch)
+    String queuedMessage;
+    if (wirelessPortalPopMessage(queuedMessage))
     {
-      irq.webKeyLatch = true;
-      if (wakeBacklightByKeyIfNeeded())
-      {
-        return true;
-      }
-      String queuedMessage;
-      if (wirelessPortalPopMessage(queuedMessage))
-      {
-        playMessageWithGlitch(queuedMessage.c_str());
-        // Important: even if queue is now empty, we are still displaying
-        // the message we just popped. Web interrupt must stay active until
-        // the user presses the key once more to explicitly exit.
-        Serial.println("[WEB] interrupt next message");
-      }
-      else
-      {
-        irq.webActive = false;
-        irq.webKeyLatch = false;
-        syntheticKeyPress = true;
-        Serial.println("[WEB] interrupt finished");
-      }
-      if (irq.webActive)
-      {
-        return true;
-      }
-    }
-    if (key != 2)
-    {
-      irq.webKeyLatch = false;
+      playMessageWithGlitch(queuedMessage.c_str());
+      Serial.println(wirelessPortalHasPendingMessage() ? "[WEB] interrupt next message" : "[WEB] interrupt displayed");
       return true;
     }
+    irq.webActive = false;
+    irq.webKeyLatch = false;
+    syntheticKeyPress = true;
+    Serial.println("[WEB] interrupt finished");
+    return true;
   }
   return false;
 }

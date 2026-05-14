@@ -1,18 +1,10 @@
 /*
- * 文件说明: 模块实现文件。
- * 文件功能: 实现对应模块的运行逻辑和内部辅助函数。
- *
- * 函数表:
- * - scaledBacklightDuty: 模块内部辅助函数。
- * - showGlitchEffectUTF8: 绘制界面、输出内容或响应请求。
- * - task_LogoFadeInAndMove: FreeRTOS 任务入口或任务控制函数。
- * - generateUniqueRandomNumbers: 模块内部辅助函数。
+ * Display effects implementation.
  */
 #include "DisplayEffects.h"
 #include "AppGlobals.h"
 #include "Hanchi_Index.h"
 #include "Index_B.h"
-#include "Key_Drv.h"
 #include "Logo_Moon_B.h"
 #include <Arduino.h>
 #include <TFT_eSPI.h>
@@ -21,15 +13,99 @@
 
 namespace
 {
+constexpr int kGlitchMaxChars = 128;
+constexpr int kGlitchMaxLines = 8;
+constexpr int kGlitchDisturbWidth = 5;
+constexpr int kGlitchJunkWidth = 20;
+constexpr int kGlitchLineUnitCap = 32;
+constexpr int kGlitchLineH = 18;
+constexpr int kGlitchSpriteW = 320;
+constexpr int kGlitchSpriteH = 120;
+constexpr int kGlitchSpriteScreenY = 100;
+constexpr int kGlitchGlobalMiddleY = 160;
+constexpr int kGlitchCenterX = 160;
+constexpr int kGlitchLogoX = 160 - 60;
+constexpr int kGlitchLogoY = 50 - 60;
+constexpr int kGlitchLogoW = 120;
+constexpr int kGlitchLogoH = 120;
+constexpr int kGlitchFrameDelayMs = 10;
+constexpr int kGlitchRollbackClearLeft = 8;
+constexpr int kGlitchRollbackClearRight = 12;
+constexpr int kGlitchMaxRollbackCount = 8;
+constexpr const char *kGlitchEnglishChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+
+struct GlitchEffectState
+{
+  String chars[kGlitchMaxChars];
+  uint8_t srcUnits[kGlitchMaxChars];
+  String shown[kGlitchMaxChars];
+  bool wrongActive[kGlitchMaxChars];
+  String wrongChars[kGlitchMaxChars];
+  bool engFlickerActive[kGlitchMaxChars];
+  uint8_t engFlickerLeft[kGlitchMaxChars];
+  char engFlickerChar[kGlitchMaxChars];
+  bool incorrectNow[kGlitchMaxChars];
+
+  int fullLineStart[kGlitchMaxLines];
+  int fullLineEnd[kGlitchMaxLines];
+  bool lineFrozen[kGlitchMaxLines];
+  String frozenLineText[kGlitchMaxLines];
+  String frameLineText[kGlitchMaxLines];
+  String lastFrameLineText[kGlitchMaxLines];
+
+  int charCount;
+  int fullLineCount;
+  int prevLineCount;
+
+  void reset()
+  {
+    charCount = 0;
+    fullLineCount = 0;
+    prevLineCount = -1;
+
+    for (int i = 0; i < kGlitchMaxChars; ++i)
+    {
+      chars[i] = "";
+      srcUnits[i] = 0;
+      shown[i] = "";
+      wrongActive[i] = false;
+      wrongChars[i] = "";
+      engFlickerActive[i] = false;
+      engFlickerLeft[i] = 0;
+      engFlickerChar[i] = 0;
+      incorrectNow[i] = false;
+    }
+
+    for (int i = 0; i < kGlitchMaxLines; ++i)
+    {
+      fullLineStart[i] = 0;
+      fullLineEnd[i] = 0;
+      lineFrozen[i] = false;
+      frozenLineText[i] = "";
+      frameLineText[i] = "";
+      lastFrameLineText[i] = "";
+    }
+  }
+};
+
+struct GlitchRuntime
+{
+  int cursor = 0;
+  int rollbackCount = 0;
+  bool rollbackEnabled = false;
+  bool rollbackPending = false;
+};
+
 uint8_t scaledBacklightDuty(uint8_t rawDuty)
 {
   float level = gBacklightLevel;
   if (level != level)
-    level = 1.0f; // NaN fallback
+    level = 1.0f;
   if (level < 0.0f)
     level = 0.0f;
   if (level > 1.0f)
     level = 1.0f;
+
   const int duty = static_cast<int>(static_cast<float>(rawDuty) * level + 0.5f);
   if (duty < 0)
     return 0;
@@ -37,16 +113,13 @@ uint8_t scaledBacklightDuty(uint8_t rawDuty)
     return 255;
   return static_cast<uint8_t>(duty);
 }
-} // namespace
 
-void showGlitchEffectUTF8(const char *text)
+String normalizeGlitchInput(const char *text)
 {
-  if (!text)
-    return;
-
-  // Normalize incoming text so display pipeline ignores line breaks.
-  // This keeps wrapped rendering fully controlled by our own layout logic.
   String normalized;
+  if (!text)
+    return normalized;
+
   normalized.reserve(strlen(text));
   for (size_t i = 0; text[i] != '\0'; ++i)
   {
@@ -64,586 +137,590 @@ void showGlitchEffectUTF8(const char *text)
     }
     normalized += ch;
   }
-  text = normalized.c_str();
+  return normalized;
+}
 
-  static constexpr int kMaxChars = 128;
-  static constexpr int kMaxLines = 8;
-  static constexpr int kDisturbWidth = 5;
-  static constexpr int kJunkWidth = 20;
-  static constexpr int kLineUnitCap = 32; // 中文=2, ASCII=1
-  static constexpr int kLineH = 18;
-  static constexpr int kSpriteW = 320;
-  static constexpr int kSpriteH = 120;
-  static constexpr int kSpriteScreenY = 100;
-  static constexpr int kGobalYmiddle = 160; // 显示区域中心（屏幕绝对坐标）
-  static constexpr int kCenterX = 160;
-  static constexpr int kLogoX = 160 - 60;
-  static constexpr int kLogoY = 50 - 60;
-  static constexpr int kLogoW = 120;
-  static constexpr int kLogoH = 120;
+int utf8CodeUnitLength(uint8_t c)
+{
+  if ((c & 0x80) == 0x00)
+    return 1;
+  if ((c & 0xE0) == 0xC0)
+    return 2;
+  if ((c & 0xF0) == 0xE0)
+    return 3;
+  if ((c & 0xF8) == 0xF0)
+    return 4;
+  return 1;
+}
 
-  static String chars[kMaxChars];
-  static uint8_t srcUnits[kMaxChars];
-  static String shown[kMaxChars];
-  static bool wrongActive[kMaxChars];
-  static String wrongChars[kMaxChars];
-  static bool engFlickerActive[kMaxChars];
-  static uint8_t engFlickerLeft[kMaxChars];
-  static char engFlickerChar[kMaxChars];
-  static bool incorrectNow[kMaxChars];
+void splitUtf8Chars(const char *text, GlitchEffectState &state)
+{
+  if (!text)
+    return;
 
-  static int fullLineStart[kMaxLines];
-  static int fullLineEnd[kMaxLines];
-  static bool lineFrozen[kMaxLines];
-  static String frozenLineText[kMaxLines];
-  static String frameLineText[kMaxLines];
-  static String lastFrameLineText[kMaxLines];
-
-  int charCount = 0;
-  int fullLineCount = 0;
-  int prevCurrentLineCount = -1;
-  int keycode = 255;
-  bool rollbackEnabled = gEnableReprint;
-  bool forceFinishNow = false;
-  bool keyLatch = false;
-
-  const int junkLen = (int)strlen(junkChars);
-  const char *kEnChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
-  const int kEnCharsLen = (int)strlen(kEnChars);
-
-  for (int i = 0; i < kMaxChars; ++i)
+  for (int i = 0; text[i] != '\0' && state.charCount < kGlitchMaxChars;)
   {
-    chars[i] = "";
-    srcUnits[i] = 0;
-    shown[i] = "";
-    wrongActive[i] = false;
-    wrongChars[i] = "";
-    engFlickerActive[i] = false;
-    engFlickerLeft[i] = 0;
-    engFlickerChar[i] = 0;
-    incorrectNow[i] = false;
-  }
-  for (int i = 0; i < kMaxLines; ++i)
-  {
-    fullLineStart[i] = 0;
-    fullLineEnd[i] = 0;
-    lineFrozen[i] = false;
-    frozenLineText[i] = "";
-    frameLineText[i] = "";
-    lastFrameLineText[i] = "";
-  }
-
-  // UTF-8 按“逻辑字符”切分。
-  for (int i = 0; text[i] != '\0' && charCount < kMaxChars;)
-  {
-    uint8_t c = (uint8_t)text[i];
-    int charLen = 1;
-    if ((c & 0x80) == 0x00)
-      charLen = 1;
-    else if ((c & 0xE0) == 0xC0)
-      charLen = 2;
-    else if ((c & 0xF0) == 0xE0)
-      charLen = 3;
-    else if ((c & 0xF8) == 0xF0)
-      charLen = 4;
-
+    const int charLen = utf8CodeUnitLength(static_cast<uint8_t>(text[i]));
     int validLen = 0;
     while (validLen < charLen && text[i + validLen] != '\0')
-      validLen++;
+      ++validLen;
     if (validLen <= 0)
       break;
 
-    chars[charCount] = "";
+    String token;
     for (int j = 0; j < validLen; ++j)
-      chars[charCount] += text[i + j];
-    srcUnits[charCount] = (chars[charCount].length() > 1) ? 2 : 1;
+      token += text[i + j];
 
+    state.chars[state.charCount] = token;
+    state.srcUnits[state.charCount] = (token.length() > 1) ? 2 : 1;
+    ++state.charCount;
     i += validLen;
-    charCount++;
+  }
+}
+
+void drawLogoOnlyGlitchFrame()
+{
+  Text.fillRect(0, 0, kGlitchSpriteW, kGlitchSpriteH, TFT_BLACK);
+  Text.pushImage(kGlitchLogoX, kGlitchLogoY, kGlitchLogoW, kGlitchLogoH, (uint16_t *)Index_B);
+  Text.pushSprite(0, kGlitchSpriteScreenY);
+}
+
+void buildFinalLineMap(GlitchEffectState &state)
+{
+  int start = 0;
+  int units = 0;
+
+  for (int j = 0; j < state.charCount && state.fullLineCount < kGlitchMaxLines; ++j)
+  {
+    const int u = state.srcUnits[j];
+    if (j > start && units + u > kGlitchLineUnitCap)
+    {
+      state.fullLineStart[state.fullLineCount] = start;
+      state.fullLineEnd[state.fullLineCount] = j;
+      ++state.fullLineCount;
+      start = j;
+      units = 0;
+    }
+    units += u;
   }
 
-  if (charCount <= 0)
+  if (start < state.charCount && state.fullLineCount < kGlitchMaxLines)
   {
-    Text.fillRect(0, 0, kSpriteW, kSpriteH, TFT_BLACK);
-    Text.pushImage(kLogoX, kLogoY, kLogoW, kLogoH, (uint16_t *)Index_B);
-    Text.pushSprite(0, kSpriteScreenY);
+    state.fullLineStart[state.fullLineCount] = start;
+    state.fullLineEnd[state.fullLineCount] = state.charCount;
+    ++state.fullLineCount;
+  }
+
+  if (state.fullLineCount <= 0)
+  {
+    state.fullLineStart[0] = 0;
+    state.fullLineEnd[0] = state.charCount;
+    state.fullLineCount = 1;
+  }
+}
+
+bool prepareGlitchText(const char *text, GlitchEffectState &state)
+{
+  state.reset();
+  const String normalized = normalizeGlitchInput(text);
+  splitUtf8Chars(normalized.c_str(), state);
+  if (state.charCount <= 0)
+    return false;
+  buildFinalLineMap(state);
+  return true;
+}
+
+String mutateCharNearBoundary()
+{
+  uint32_t cp = 0;
+  if (random(100) < 15)
+    cp = 0x1234;
+  else
+    cp = static_cast<uint32_t>(Index_Han[random(0, 4001)]);
+
+  char out[5] = {0};
+  if (cp <= 0x7F)
+  {
+    out[0] = static_cast<char>(cp);
+  }
+  else if (cp <= 0x7FF)
+  {
+    out[0] = static_cast<char>(0xC0 | ((cp >> 6) & 0x1F));
+    out[1] = static_cast<char>(0x80 | (cp & 0x3F));
+  }
+  else
+  {
+    out[0] = static_cast<char>(0xE0 | ((cp >> 12) & 0x0F));
+    out[1] = static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+    out[2] = static_cast<char>(0x80 | (cp & 0x3F));
+  }
+  return String(out);
+}
+
+void clearTransientChar(GlitchEffectState &state, int j)
+{
+  if (j < 0 || j >= state.charCount)
+    return;
+
+  state.wrongActive[j] = false;
+  state.wrongChars[j] = "";
+  state.engFlickerActive[j] = false;
+  state.engFlickerLeft[j] = 0;
+  state.engFlickerChar[j] = 0;
+  state.incorrectNow[j] = false;
+}
+
+void clearTransientRange(GlitchEffectState &state, int l, int r)
+{
+  if (l < 0)
+    l = 0;
+  if (r >= state.charCount)
+    r = state.charCount - 1;
+
+  for (int j = l; j <= r; ++j)
+    clearTransientChar(state, j);
+}
+
+void tryActivateWrong(GlitchEffectState &state, int j, int wrongProb)
+{
+  if (j < 0 || j >= state.charCount)
+    return;
+  if (state.wrongActive[j])
+    return;
+  if (random(100) >= wrongProb)
+    return;
+
+  String candidate = state.chars[j];
+  for (int t = 0; t < 6; ++t)
+  {
+    candidate = mutateCharNearBoundary();
+    if (candidate != state.chars[j] && candidate != state.wrongChars[j])
+      break;
+  }
+
+  if (candidate != state.chars[j])
+  {
+    state.wrongChars[j] = candidate;
+    state.wrongActive[j] = true;
+  }
+}
+
+void buildSettledToken(GlitchEffectState &state, int j)
+{
+  state.shown[j] = state.chars[j];
+  clearTransientChar(state, j);
+}
+
+void buildDisturbedToken(GlitchEffectState &state, int j, int cursorI, bool collectIncorrect)
+{
+  const int dist = cursorI - j;
+  const int wrongProb = (dist <= 3) ? gWrongProb3 : gWrongProb5;
+  bool isIncorrect = false;
+
+  if (cursorI < state.charCount)
+    tryActivateWrong(state, j, wrongProb);
+
+  const bool isUtf8 = state.chars[j].length() > 1;
+  if (isUtf8 && !state.engFlickerActive[j] && random(100) < 15)
+  {
+    state.engFlickerActive[j] = true;
+    state.engFlickerLeft[j] = static_cast<uint8_t>(random(1, 4));
+    state.engFlickerChar[j] = kGlitchEnglishChars[random(0, static_cast<int>(strlen(kGlitchEnglishChars)))];
+  }
+
+  if (state.engFlickerActive[j])
+  {
+    state.shown[j] = String(state.engFlickerChar[j]);
+    isIncorrect = true;
+    if (state.engFlickerLeft[j] > 0)
+      --state.engFlickerLeft[j];
+    if (state.engFlickerLeft[j] == 0)
+      state.engFlickerActive[j] = false;
+  }
+  else if (state.wrongActive[j])
+  {
+    state.shown[j] = state.wrongChars[j];
+    isIncorrect = true;
+  }
+  else
+  {
+    state.shown[j] = state.chars[j];
+  }
+
+  if (collectIncorrect && dist <= 3)
+    state.incorrectNow[j] = isIncorrect;
+}
+
+void buildJunkToken(GlitchEffectState &state, int j)
+{
+  const int junkLen = static_cast<int>(strlen(junkChars));
+  const char junk = junkChars[random(0, junkLen)];
+  char s[2] = {junk, '\0'};
+  state.shown[j] = String(s);
+  clearTransientChar(state, j);
+}
+
+void hideToken(GlitchEffectState &state, int j)
+{
+  state.shown[j] = "";
+  clearTransientChar(state, j);
+}
+
+void buildGlitchFrame(GlitchEffectState &state, int cursorI, bool collectIncorrect)
+{
+  if (collectIncorrect)
+    memset(state.incorrectNow, 0, sizeof(state.incorrectNow));
+
+  const int disturbStart = (cursorI > kGlitchDisturbWidth) ? (cursorI - kGlitchDisturbWidth) : 0;
+  const int junkEnd = cursorI + kGlitchJunkWidth;
+
+  for (int j = 0; j < state.charCount; ++j)
+  {
+    if (j < disturbStart)
+      buildSettledToken(state, j);
+    else if (j < cursorI)
+      buildDisturbedToken(state, j, cursorI, collectIncorrect);
+    else if (j == cursorI)
+      buildSettledToken(state, j);
+    else if (j <= junkEnd)
+      buildJunkToken(state, j);
+    else
+      hideToken(state, j);
+  }
+}
+
+int tokenUnits(const String &token)
+{
+  if (!token.length())
+    return 0;
+  return (token.length() > 1) ? 2 : 1;
+}
+
+int freezeDecodedLines(GlitchEffectState &state, int progressI)
+{
+  int decodedEnd = progressI - kGlitchDisturbWidth;
+  if (decodedEnd < 0)
+    decodedEnd = 0;
+  if (decodedEnd > state.charCount)
+    decodedEnd = state.charCount;
+
+  int frozenPrefix = 0;
+  while (frozenPrefix < state.fullLineCount && state.fullLineEnd[frozenPrefix] <= decodedEnd)
+    ++frozenPrefix;
+
+  for (int li = 0; li < state.fullLineCount; ++li)
+  {
+    const bool shouldFreeze = (li < frozenPrefix);
+    if (shouldFreeze && !state.lineFrozen[li])
+    {
+      state.frozenLineText[li] = "";
+      for (int j = state.fullLineStart[li]; j < state.fullLineEnd[li]; ++j)
+        state.frozenLineText[li] += state.chars[j];
+    }
+    else if (!shouldFreeze && state.lineFrozen[li])
+    {
+      state.frozenLineText[li] = "";
+    }
+    state.lineFrozen[li] = shouldFreeze;
+  }
+
+  return frozenPrefix;
+}
+
+int buildFrameLines(GlitchEffectState &state, int frozenPrefix)
+{
+  for (int i = 0; i < kGlitchMaxLines; ++i)
+    state.frameLineText[i] = "";
+
+  int lineCount = 0;
+  for (int li = 0; li < frozenPrefix && lineCount < kGlitchMaxLines; ++li)
+    state.frameLineText[lineCount++] = state.frozenLineText[li];
+
+  const int activeStart = (frozenPrefix < state.fullLineCount) ? state.fullLineStart[frozenPrefix] : state.charCount;
+  if (lineCount < kGlitchMaxLines)
+  {
+    int li = lineCount;
+    int usedUnits = 0;
+
+    for (int j = activeStart; j < state.charCount; ++j)
+    {
+      const String &token = state.shown[j];
+      const int u = tokenUnits(token);
+      if (u <= 0)
+      {
+        if (j > activeStart)
+          break;
+        continue;
+      }
+
+      if (usedUnits + u > kGlitchLineUnitCap && state.frameLineText[li].length() > 0)
+      {
+        ++li;
+        usedUnits = 0;
+        if (li >= kGlitchMaxLines)
+          break;
+      }
+
+      state.frameLineText[li] += token;
+      usedUnits += u;
+    }
+
+    lineCount = li + 1;
+  }
+
+  while (lineCount > 1 && state.frameLineText[lineCount - 1].length() == 0)
+    --lineCount;
+
+  if (lineCount <= 0)
+  {
+    lineCount = 1;
+    state.frameLineText[0] = "";
+  }
+  return lineCount;
+}
+
+int computeTextBaseY(int lineCount)
+{
+  int localMiddleY = kGlitchGlobalMiddleY - kGlitchSpriteScreenY;
+  if (localMiddleY < (kGlitchLineH / 2))
+    localMiddleY = (kGlitchLineH / 2);
+  if (localMiddleY > (kGlitchSpriteH - (kGlitchLineH / 2)))
+    localMiddleY = kGlitchSpriteH - (kGlitchLineH / 2);
+
+  int baseY = localMiddleY - ((lineCount - 1) * kGlitchLineH) / 2;
+  const int baseYMin = kGlitchLineH / 2;
+  const int baseYMax = kGlitchSpriteH - (lineCount - 1) * kGlitchLineH - (kGlitchLineH / 2);
+  if (baseY < baseYMin)
+    baseY = baseYMin;
+  if (baseY > baseYMax)
+    baseY = baseYMax;
+  return baseY;
+}
+
+int firstChangedLine(const GlitchEffectState &state, int lineCount)
+{
+  for (int li = 0; li < lineCount; ++li)
+  {
+    if (state.frameLineText[li] != state.lastFrameLineText[li])
+      return li;
+  }
+  return -1;
+}
+
+bool computeDirtyRegion(const GlitchEffectState &state, int lineCount, int baseY, bool forceGlobalRefresh,
+                        int &drawStartLine, int &dirtyY0, int &dirtyY1)
+{
+  const bool globalRefresh = forceGlobalRefresh || (state.prevLineCount != lineCount);
+  if (!globalRefresh)
+  {
+    drawStartLine = firstChangedLine(state, lineCount);
+    if (drawStartLine < 0)
+      return false;
+    dirtyY0 = baseY + drawStartLine * kGlitchLineH - (kGlitchLineH / 2);
+    dirtyY1 = baseY + (lineCount - 1) * kGlitchLineH + (kGlitchLineH / 2);
+  }
+  else
+  {
+    drawStartLine = 0;
+    dirtyY0 = 0;
+    dirtyY1 = kGlitchSpriteH;
+  }
+
+  if (dirtyY0 < 0)
+    dirtyY0 = 0;
+  if (dirtyY1 > kGlitchSpriteH)
+    dirtyY1 = kGlitchSpriteH;
+  return dirtyY1 > dirtyY0;
+}
+
+void redrawLogoIfDirty(int dirtyY0, int dirtyY1)
+{
+  const bool hitLogo = !(dirtyY1 <= kGlitchLogoY || dirtyY0 >= (kGlitchLogoY + kGlitchLogoH));
+  if (hitLogo)
+    Text.pushImage(kGlitchLogoX, kGlitchLogoY, kGlitchLogoW, kGlitchLogoH, (uint16_t *)Index_B);
+}
+
+void drawSingleLineText(const GlitchEffectState &state, int lineCount, int baseY, int drawFrom)
+{
+  Text.setTextDatum(MC_DATUM);
+  for (int li = drawFrom; li < lineCount; ++li)
+  {
+    if (!state.frameLineText[li].length())
+      continue;
+    Text.drawString(state.frameLineText[li], kGlitchCenterX, baseY + li * kGlitchLineH);
+  }
+}
+
+void drawMultiLineText(const GlitchEffectState &state, int lineCount, int baseY, int drawFrom)
+{
+  const int firstLineWidth = Text.textWidth(state.frameLineText[0].c_str());
+  int leftStartX = kGlitchCenterX - (firstLineWidth / 2);
+  if (leftStartX < 0)
+    leftStartX = 0;
+  if (leftStartX > (kGlitchSpriteW - 1))
+    leftStartX = kGlitchSpriteW - 1;
+
+  if (drawFrom == 0)
+  {
+    Text.setTextDatum(MC_DATUM);
+    if (state.frameLineText[0].length())
+      Text.drawString(state.frameLineText[0], kGlitchCenterX, baseY);
+    drawFrom = 1;
+  }
+
+  Text.setTextDatum(ML_DATUM);
+  const int liStart = (drawFrom > 1) ? drawFrom : 1;
+  for (int li = liStart; li < lineCount; ++li)
+  {
+    if (!state.frameLineText[li].length())
+      continue;
+    Text.drawString(state.frameLineText[li], leftStartX, baseY + li * kGlitchLineH);
+  }
+}
+
+void rememberFrameLines(GlitchEffectState &state, int lineCount)
+{
+  state.prevLineCount = lineCount;
+  for (int i = 0; i < kGlitchMaxLines; ++i)
+    state.lastFrameLineText[i] = state.frameLineText[i];
+}
+
+void drawWrappedFrame(GlitchEffectState &state, int progressI, bool forceGlobalRefresh)
+{
+  const int frozenPrefix = freezeDecodedLines(state, progressI);
+  const int lineCount = buildFrameLines(state, frozenPrefix);
+  const int baseY = computeTextBaseY(lineCount);
+
+  int drawStartLine = 0;
+  int dirtyY0 = 0;
+  int dirtyY1 = kGlitchSpriteH;
+  if (!computeDirtyRegion(state, lineCount, baseY, forceGlobalRefresh, drawStartLine, dirtyY0, dirtyY1))
+  {
+    rememberFrameLines(state, lineCount);
     return;
   }
 
-  // 预计算最终分行：冻结判定严格按这组边界。
+  const bool globalRefresh = forceGlobalRefresh || (state.prevLineCount != lineCount);
+  Text.fillRect(0, dirtyY0, kGlitchSpriteW, dirtyY1 - dirtyY0, TFT_BLACK);
+  redrawLogoIfDirty(dirtyY0, dirtyY1);
+
+  const int drawFrom = globalRefresh ? 0 : drawStartLine;
+  if (lineCount <= 1)
+    drawSingleLineText(state, lineCount, baseY, drawFrom);
+  else
+    drawMultiLineText(state, lineCount, baseY, drawFrom);
+  Text.setTextDatum(MC_DATUM);
+
+  Text.pushSprite(0, kGlitchSpriteScreenY + dirtyY0, 0, dirtyY0, kGlitchSpriteW, dirtyY1 - dirtyY0);
+  rememberFrameLines(state, lineCount);
+}
+
+bool applyPendingRollback(GlitchEffectState &state, GlitchRuntime &runtime)
+{
+  if (!runtime.rollbackEnabled || !runtime.rollbackPending)
+    return false;
+
+  if (runtime.rollbackCount >= kGlitchMaxRollbackCount)
   {
-    int start = 0;
-    int units = 0;
-    for (int j = 0; j < charCount && fullLineCount < kMaxLines; ++j)
-    {
-      const int u = srcUnits[j];
-      if (j > start && units + u > kLineUnitCap)
-      {
-        fullLineStart[fullLineCount] = start;
-        fullLineEnd[fullLineCount] = j;
-        ++fullLineCount;
-        start = j;
-        units = 0;
-      }
-      units += u;
-    }
-    if (start < charCount && fullLineCount < kMaxLines)
-    {
-      fullLineStart[fullLineCount] = start;
-      fullLineEnd[fullLineCount] = charCount;
-      ++fullLineCount;
-    }
-    if (fullLineCount <= 0)
-    {
-      fullLineStart[0] = 0;
-      fullLineEnd[0] = charCount;
-      fullLineCount = 1;
-    }
+    runtime.rollbackPending = false;
+    runtime.rollbackEnabled = false;
+    return false;
   }
 
-  auto mutateCharNearBoundary = [&]() -> String
+  runtime.rollbackPending = false;
+  ++runtime.rollbackCount;
+
+  runtime.cursor -= kGlitchDisturbWidth;
+  if (runtime.cursor < 0)
+    runtime.cursor = 0;
+  clearTransientRange(state, runtime.cursor - kGlitchRollbackClearLeft, runtime.cursor + kGlitchRollbackClearRight);
+  return true;
+}
+
+void scheduleRollbackIfNeeded(const GlitchEffectState &state, GlitchRuntime &runtime, bool didRollbackThisFrame)
+{
+  if (didRollbackThisFrame || !runtime.rollbackEnabled || runtime.cursor < 3)
+    return;
+
+  const bool allWrong3 = state.incorrectNow[runtime.cursor - 1] && state.incorrectNow[runtime.cursor - 2] &&
+                         state.incorrectNow[runtime.cursor - 3];
+  if (!allWrong3)
+    return;
+
+  if (runtime.rollbackCount < kGlitchMaxRollbackCount)
+    runtime.rollbackPending = true;
+  else
+    runtime.rollbackEnabled = false;
+}
+
+void serviceGlitchInsertSound()
+{
+  const int beepProbability = constrain(gInsertSoundBaseProbability + static_cast<int>(Sound_count), 0, 100);
+  if (random(1, 100) <= beepProbability)
   {
-    uint32_t cp = 0;
-    if (random(100) < 15)
-    {
-      cp = 0x1234;
-    }
-    else
-    {
-      cp = (uint32_t)Index_Han[random(0, 4001)];
-    }
-
-    char out[5] = {0};
-    if (cp <= 0x7F)
-    {
-      out[0] = (char)cp;
-    }
-    else if (cp <= 0x7FF)
-    {
-      out[0] = (char)(0xC0 | ((cp >> 6) & 0x1F));
-      out[1] = (char)(0x80 | (cp & 0x3F));
-    }
-    else
-    {
-      out[0] = (char)(0xE0 | ((cp >> 12) & 0x0F));
-      out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
-      out[2] = (char)(0x80 | (cp & 0x3F));
-    }
-    return String(out);
-  };
-
-  auto tryActivateWrong = [&](int j, int wrongProb)
+    Sound_count = 0;
+    mixer.playInsert("/BB2.wav");
+  }
+  else
   {
-    if (j < 0 || j >= charCount)
-      return;
-    if (wrongActive[j])
-      return;
-    if (random(100) >= wrongProb)
-      return;
+    const int nextCount = static_cast<int>(Sound_count) + constrain(gInsertSoundIncreaseProbability, 0, 100);
+    Sound_count = static_cast<uint8_t>(nextCount > 255 ? 255 : nextCount);
+  }
+}
 
-    String candidate = chars[j];
-    for (int t = 0; t < 6; ++t)
-    {
-      candidate = mutateCharNearBoundary();
-      if (candidate != chars[j] && candidate != wrongChars[j])
-        break;
-    }
-    if (candidate != chars[j])
-    {
-      wrongChars[j] = candidate;
-      wrongActive[j] = true;
-    }
-  };
+void advanceGlitchCursor(GlitchRuntime &runtime, bool didRollbackThisFrame)
+{
+  if (!didRollbackThisFrame && !runtime.rollbackPending)
+    ++runtime.cursor;
+}
 
-  auto clearTransientState = [&](int l, int r)
+void runGlitchAnimationStep(GlitchEffectState &state, GlitchRuntime &runtime)
+{
+  const bool didRollbackThisFrame = applyPendingRollback(state, runtime);
+
+  buildGlitchFrame(state, runtime.cursor, true);
+  drawWrappedFrame(state, runtime.cursor, false);
+  delay(kGlitchFrameDelayMs);
+
+  scheduleRollbackIfNeeded(state, runtime, didRollbackThisFrame);
+  serviceGlitchInsertSound();
+  advanceGlitchCursor(runtime, didRollbackThisFrame);
+}
+
+void finalizeGlitchFrame(GlitchEffectState &state)
+{
+  for (int j = 0; j < state.charCount; ++j)
+    state.shown[j] = state.chars[j];
+  drawWrappedFrame(state, state.charCount + kGlitchDisturbWidth + kGlitchJunkWidth, true);
+}
+
+void finishGlitchEffect(GlitchEffectState &state)
+{
+  finalizeGlitchFrame(state);
+}
+
+} // namespace
+
+void showGlitchEffectUTF8(const char *text)
+{
+  if (!text)
+    return;
+
+  static GlitchEffectState state;
+  if (!prepareGlitchText(text, state))
   {
-    if (l < 0)
-      l = 0;
-    if (r >= charCount)
-      r = charCount - 1;
-    for (int j = l; j <= r; ++j)
-    {
-      wrongActive[j] = false;
-      wrongChars[j] = "";
-      engFlickerActive[j] = false;
-      engFlickerLeft[j] = 0;
-      engFlickerChar[j] = 0;
-      incorrectNow[j] = false;
-    }
-  };
-
-  auto tokenUnits = [&](const String &token) -> int
-  {
-    if (!token.length())
-      return 0;
-    return (token.length() > 1) ? 2 : 1;
-  };
-
-  // 构建当前帧 token：
-  // decoded | disturbed(5) | junk(20) | hidden
-  auto buildFrame = [&](int cursorI, bool collectIncorrect)
-  {
-    if (collectIncorrect)
-      memset(incorrectNow, 0, sizeof(incorrectNow));
-
-    const int disturbStart = (cursorI > kDisturbWidth) ? (cursorI - kDisturbWidth) : 0;
-    const int junkEnd = cursorI + kJunkWidth;
-
-    for (int j = 0; j < charCount; ++j)
-    {
-      if (j < disturbStart)
-      {
-        // 已破译区：固定正确，不抖动。
-        shown[j] = chars[j];
-        wrongActive[j] = false;
-        wrongChars[j] = "";
-        engFlickerActive[j] = false;
-        engFlickerLeft[j] = 0;
-        engFlickerChar[j] = 0;
-        continue;
-      }
-
-      if (j < cursorI)
-      {
-        // 扰动区：错误字形 + 英文闪烁。
-        const int dist = cursorI - j;
-        const int wrongProb = (dist <= 3) ? gWrongProb3 : gWrongProb5;
-        bool isIncorrect = false;
-
-        if (cursorI < charCount)
-          tryActivateWrong(j, wrongProb);
-
-        const bool isUtf8 = chars[j].length() > 1;
-        if (isUtf8 && !engFlickerActive[j] && random(100) < 15)
-        {
-          engFlickerActive[j] = true;
-          engFlickerLeft[j] = (uint8_t)random(1, 4); // 1~3 帧
-          engFlickerChar[j] = kEnChars[random(0, kEnCharsLen)];
-        }
-
-        if (engFlickerActive[j])
-        {
-          shown[j] = String(engFlickerChar[j]);
-          isIncorrect = true;
-          if (engFlickerLeft[j] > 0)
-            engFlickerLeft[j]--;
-          if (engFlickerLeft[j] == 0)
-            engFlickerActive[j] = false;
-        }
-        else if (wrongActive[j])
-        {
-          shown[j] = wrongChars[j];
-          isIncorrect = true;
-        }
-        else
-        {
-          shown[j] = chars[j];
-        }
-
-        if (collectIncorrect && dist <= 3)
-          incorrectNow[j] = isIncorrect;
-        continue;
-      }
-
-      if (j == cursorI)
-      {
-        // 光标位始终正确。
-        shown[j] = chars[j];
-        wrongActive[j] = false;
-        wrongChars[j] = "";
-        engFlickerActive[j] = false;
-        engFlickerLeft[j] = 0;
-        engFlickerChar[j] = 0;
-        continue;
-      }
-
-      if (j <= junkEnd)
-      {
-        // 乱码区长度固定为 20。
-        char junk = junkChars[random(0, junkLen)];
-        char s[2] = {junk, '\0'};
-        shown[j] = String(s);
-      }
-      else
-      {
-        // 右侧隐藏：减少每帧处理/绘制负担。
-        shown[j] = "";
-      }
-
-      wrongActive[j] = false;
-      wrongChars[j] = "";
-      engFlickerActive[j] = false;
-      engFlickerLeft[j] = 0;
-      engFlickerChar[j] = 0;
-    }
-  };
-
-  auto drawWrapped = [&](int progressI, bool forceGlobalRefresh)
-  {
-    for (int i = 0; i < kMaxLines; ++i)
-      frameLineText[i] = "";
-
-    // 冻结线：只有最终分行完整进入 decoded 区才冻结。
-    int decodedEnd = progressI - kDisturbWidth;
-    if (decodedEnd < 0)
-      decodedEnd = 0;
-    if (decodedEnd > charCount)
-      decodedEnd = charCount;
-
-    int frozenPrefix = 0;
-    while (frozenPrefix < fullLineCount && fullLineEnd[frozenPrefix] <= decodedEnd)
-    {
-      ++frozenPrefix;
-    }
-
-    for (int li = 0; li < fullLineCount; ++li)
-    {
-      const bool shouldFreeze = (li < frozenPrefix);
-      if (shouldFreeze && !lineFrozen[li])
-      {
-        frozenLineText[li] = "";
-        for (int j = fullLineStart[li]; j < fullLineEnd[li]; ++j)
-        {
-          frozenLineText[li] += chars[j];
-        }
-      }
-      else if (!shouldFreeze && lineFrozen[li])
-      {
-        frozenLineText[li] = "";
-      }
-      lineFrozen[li] = shouldFreeze;
-    }
-
-    int lineCount = 0;
-    for (int li = 0; li < frozenPrefix && lineCount < kMaxLines; ++li)
-    {
-      frameLineText[lineCount++] = frozenLineText[li];
-    }
-
-    // 活动区按“单位宽度”动态换行：
-    // 中文单位=2，ASCII单位=1。随破译抖动实时重排，保证可见行宽稳定。
-    const int activeStart = (frozenPrefix < fullLineCount) ? fullLineStart[frozenPrefix] : charCount;
-    if (lineCount < kMaxLines)
-    {
-      int li = lineCount;
-      int usedUnits = 0;
-
-      for (int j = activeStart; j < charCount; ++j)
-      {
-        const String &token = shown[j];
-        const int u = tokenUnits(token);
-        if (u <= 0)
-        {
-          // shown 的右侧隐藏区是连续空串，遇到后可直接停止扫描。
-          if (j > activeStart)
-            break;
-          continue;
-        }
-
-        if (usedUnits + u > kLineUnitCap && frameLineText[li].length() > 0)
-        {
-          ++li;
-          usedUnits = 0;
-          if (li >= kMaxLines)
-            break;
-        }
-
-        frameLineText[li] += token;
-        usedUnits += u;
-      }
-
-      lineCount = li + 1;
-    }
-
-    while (lineCount > 1 && frameLineText[lineCount - 1].length() == 0)
-    {
-      lineCount--;
-    }
-    if (lineCount <= 0)
-    {
-      lineCount = 1;
-      frameLineText[0] = "";
-    }
-
-    int localMiddleY = kGobalYmiddle - kSpriteScreenY;
-    if (localMiddleY < (kLineH / 2))
-      localMiddleY = (kLineH / 2);
-    if (localMiddleY > (kSpriteH - (kLineH / 2)))
-      localMiddleY = kSpriteH - (kLineH / 2);
-
-    int baseY = localMiddleY - ((lineCount - 1) * kLineH) / 2;
-    int baseYMin = kLineH / 2;
-    int baseYMax = kSpriteH - (lineCount - 1) * kLineH - (kLineH / 2);
-    if (baseY < baseYMin)
-      baseY = baseYMin;
-    if (baseY > baseYMax)
-      baseY = baseYMax;
-
-    const bool globalRefresh = forceGlobalRefresh || (prevCurrentLineCount != lineCount);
-
-    int firstChangedLine = -1;
-    if (!globalRefresh)
-    {
-      for (int li = 0; li < lineCount; ++li)
-      {
-        if (frameLineText[li] != lastFrameLineText[li])
-        {
-          firstChangedLine = li;
-          break;
-        }
-      }
-      if (firstChangedLine < 0)
-        return;
-    }
-
-    int drawStartLine = 0;
-    int dirtyY0 = 0;
-    int dirtyY1 = kSpriteH;
-    if (!globalRefresh)
-    {
-      drawStartLine = firstChangedLine;
-      dirtyY0 = baseY + drawStartLine * kLineH - (kLineH / 2);
-      dirtyY1 = baseY + (lineCount - 1) * kLineH + (kLineH / 2);
-    }
-
-    if (dirtyY0 < 0)
-      dirtyY0 = 0;
-    if (dirtyY1 > kSpriteH)
-      dirtyY1 = kSpriteH;
-    if (dirtyY1 <= dirtyY0)
-    {
-      prevCurrentLineCount = lineCount;
-      for (int i = 0; i < kMaxLines; ++i)
-        lastFrameLineText[i] = frameLineText[i];
-      return;
-    }
-
-    Text.fillRect(0, dirtyY0, kSpriteW, dirtyY1 - dirtyY0, TFT_BLACK);
-    const bool hitLogo = !(dirtyY1 <= kLogoY || dirtyY0 >= (kLogoY + kLogoH));
-    if (hitLogo)
-    {
-      Text.pushImage(kLogoX, kLogoY, kLogoW, kLogoH, (uint16_t *)Index_B);
-    }
-
-    const int firstLineWidth = Text.textWidth(frameLineText[0].c_str());
-    int leftStartX = kCenterX - (firstLineWidth / 2);
-    if (leftStartX < 0)
-      leftStartX = 0;
-    if (leftStartX > (kSpriteW - 1))
-      leftStartX = kSpriteW - 1;
-
-    int drawFrom = globalRefresh ? 0 : drawStartLine;
-    if (lineCount <= 1)
-    {
-      Text.setTextDatum(MC_DATUM);
-      for (int li = drawFrom; li < lineCount; ++li)
-      {
-        if (!frameLineText[li].length())
-          continue;
-        const int y = baseY + li * kLineH;
-        Text.drawString(frameLineText[li], kCenterX, y);
-      }
-    }
-    else
-    {
-      if (drawFrom == 0)
-      {
-        Text.setTextDatum(MC_DATUM);
-        if (frameLineText[0].length())
-          Text.drawString(frameLineText[0], kCenterX, baseY);
-        drawFrom = 1;
-      }
-      Text.setTextDatum(ML_DATUM);
-      int liStart = (drawFrom > 1) ? drawFrom : 1;
-      for (int li = liStart; li < lineCount; ++li)
-      {
-        if (!frameLineText[li].length())
-          continue;
-        const int y = baseY + li * kLineH;
-        Text.drawString(frameLineText[li], leftStartX, y);
-      }
-    }
-    Text.setTextDatum(MC_DATUM);
-
-    Text.pushSprite(0, kSpriteScreenY + dirtyY0, 0, dirtyY0, kSpriteW, dirtyY1 - dirtyY0);
-
-    prevCurrentLineCount = lineCount;
-    for (int i = 0; i < kMaxLines; ++i)
-      lastFrameLineText[i] = frameLineText[i];
-  };
-
-  int i = 0;
-  bool rollbackPending = false;
-  while (i < charCount)
-  {
-    bool didRollbackThisFrame = false;
-
-    // 下一帧执行回滚，避免同帧逻辑分叉过重。
-    if (rollbackEnabled && rollbackPending)
-    {
-      rollbackPending = false;
-      didRollbackThisFrame = true;
-
-      i -= kDisturbWidth;
-      if (i < 0)
-        i = 0;
-      clearTransientState(i - 8, i + 12);
-    }
-
-    buildFrame(i, true);
-    drawWrapped(i, false);
-    delay(10);
-
-    // 回滚触发：仅检查光标左侧 3 个字符（dist=1,2,3）。
-    if (!didRollbackThisFrame && rollbackEnabled && i >= 3)
-    {
-      const bool allWrong3 = incorrectNow[i - 1] && incorrectNow[i - 2] && incorrectNow[i - 3];
-      if (allWrong3)
-        rollbackPending = true;
-    }
-
-    Key_loop();
-    keycode = get_Keycode();
-    if (keycode == 2 && !keyLatch)
-    {
-      keyLatch = true;
-      if (!gEnableReprint)
-      {
-        forceFinishNow = true;
-      }
-      else if (rollbackEnabled)
-      {
-        rollbackEnabled = false;
-      }
-      else
-      {
-        forceFinishNow = true;
-      }
-    }
-    if (keycode != 2)
-      keyLatch = false;
-    if (forceFinishNow)
-      break;
-
-    const int beepProbability = constrain(gInsertSoundBaseProbability + static_cast<int>(Sound_count), 0, 100);
-    if (random(1, 100) <= beepProbability)
-    {
-      Sound_count = 0;
-      mixer.playInsert("/BB2.wav");
-    }
-    else
-    {
-      const int nextCount = static_cast<int>(Sound_count) + constrain(gInsertSoundIncreaseProbability, 0, 100);
-      Sound_count = static_cast<uint8_t>(nextCount > 255 ? 255 : nextCount);
-    }
-
-    if (!didRollbackThisFrame && !rollbackPending)
-      i++;
+    drawLogoOnlyGlitchFrame();
+    return;
   }
 
-  for (int j = 0; j < charCount; ++j)
-    shown[j] = chars[j];
-  drawWrapped(charCount + kDisturbWidth + kJunkWidth, true);
+  GlitchRuntime runtime;
+  runtime.rollbackEnabled = gEnableReprint;
+  while (runtime.cursor < state.charCount)
+  {
+    runGlitchAnimationStep(state, runtime);
+  }
+
+  finishGlitchEffect(state);
 }
 
 void task_LogoFadeInAndMove(void *pvParameters)
@@ -686,7 +763,6 @@ void task_LogoFadeInAndMove(void *pvParameters)
   tft.pushImage(160 - 60, 150 - 60, 120, 120, (uint16_t *)Index_B);
   delay(50);
 
-  // Release boot wait first so APP init / warning UI can run in parallel.
   if (notifyTask)
   {
     xTaskNotifyGive(notifyTask);
@@ -696,16 +772,12 @@ void task_LogoFadeInAndMove(void *pvParameters)
   const uint16_t targetDuty = scaledBacklightDuty(255);
   uint16_t duty = static_cast<uint16_t>(ledcRead(0));
   if (duty > targetDuty)
-  {
     duty = targetDuty;
-  }
   while (duty < targetDuty)
   {
     const uint16_t liveDuty = static_cast<uint16_t>(ledcRead(0));
     if (liveDuty > duty)
-    {
       duty = (liveDuty > targetDuty) ? targetDuty : liveDuty;
-    }
     if (duty >= targetDuty)
       break;
     ++duty;
@@ -732,27 +804,19 @@ void generateUniqueRandomNumbers(int low, int high, int count, int *result)
   if (need <= 0)
     return;
 
-  // Reservoir sampling:
-  // Keep `need` unique ids selected uniformly from [low, high]
-  // without allocating O(range) temporary memory.
   for (int i = 0; i < need; ++i)
-  {
     result[i] = low + i;
-  }
 
   for (int seen = need; seen < range; ++seen)
   {
-    int j = random(0, seen + 1); // [0, seen]
+    int j = random(0, seen + 1);
     if (j < need)
-    {
       result[j] = low + seen;
-    }
   }
 
-  // Shuffle selected ids to random playback order.
   for (int i = need - 1; i > 0; --i)
   {
-    int j = random(0, i + 1); // [0, i]
+    int j = random(0, i + 1);
     int tmp = result[i];
     result[i] = result[j];
     result[j] = tmp;
