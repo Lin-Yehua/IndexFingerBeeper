@@ -5,6 +5,7 @@
 #include "AppGlobals.h"
 #include "Hanchi_Index.h"
 #include "Index_B.h"
+#include "Key_Drv.h"
 #include "Logo_Moon_B.h"
 #include <Arduino.h>
 #include <TFT_eSPI.h>
@@ -28,7 +29,7 @@ constexpr int kGlitchLogoX = 160 - 60;
 constexpr int kGlitchLogoY = 50 - 60;
 constexpr int kGlitchLogoW = 120;
 constexpr int kGlitchLogoH = 120;
-constexpr int kGlitchFrameDelayMs = 10;
+constexpr int kGlitchFrameDelayMs = 8;
 constexpr int kGlitchRollbackClearLeft = 8;
 constexpr int kGlitchRollbackClearRight = 12;
 constexpr int kGlitchMaxRollbackCount = 8;
@@ -94,6 +95,8 @@ struct GlitchRuntime
   int rollbackCount = 0;
   bool rollbackEnabled = false;
   bool rollbackPending = false;
+  bool forceFinishNow = false;
+  bool keyLatch = false;
 };
 
 uint8_t scaledBacklightDuty(uint8_t rawDuty)
@@ -653,6 +656,27 @@ void scheduleRollbackIfNeeded(const GlitchEffectState &state, GlitchRuntime &run
     runtime.rollbackEnabled = false;
 }
 
+void handleGlitchAnimationKey(GlitchRuntime &runtime)
+{
+  Key_loop();
+  const uint8_t keycode = get_Keycode();
+  if (keycode == 2 && !runtime.keyLatch)
+  {
+    runtime.keyLatch = true;
+    if (runtime.rollbackEnabled)
+    {
+      runtime.rollbackEnabled = false;
+      runtime.rollbackPending = false;
+    }
+    else
+    {
+      runtime.forceFinishNow = true;
+    }
+  }
+  if (keycode != 2)
+    runtime.keyLatch = false;
+}
+
 void serviceGlitchInsertSound()
 {
   const int beepProbability = constrain(gInsertSoundBaseProbability + static_cast<int>(Sound_count), 0, 100);
@@ -674,7 +698,7 @@ void advanceGlitchCursor(GlitchRuntime &runtime, bool didRollbackThisFrame)
     ++runtime.cursor;
 }
 
-void runGlitchAnimationStep(GlitchEffectState &state, GlitchRuntime &runtime)
+bool runGlitchAnimationStep(GlitchEffectState &state, GlitchRuntime &runtime)
 {
   const bool didRollbackThisFrame = applyPendingRollback(state, runtime);
 
@@ -683,8 +707,13 @@ void runGlitchAnimationStep(GlitchEffectState &state, GlitchRuntime &runtime)
   delay(kGlitchFrameDelayMs);
 
   scheduleRollbackIfNeeded(state, runtime, didRollbackThisFrame);
+  handleGlitchAnimationKey(runtime);
+  if (runtime.forceFinishNow)
+    return false;
+
   serviceGlitchInsertSound();
   advanceGlitchCursor(runtime, didRollbackThisFrame);
+  return true;
 }
 
 void finalizeGlitchFrame(GlitchEffectState &state)
@@ -717,7 +746,8 @@ void showGlitchEffectUTF8(const char *text)
   runtime.rollbackEnabled = gEnableReprint;
   while (runtime.cursor < state.charCount)
   {
-    runGlitchAnimationStep(state, runtime);
+    if (!runGlitchAnimationStep(state, runtime))
+      break;
   }
 
   finishGlitchEffect(state);
