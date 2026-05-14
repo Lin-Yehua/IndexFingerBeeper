@@ -54,6 +54,7 @@ extern int gWrongProb5;
 extern int gInsertSoundBaseProbability;
 extern int gInsertSoundIncreaseProbability;
 extern bool gEnableReprint;
+extern int gDisplayIntervalMs;
 extern int gBacklightTimeSec;
 extern int gBacklightCloseTimeSec;
 extern int gSleepTimeMin;

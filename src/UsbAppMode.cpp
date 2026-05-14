@@ -1931,6 +1931,7 @@ void applyAudioGainsFromSettingIni()
   static constexpr int kDefaultInsertSoundBaseProbability = 10;
   static constexpr int kDefaultInsertSoundIncreaseProbability = 5;
   static constexpr bool kDefaultEnableReprint = true;
+  static constexpr int kDefaultDisplayIntervalMs = 1;
   static constexpr float kDefaultBacklightLevel = 1.0f;
   static constexpr int kDefaultBacklightTimeSec = -1;
   static constexpr int kDefaultBacklightCloseTime = kDefaultBacklightCloseTimeSec;
@@ -1944,6 +1945,7 @@ void applyAudioGainsFromSettingIni()
   gInsertSoundBaseProbability = kDefaultInsertSoundBaseProbability;
   gInsertSoundIncreaseProbability = kDefaultInsertSoundIncreaseProbability;
   gEnableReprint = kDefaultEnableReprint;
+  gDisplayIntervalMs = kDefaultDisplayIntervalMs;
   gBacklightTimeSec = kDefaultBacklightTimeSec;
   gBacklightCloseTimeSec = kDefaultBacklightCloseTime;
   gSleepTimeMin = kDefaultSleepTimeMinutes;
@@ -1962,6 +1964,7 @@ void applyAudioGainsFromSettingIni()
   bool gotInsertSoundBase = false;
   bool gotInsertSoundIncrease = false;
   bool gotReprint = false;
+  bool gotDisplayInterval = false;
   bool gotBacklight = false;
   bool gotBacklightTime = false;
   bool gotBacklightCloseTime = false;
@@ -2033,6 +2036,12 @@ void applyAudioGainsFromSettingIni()
       gEnableReprint = (value == "1" || value == "true" || value == "on" || value == "yes");
       gotReprint = true;
     }
+    else if (key == "displayintervalms" || key == "displayinterval" || key == "glitchframedelayms" ||
+             key == "glitchframedelay")
+    {
+      gDisplayIntervalMs = constrain(value.toInt(), 0, 1000);
+      gotDisplayInterval = true;
+    }
     else if (key == "backlighttime")
     {
       gBacklightTimeSec = value.toInt();
@@ -2071,6 +2080,8 @@ void applyAudioGainsFromSettingIni()
   }
   if (!gotReprint)
     Serial.printf("[APP] EnableReprint missing, default=%d\n", gEnableReprint ? 1 : 0);
+  if (!gotDisplayInterval)
+    Serial.printf("[APP] DisplayIntervalMs missing, default=%d\n", gDisplayIntervalMs);
   if (!gotBacklight)
     Serial.printf("[APP] BackLight missing, default=%.3f\n", gBacklightLevel);
   if (!gotBacklightTime)
@@ -2081,9 +2092,9 @@ void applyAudioGainsFromSettingIni()
     Serial.printf("[APP] SleepTime missing, default=%d\n", gSleepTimeMin);
   Serial.printf("[APP] gains: insert=%.3f bg=%.3f backlight=%.3f\n", gInsertGain, gBgGain, gBacklightLevel);
   Serial.printf(
-      "[APP] glitch: p3=%d p5=%d insertBase=%d insertInc=%d reprint=%d backlightTime=%d closeTime=%d sleepTimeMin=%d\n",
+      "[APP] glitch: p3=%d p5=%d insertBase=%d insertInc=%d reprint=%d displayIntervalMs=%d backlightTime=%d closeTime=%d sleepTimeMin=%d\n",
       gWrongProb3, gWrongProb5, gInsertSoundBaseProbability, gInsertSoundIncreaseProbability, gEnableReprint ? 1 : 0,
-      gBacklightTimeSec, gBacklightCloseTimeSec, gSleepTimeMin);
+      gDisplayIntervalMs, gBacklightTimeSec, gBacklightCloseTimeSec, gSleepTimeMin);
 }
 
 void unmountFat()

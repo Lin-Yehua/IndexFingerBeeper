@@ -1788,14 +1788,16 @@ bool persistAudioGainsToSettingIni()
   return writeTextFileAtomically("/setting.ini", "/setting.tmp", output);
 }
 
-bool persistEffectSettingsToSettingIni(int wrongProb3, int wrongProb5, bool enableReprint, float backlightLevel,
-                                       int backlightTimeSec, int backlightCloseTimeSec, int sleepTimeMin)
+bool persistEffectSettingsToSettingIni(int wrongProb3, int wrongProb5, bool enableReprint, int displayIntervalMs,
+                                       float backlightLevel, int backlightTimeSec, int backlightCloseTimeSec,
+                                       int sleepTimeMin)
 {
   if (!fatMounted)
     return false;
 
   wrongProb3 = constrain(wrongProb3, 0, 100);
   wrongProb5 = constrain(wrongProb5, 0, 100);
+  displayIntervalMs = constrain(displayIntervalMs, 0, 1000);
   backlightLevel = clampGain(backlightLevel);
   if (backlightCloseTimeSec < 0)
     backlightCloseTimeSec = 0;
@@ -1815,6 +1817,7 @@ bool persistEffectSettingsToSettingIni(int wrongProb3, int wrongProb5, bool enab
   bool foundWrong3 = false;
   bool foundWrong5 = false;
   bool foundReprint = false;
+  bool foundDisplayInterval = false;
   bool foundBacklight = false;
   bool foundBacklightTime = false;
   bool foundBacklightCloseTime = false;
@@ -1852,6 +1855,12 @@ bool persistEffectSettingsToSettingIni(int wrongProb3, int wrongProb5, bool enab
         {
           line = String("EnableReprint = ") + (enableReprint ? "true;" : "false;");
           foundReprint = true;
+        }
+        else if (key == "displayintervalms" || key == "displayinterval" || key == "glitchframedelayms" ||
+                 key == "glitchframedelay")
+        {
+          line = "DisplayIntervalMs = " + String(displayIntervalMs) + ";";
+          foundDisplayInterval = true;
         }
         else if (key == "backlight")
         {
@@ -1905,6 +1914,12 @@ bool persistEffectSettingsToSettingIni(int wrongProb3, int wrongProb5, bool enab
     if (output.length() && output[output.length() - 1] != '\n')
       output += '\n';
     output += String("EnableReprint = ") + (enableReprint ? "true;\n" : "false;\n");
+  }
+  if (!foundDisplayInterval)
+  {
+    if (output.length() && output[output.length() - 1] != '\n')
+      output += '\n';
+    output += "DisplayIntervalMs = " + String(displayIntervalMs) + ";\n";
   }
   if (!foundBacklight)
   {
@@ -2015,6 +2030,8 @@ String statusJson()
   out += String(gWrongProb5);
   out += ",\"enableReprint\":";
   out += gEnableReprint ? "true" : "false";
+  out += ",\"displayIntervalMs\":";
+  out += String(gDisplayIntervalMs);
   out += ",\"backlight\":";
   out += String(clampGain(gBacklightLevel), 3);
   out += ",\"backlightTime\":";
@@ -2379,6 +2396,8 @@ void registerRoutes()
                    out += String(gWrongProb5);
                    out += ",\"enableReprint\":";
                    out += gEnableReprint ? "true" : "false";
+                   out += ",\"displayIntervalMs\":";
+                   out += String(gDisplayIntervalMs);
                    out += ",\"backlight\":";
                    out += String(clampGain(gBacklightLevel), 3);
                    out += ",\"backlightTime\":";
@@ -2397,6 +2416,7 @@ void registerRoutes()
                    int nextWrong3 = gWrongProb3;
                    int nextWrong5 = gWrongProb5;
                    bool nextEnableReprint = gEnableReprint;
+                   int nextDisplayIntervalMs = gDisplayIntervalMs;
                    float nextBacklightLevel = gBacklightLevel;
                    int nextBacklightTime = gBacklightTimeSec;
                    int nextBacklightCloseTime = gBacklightCloseTimeSec;
@@ -2454,6 +2474,32 @@ void registerRoutes()
                        return;
                      }
                      nextEnableReprint = parsed;
+                     hasAny = true;
+                   }
+
+                   String displayIntervalRaw = gWebServer->arg("displayIntervalMs");
+                   if (!displayIntervalRaw.length() && gWebServer->hasArg("DisplayIntervalMs"))
+                   {
+                     displayIntervalRaw = gWebServer->arg("DisplayIntervalMs");
+                   }
+                   if (!displayIntervalRaw.length() && gWebServer->hasArg("displayInterval"))
+                   {
+                     displayIntervalRaw = gWebServer->arg("displayInterval");
+                   }
+                   if (!displayIntervalRaw.length() && gWebServer->hasArg("GlitchFrameDelayMs"))
+                   {
+                     displayIntervalRaw = gWebServer->arg("GlitchFrameDelayMs");
+                   }
+                   displayIntervalRaw.trim();
+                   if (displayIntervalRaw.length())
+                   {
+                     int parsed = 0;
+                     if (!parseIntString(displayIntervalRaw, parsed) || parsed < 0 || parsed > 1000)
+                     {
+                       gWebServer->send(400, "text/plain", "displayIntervalMs must be 0-1000");
+                       return;
+                     }
+                     nextDisplayIntervalMs = parsed;
                      hasAny = true;
                    }
 
@@ -2538,13 +2584,15 @@ void registerRoutes()
                    gWrongProb3 = nextWrong3;
                    gWrongProb5 = nextWrong5;
                    gEnableReprint = nextEnableReprint;
+                   gDisplayIntervalMs = nextDisplayIntervalMs;
                    setBacklightLevel(nextBacklightLevel);
                    setBacklightTimeSeconds(nextBacklightTime);
                    gBacklightCloseTimeSec = nextBacklightCloseTime;
                    gSleepTimeMin = nextSleepTimeMin;
 
-                   if (!persistEffectSettingsToSettingIni(gWrongProb3, gWrongProb5, gEnableReprint, gBacklightLevel,
-                                                          gBacklightTimeSec, gBacklightCloseTimeSec, gSleepTimeMin))
+                   if (!persistEffectSettingsToSettingIni(gWrongProb3, gWrongProb5, gEnableReprint,
+                                                          gDisplayIntervalMs, gBacklightLevel, gBacklightTimeSec,
+                                                          gBacklightCloseTimeSec, gSleepTimeMin))
                    {
                      gWebServer->send(500, "text/plain", "settings applied but save /setting.ini failed");
                      return;
@@ -2556,6 +2604,8 @@ void registerRoutes()
                    out += String(gWrongProb5);
                    out += ",\"enableReprint\":";
                    out += gEnableReprint ? "true" : "false";
+                   out += ",\"displayIntervalMs\":";
+                   out += String(gDisplayIntervalMs);
                    out += ",\"backlight\":";
                    out += String(clampGain(gBacklightLevel), 3);
                    out += ",\"backlightTime\":";

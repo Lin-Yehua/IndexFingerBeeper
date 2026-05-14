@@ -27,6 +27,11 @@ uint8_t scaledBacklightDuty(uint8_t rawDuty)
     return 255;
   return static_cast<uint8_t>(duty);
 }
+
+uint32_t displayIntervalDelayMs()
+{
+  return static_cast<uint32_t>(constrain(gDisplayIntervalMs, 0, 1000));
+}
 } // namespace
 
 void showGlitchEffectUTF8(const char *text)
@@ -582,7 +587,7 @@ void showGlitchEffectUTF8(const char *text)
 
     buildFrame(i, true);
     drawWrapped(i, false);
-    delay(10);
+    delay(displayIntervalDelayMs());
 
     // 回滚触发：仅检查光标左侧 3 个字符（dist=1,2,3）。
     if (!didRollbackThisFrame && rollbackEnabled && i >= 3)
