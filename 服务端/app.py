@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import hmac
+import json
 import math
 import os
 import random
@@ -7,6 +8,7 @@ import re
 import secrets
 import threading
 import time
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
 from flask import (
@@ -33,12 +35,15 @@ else:
 DATA_DIR = os.environ.get("CSV_API_DATA_DIR", DEFAULT_DATA_DIR)
 MAIN_FILE = os.path.join(DATA_DIR, "text.csv")
 PENDING_FILE = os.path.join(DATA_DIR, "pending.csv")
+DEVICE_META_FILE = os.path.join(DATA_DIR, "devices.json")
 MESSAGEDATA_DIR = os.environ.get("CSV_API_MESSAGE_DIR", os.path.join(BASE_DIR, "messagedata"))
 
 MAX_TEXT_LEN = 140
 PAGE_SIZE = 10
+DEVICE_PAGE_SIZE = int(os.environ.get("CSV_API_DEVICE_PAGE_SIZE", "10"))
 MAX_BOTTLE_MESSAGE_LEN = 100
 MAX_BOTTLE_USERNAME_LEN = 20
+MAX_DEVICE_NOTE_LEN = 80
 DEVICE_MESSAGE_LIMIT = 20
 UUID_LEN = 18
 
@@ -48,11 +53,18 @@ MAC_COMPACT_RE = re.compile(r"^[0-9A-F]{12}$")
 API_HOST = os.environ.get("CSV_API_HOST", "0.0.0.0")
 API_HTTP_PORT = int(os.environ.get("API_HTTP_PORT", "8080"))
 WEB_HTTP_PORT = int(os.environ.get("WEB_HTTP_PORT", "80"))
-WEB_HTTP_REDIRECT_TO_HTTPS = (os.environ.get("WEB_HTTP_REDIRECT_TO_HTTPS", "1").strip().lower() in {"1", "true", "yes", "on"})
+WEB_HTTPS_ENABLED = (os.environ.get("WEB_HTTPS_ENABLED", "0").strip().lower() in {"1", "true", "yes", "on"})
+WEB_HTTP_REDIRECT_TO_HTTPS = (
+    WEB_HTTPS_ENABLED
+    and
+    os.environ.get("WEB_HTTP_REDIRECT_TO_HTTPS", "1" if WEB_HTTPS_ENABLED else "0").strip().lower()
+    in {"1", "true", "yes", "on"}
+)
 WEB_PUBLIC_HOST = (os.environ.get("WEB_PUBLIC_HOST") or "").strip()
-# Web UI must be served over HTTPS:
-# - WEB_HTTP_PORT serves redirect entry (http -> https)
-# - WEB_HTTPS_PORT serves actual pages
+# Lightweight stable default:
+# - WEB_HTTP_PORT serves the actual Web UI.
+# - Set WEB_HTTPS_ENABLED=1 to also serve HTTPS directly from Werkzeug.
+# - Set WEB_HTTP_REDIRECT_TO_HTTPS=1 only when HTTPS is enabled and healthy.
 WEB_HTTPS_PORT = int(os.environ.get("WEB_HTTPS_PORT", "443"))
 WEB_HTTPS_CERT_FILE = (os.environ.get("WEB_HTTPS_CERT_FILE") or "").strip()
 WEB_HTTPS_KEY_FILE = (os.environ.get("WEB_HTTPS_KEY_FILE") or "").strip()
@@ -69,6 +81,7 @@ NOTICE_LEVELS = {"info", "ok", "warn", "error"}
 
 _PATH_LOCKS: Dict[str, threading.RLock] = {}
 _PATH_LOCKS_GUARD = threading.Lock()
+_DEVICE_META_LOCK = threading.RLock()
 _MAIN_FILE_ABS = os.path.abspath(MAIN_FILE)
 _MAIN_CACHE_LOCK = threading.RLock()
 _MAIN_CACHE_MTIME_NS = -1
@@ -82,6 +95,8 @@ PROTECTED_WEB_ENDPOINTS = {
     "admin_add",
     "admin_update",
     "admin_delete",
+    "admin_device_note",
+    "admin_device_bottle",
     "review_page",
     "approve",
     "reject",
@@ -140,6 +155,9 @@ def ensure_data_dir() -> None:
         if not os.path.exists(path):
             with open(path, "a", encoding="utf-8"):
                 pass
+    if not os.path.exists(DEVICE_META_FILE):
+        with open(DEVICE_META_FILE, "w", encoding="utf-8") as f:
+            json.dump({}, f, ensure_ascii=False)
 
 
 def _read_nonempty_lines_unlocked(file_path: str) -> List[str]:
@@ -230,6 +248,10 @@ def format_mac_compact_to_colon(mac_compact: str) -> str:
     return ":".join(mac_compact[i : i + 2] for i in range(0, 12, 2))
 
 
+def device_key(uuid: str, mac_compact: str) -> str:
+    return f"{uuid}+{mac_compact}"
+
+
 def build_device_file_name(uuid: str, mac_compact: str) -> str:
     return f"{uuid}+{mac_compact}.csv"
 
@@ -253,9 +275,105 @@ def parse_device_file_name(file_name: str) -> Optional[Dict[str, str]]:
         "uuid": uuid,
         "mac_compact": mac_compact,
         "mac": format_mac_compact_to_colon(mac_compact),
+        "key": device_key(uuid, mac_compact),
         "file_name": file_name,
         "path": os.path.join(MESSAGEDATA_DIR, file_name),
     }
+
+
+def _load_device_meta_unlocked() -> Dict[str, Dict[str, object]]:
+    if not os.path.isfile(DEVICE_META_FILE):
+        return {}
+    try:
+        with open(DEVICE_META_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    cleaned: Dict[str, Dict[str, object]] = {}
+    for key, value in data.items():
+        if isinstance(key, str) and isinstance(value, dict):
+            cleaned[key] = dict(value)
+    return cleaned
+
+
+def _write_device_meta_unlocked(meta: Dict[str, Dict[str, object]]) -> None:
+    tmp_path = DEVICE_META_FILE + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8", newline="") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2, sort_keys=True)
+        f.write("\n")
+    os.replace(tmp_path, DEVICE_META_FILE)
+
+
+def get_device_meta_snapshot() -> Dict[str, Dict[str, object]]:
+    ensure_data_dir()
+    with _DEVICE_META_LOCK:
+        return _load_device_meta_unlocked()
+
+
+def format_timestamp(ts: Optional[float]) -> str:
+    if ts is None:
+        return ""
+    try:
+        return datetime.fromtimestamp(float(ts)).strftime("%Y-%m-%d %H:%M:%S")
+    except (OSError, OverflowError, TypeError, ValueError):
+        return ""
+
+
+def touch_device_seen(uuid: str, mac_compact: str) -> None:
+    if not uuid or not mac_compact:
+        return
+    ensure_data_dir()
+    now = time.time()
+    key = device_key(uuid, mac_compact)
+    with _DEVICE_META_LOCK:
+        meta = _load_device_meta_unlocked()
+        item = meta.get(key)
+        if not isinstance(item, dict):
+            item = {}
+        item["uuid"] = uuid
+        item["mac_compact"] = mac_compact
+        item["last_seen_ts"] = now
+        item["last_seen"] = format_timestamp(now)
+        meta[key] = item
+        _write_device_meta_unlocked(meta)
+
+
+def set_device_note(uuid: str, mac_compact: str, note: str) -> None:
+    ensure_data_dir()
+    key = device_key(uuid, mac_compact)
+    with _DEVICE_META_LOCK:
+        meta = _load_device_meta_unlocked()
+        item = meta.get(key)
+        if not isinstance(item, dict):
+            item = {"uuid": uuid, "mac_compact": mac_compact}
+        item["uuid"] = uuid
+        item["mac_compact"] = mac_compact
+        item["note"] = note
+        meta[key] = item
+        _write_device_meta_unlocked(meta)
+
+
+def parse_date_start(raw: Optional[str]) -> Optional[float]:
+    value = (raw or "").strip()
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").timestamp()
+    except ValueError:
+        return None
+
+
+def parse_date_end(raw: Optional[str]) -> Optional[float]:
+    value = (raw or "").strip()
+    if not value:
+        return None
+    try:
+        dt = datetime.strptime(value, "%Y-%m-%d") + timedelta(days=1)
+        return dt.timestamp()
+    except ValueError:
+        return None
 
 
 def list_known_devices() -> List[Dict[str, str]]:
@@ -274,20 +392,51 @@ def list_known_devices() -> List[Dict[str, str]]:
     return devices
 
 
-def collect_device_overview() -> List[Dict[str, object]]:
+def find_known_device(uuid: str, mac_compact: str) -> Optional[Dict[str, str]]:
+    key = device_key(uuid, mac_compact)
+    for item in list_known_devices():
+        if item["key"] == key:
+            return item
+    return None
+
+
+def collect_device_overview(
+    start_ts: Optional[float] = None,
+    end_ts: Optional[float] = None,
+) -> List[Dict[str, object]]:
     devices = list_known_devices()
+    meta = get_device_meta_snapshot()
     overview: List[Dict[str, object]] = []
     for item in devices:
+        item_meta = meta.get(item["key"], {})
+        raw_last_seen_ts = item_meta.get("last_seen_ts") if isinstance(item_meta, dict) else None
+        try:
+            last_seen_ts = float(raw_last_seen_ts) if raw_last_seen_ts is not None else None
+        except (TypeError, ValueError):
+            last_seen_ts = None
+
+        if start_ts is not None and (last_seen_ts is None or last_seen_ts < start_ts):
+            continue
+        if end_ts is not None and (last_seen_ts is None or last_seen_ts >= end_ts):
+            continue
+
         messages = read_nonempty_lines(item["path"])
         overview.append(
             {
+                "key": item["key"],
+                "anchor": f"{item['uuid']}-{item['mac_compact']}",
                 "uuid": item["uuid"],
                 "mac": item["mac"],
+                "mac_compact": item["mac_compact"],
                 "file_name": item["file_name"],
+                "note": str(item_meta.get("note") or "") if isinstance(item_meta, dict) else "",
+                "last_seen_ts": last_seen_ts,
+                "last_seen_text": format_timestamp(last_seen_ts) or "未知",
                 "queue_count": len(messages),
                 "messages": messages,
             }
         )
+    overview.sort(key=lambda item: item["last_seen_ts"] if item["last_seen_ts"] is not None else -1, reverse=True)
     return overview
 
 
@@ -331,13 +480,21 @@ def parse_positive_int(raw_value: Optional[str], default: int = 1) -> int:
         return default
 
 
-def paginate(items: List[str], page: int, page_size: int) -> Tuple[List[str], int, int, int]:
+def paginate(items: List[object], page: int, page_size: int) -> Tuple[List[object], int, int, int]:
     total_items = len(items)
     total_pages = max(1, math.ceil(total_items / page_size))
     current_page = min(max(page, 1), total_pages)
     start_index = (current_page - 1) * page_size
     end_index = start_index + page_size
     return items[start_index:end_index], current_page, total_pages, start_index
+
+
+def admin_device_query_from_mapping(values) -> Dict[str, str]:
+    return {
+        "device_page": str(parse_positive_int(values.get("device_page"), 1)),
+        "device_from": (values.get("device_from") or "").strip(),
+        "device_to": (values.get("device_to") or "").strip(),
+    }
 
 
 def notice_from_request() -> Optional[Dict[str, str]]:
@@ -359,8 +516,11 @@ def redirect_with_notice(
     msg: str = "",
     level: str = "info",
     anchor: Optional[str] = None,
+    extra_query: Optional[Dict[str, str]] = None,
 ):
     query: Dict[str, str] = {}
+    if extra_query:
+        query.update({k: v for k, v in extra_query.items() if v is not None and str(v) != ""})
     if page is not None:
         query["page"] = str(page)
 
@@ -494,6 +654,7 @@ def api_index():
             "web": ["/admin", "/submit", "/review", "/bottle"],
             "api_http_port": API_HTTP_PORT,
             "web_http_port": WEB_HTTP_PORT,
+            "web_https_enabled": WEB_HTTPS_ENABLED,
             "web_https_port": WEB_HTTPS_PORT,
             "web_http_redirect_to_https": WEB_HTTP_REDIRECT_TO_HTTPS,
         }
@@ -506,6 +667,7 @@ def random_text():
     req_uuid = normalize_uuid(request.args.get("uuid"))
     req_mac_compact = normalize_mac_compact(request.args.get("mac"))
     if req_uuid and req_mac_compact:
+        touch_device_seen(req_uuid, req_mac_compact)
         device_path = ensure_device_file(req_uuid, req_mac_compact)
         queued = pop_oldest_device_message(device_path)
         if queued:
@@ -541,7 +703,18 @@ def admin_page():
 
     approved_lines = get_main_lines_cached()
     pending_count = len(read_nonempty_lines(PENDING_FILE))
-    device_overview = collect_device_overview()
+    device_from = (request.args.get("device_from") or "").strip()
+    device_to = (request.args.get("device_to") or "").strip()
+    device_start_ts = parse_date_start(device_from)
+    device_end_ts = parse_date_end(device_to)
+    total_devices = len(list_known_devices())
+    filtered_devices = collect_device_overview(device_start_ts, device_end_ts)
+    requested_device_page = parse_positive_int(request.args.get("device_page"), 1)
+    device_page_items, device_page, device_total_pages, _ = paginate(
+        filtered_devices,
+        requested_device_page,
+        max(1, DEVICE_PAGE_SIZE),
+    )
 
     requested_page = parse_positive_int(request.args.get("page"), 1)
     page_lines, page, total_pages, start_index = paginate(approved_lines, requested_page, PAGE_SIZE)
@@ -565,7 +738,16 @@ def admin_page():
         rows=rows,
         total_approved=len(approved_lines),
         pending_count=pending_count,
-        device_overview=device_overview,
+        device_overview=device_page_items,
+        total_devices=total_devices,
+        filtered_device_count=len(filtered_devices),
+        device_page=device_page,
+        device_total_pages=device_total_pages,
+        device_page_size=max(1, DEVICE_PAGE_SIZE),
+        device_from=device_from,
+        device_to=device_to,
+        max_bottle_message_len=MAX_BOTTLE_MESSAGE_LEN,
+        max_device_note_len=MAX_DEVICE_NOTE_LEN,
         main_file=MAIN_FILE,
         notice=notice_from_request(),
     )
@@ -576,10 +758,17 @@ def admin_add():
     ensure_data_dir()
 
     current_page = parse_positive_int(request.form.get("page"), 1)
+    device_query = admin_device_query_from_mapping(request.form)
     text = (request.form.get("text") or "").strip()
 
     if not text:
-        return redirect_with_notice("admin_page", page=current_page, msg="Text cannot be empty.", level="warn")
+        return redirect_with_notice(
+            "admin_page",
+            page=current_page,
+            msg="Text cannot be empty.",
+            level="warn",
+            extra_query=device_query,
+        )
 
     if len(text) > MAX_TEXT_LEN:
         return redirect_with_notice(
@@ -587,6 +776,7 @@ def admin_add():
             page=current_page,
             msg=f"Single text length must be <= {MAX_TEXT_LEN}.",
             level="warn",
+            extra_query=device_query,
         )
 
     append_line(MAIN_FILE, text)
@@ -600,6 +790,7 @@ def admin_add():
         page=target_page,
         msg="Added to approved library.",
         level="ok",
+        extra_query=device_query,
         anchor=f"item-{target_index}",
     )
 
@@ -609,16 +800,29 @@ def admin_update():
     ensure_data_dir()
 
     current_page = parse_positive_int(request.form.get("page"), 1)
+    device_query = admin_device_query_from_mapping(request.form)
     approved_lines = get_main_lines_cached()
 
     try:
         index = int((request.form.get("index") or "").strip())
     except ValueError:
-        return redirect_with_notice("admin_page", page=current_page, msg="Invalid index.", level="warn")
+        return redirect_with_notice(
+            "admin_page",
+            page=current_page,
+            msg="Invalid index.",
+            level="warn",
+            extra_query=device_query,
+        )
 
     text = (request.form.get("text") or "").strip()
     if not text:
-        return redirect_with_notice("admin_page", page=current_page, msg="Text cannot be empty.", level="warn")
+        return redirect_with_notice(
+            "admin_page",
+            page=current_page,
+            msg="Text cannot be empty.",
+            level="warn",
+            extra_query=device_query,
+        )
 
     if len(text) > MAX_TEXT_LEN:
         return redirect_with_notice(
@@ -626,10 +830,17 @@ def admin_update():
             page=current_page,
             msg=f"Single text length must be <= {MAX_TEXT_LEN}.",
             level="warn",
+            extra_query=device_query,
         )
 
     if not (0 <= index < len(approved_lines)):
-        return redirect_with_notice("admin_page", page=current_page, msg="Target text does not exist.", level="warn")
+        return redirect_with_notice(
+            "admin_page",
+            page=current_page,
+            msg="Target text does not exist.",
+            level="warn",
+            extra_query=device_query,
+        )
 
     approved_lines[index] = text
     write_lines(MAIN_FILE, approved_lines)
@@ -640,6 +851,7 @@ def admin_update():
         page=target_page,
         msg="Update saved.",
         level="ok",
+        extra_query=device_query,
         anchor=f"item-{index}",
     )
 
@@ -649,15 +861,28 @@ def admin_delete():
     ensure_data_dir()
 
     current_page = parse_positive_int(request.form.get("page"), 1)
+    device_query = admin_device_query_from_mapping(request.form)
     approved_lines = get_main_lines_cached()
 
     try:
         index = int((request.form.get("index") or "").strip())
     except ValueError:
-        return redirect_with_notice("admin_page", page=current_page, msg="Invalid index.", level="warn")
+        return redirect_with_notice(
+            "admin_page",
+            page=current_page,
+            msg="Invalid index.",
+            level="warn",
+            extra_query=device_query,
+        )
 
     if not (0 <= index < len(approved_lines)):
-        return redirect_with_notice("admin_page", page=current_page, msg="Target text does not exist.", level="warn")
+        return redirect_with_notice(
+            "admin_page",
+            page=current_page,
+            msg="Target text does not exist.",
+            level="warn",
+            extra_query=device_query,
+        )
 
     del approved_lines[index]
     write_lines(MAIN_FILE, approved_lines)
@@ -675,6 +900,98 @@ def admin_delete():
         page=target_page,
         msg="Text deleted.",
         level="ok",
+        extra_query=device_query,
+        anchor=anchor,
+    )
+
+
+@web_app.route("/admin-device-note", methods=["POST"])
+def admin_device_note():
+    ensure_data_dir()
+
+    current_page = parse_positive_int(request.form.get("page"), 1)
+    device_query = admin_device_query_from_mapping(request.form)
+    uuid = normalize_uuid(request.form.get("uuid"))
+    mac_compact = normalize_mac_compact(request.form.get("mac"))
+    note = (request.form.get("note") or "").strip()
+
+    if not uuid or not mac_compact or not find_known_device(uuid, mac_compact):
+        return redirect_with_notice(
+            "admin_page",
+            page=current_page,
+            msg="Device not found.",
+            level="warn",
+            extra_query=device_query,
+        )
+    if len(note) > MAX_DEVICE_NOTE_LEN:
+        return redirect_with_notice(
+            "admin_page",
+            page=current_page,
+            msg=f"Device note length must be <= {MAX_DEVICE_NOTE_LEN}.",
+            level="warn",
+            extra_query=device_query,
+            anchor=f"device-{uuid}-{mac_compact}",
+        )
+
+    set_device_note(uuid, mac_compact, note)
+    anchor = f"device-{uuid}-{mac_compact}"
+    return redirect_with_notice(
+        "admin_page",
+        page=current_page,
+        msg="Device note saved.",
+        level="ok",
+        extra_query=device_query,
+        anchor=anchor,
+    )
+
+
+@web_app.route("/admin-device-bottle", methods=["POST"])
+def admin_device_bottle():
+    ensure_data_dir()
+
+    current_page = parse_positive_int(request.form.get("page"), 1)
+    device_query = admin_device_query_from_mapping(request.form)
+    uuid = normalize_uuid(request.form.get("uuid"))
+    mac_compact = normalize_mac_compact(request.form.get("mac"))
+    message = (request.form.get("message") or "").strip()
+
+    target = find_known_device(uuid, mac_compact) if uuid and mac_compact else None
+    if not target:
+        return redirect_with_notice(
+            "admin_page",
+            page=current_page,
+            msg="Device not found.",
+            level="warn",
+            extra_query=device_query,
+        )
+    if not message:
+        return redirect_with_notice(
+            "admin_page",
+            page=current_page,
+            msg="Bottle message cannot be empty.",
+            level="warn",
+            extra_query=device_query,
+            anchor=f"device-{target['uuid']}-{target['mac_compact']}",
+        )
+    if len(message) > MAX_BOTTLE_MESSAGE_LEN:
+        return redirect_with_notice(
+            "admin_page",
+            page=current_page,
+            msg=f"Bottle message length must be <= {MAX_BOTTLE_MESSAGE_LEN}.",
+            level="warn",
+            extra_query=device_query,
+            anchor=f"device-{target['uuid']}-{target['mac_compact']}",
+        )
+
+    path = ensure_device_file(target["uuid"], target["mac_compact"])
+    append_device_message(path, message)
+    anchor = f"device-{target['uuid']}-{target['mac_compact']}"
+    return redirect_with_notice(
+        "admin_page",
+        page=current_page,
+        msg=f"Delivered to {target['uuid']} / {target['mac']}.",
+        level="ok",
+        extra_query=device_query,
         anchor=anchor,
     )
 
@@ -899,8 +1216,9 @@ def validate_server_ports() -> None:
     ports = {
         "API_HTTP_PORT": API_HTTP_PORT,
         "WEB_HTTP_PORT": WEB_HTTP_PORT,
-        "WEB_HTTPS_PORT": WEB_HTTPS_PORT,
     }
+    if WEB_HTTPS_ENABLED:
+        ports["WEB_HTTPS_PORT"] = WEB_HTTPS_PORT
     seen: Dict[int, str] = {}
     for name, port in ports.items():
         if port in seen:
@@ -911,22 +1229,31 @@ def validate_server_ports() -> None:
 def run_servers() -> None:
     ensure_data_dir()
     validate_server_ports()
-    web_ssl_context = resolve_web_ssl_context()
+    web_ssl_context = resolve_web_ssl_context() if WEB_HTTPS_ENABLED else None
 
     api_server = ServerThread(api_app, API_HOST, API_HTTP_PORT)
-    web_http_server = ServerThread(web_http_app, API_HOST, WEB_HTTP_PORT)
-    web_server = ServerThread(web_app, API_HOST, WEB_HTTPS_PORT, ssl_context=web_ssl_context)
+    http_web_app = web_http_app if WEB_HTTP_REDIRECT_TO_HTTPS else web_app
+    web_http_server = ServerThread(http_web_app, API_HOST, WEB_HTTP_PORT)
+    web_server = (
+        ServerThread(web_app, API_HOST, WEB_HTTPS_PORT, ssl_context=web_ssl_context)
+        if WEB_HTTPS_ENABLED
+        else None
+    )
 
     api_server.start()
     web_http_server.start()
-    web_server.start()
+    if web_server:
+        web_server.start()
 
     print(f"[API ] http://{API_HOST}:{API_HTTP_PORT}")
     if WEB_HTTP_REDIRECT_TO_HTTPS:
         print(f"[WEB ] http://{API_HOST}:{WEB_HTTP_PORT} -> https://{WEB_PUBLIC_HOST or API_HOST}:{WEB_HTTPS_PORT}")
     else:
-        print(f"[WEB ] http://{API_HOST}:{WEB_HTTP_PORT} (redirect disabled)")
-    print(f"[WEB ] https://{API_HOST}:{WEB_HTTPS_PORT}")
+        print(f"[WEB ] http://{API_HOST}:{WEB_HTTP_PORT}")
+    if WEB_HTTPS_ENABLED:
+        print(f"[WEB ] https://{API_HOST}:{WEB_HTTPS_PORT}")
+    else:
+        print("[WEB ] HTTPS disabled (set WEB_HTTPS_ENABLED=1 to enable)")
     if WEB_AUTH_PASSWORD_IS_TEMP:
         print(f"[WEB ] WEB_AUTH_USER={WEB_AUTH_USER}")
         print(f"[WEB ] WEB_AUTH_PASSWORD={WEB_AUTH_PASSWORD} (temporary, set WEB_AUTH_PASSWORD to override)")
@@ -939,7 +1266,8 @@ def run_servers() -> None:
     finally:
         api_server.shutdown()
         web_http_server.shutdown()
-        web_server.shutdown()
+        if web_server:
+            web_server.shutdown()
 
 
 if __name__ == "__main__":
