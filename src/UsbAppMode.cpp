@@ -1388,11 +1388,11 @@ constexpr float kBatteryDividerRatio = 2.0f; // 47k:47k divider -> VIN = 2 * Vpi
 constexpr uint32_t kBatteryUpdateIntervalMs = 5000UL;
 constexpr uint8_t kBatterySampleCount = 8;
 constexpr uint32_t kBatterySampleGapMs = 2UL;
-constexpr float kBatteryFilterAlpha = 0.35f;
+constexpr float kBatteryFilterAlpha = 0.55f;
 constexpr float kBatteryVoltageEmpty = 3.10f;
 constexpr float kBatteryVoltageFull = 4.10f;
 constexpr float kBatteryChargingDetectVoltage = 4.60f; // VIN around 5V when charging
-constexpr float kLowBatteryWarningVoltage = 3.57f;
+constexpr float kLowBatteryWarningVoltage = 3.15f;
 constexpr uint32_t kLowBatteryReminderIntervalMs = 60000UL;
 constexpr const char *kLowBatteryReminderMessage = u8"电量过低，低电压工作会损坏设备，请及时充电";
 

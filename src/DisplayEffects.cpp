@@ -56,6 +56,8 @@ void drawLowBatteryWarningIconOnTft(bool status)
     tft.fillRect(kLowBatteryIconX + 12, kLowBatteryIconScreenY + 2, 2, 2, TFT_YELLOW);
     tft.fillRect(kLowBatteryIconX + 1, kLowBatteryIconScreenY + 1, 3, 4, TFT_RED);
   }
+}
+
 uint32_t displayIntervalDelayMs()
 {
   return static_cast<uint32_t>(constrain(gDisplayIntervalMs, 0, 1000));
