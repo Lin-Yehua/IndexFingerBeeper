@@ -1385,17 +1385,23 @@ namespace
 
 constexpr uint8_t kBatteryAdcPin = 1;        // IO1
 constexpr float kBatteryDividerRatio = 2.0f; // 47k:47k divider -> VIN = 2 * Vpin
-constexpr uint32_t kBatteryUpdateIntervalMs = 30000UL;
+constexpr uint32_t kBatteryUpdateIntervalMs = 5000UL;
 constexpr uint8_t kBatterySampleCount = 8;
 constexpr uint32_t kBatterySampleGapMs = 2UL;
 constexpr float kBatteryFilterAlpha = 0.35f;
-constexpr float kBatteryVoltageEmpty = 3.30f;
-constexpr float kBatteryVoltageFull = 4.20f;
+constexpr float kBatteryVoltageEmpty = 3.10f;
+constexpr float kBatteryVoltageFull = 4.10f;
 constexpr float kBatteryChargingDetectVoltage = 4.60f; // VIN around 5V when charging
+constexpr float kLowBatteryWarningVoltage = 3.57f;
+constexpr uint32_t kLowBatteryReminderIntervalMs = 60000UL;
+constexpr const char *kLowBatteryReminderMessage = u8"电量过低，低电压工作会损坏设备，请及时充电";
 
 portMUX_TYPE gBatteryMux = portMUX_INITIALIZER_UNLOCKED;
 BatteryStatus gBatteryStatus;
 bool gBatteryPinConfigured = false;
+bool gLowBatteryStateInitialized = false;
+bool gLowBatteryState = false;
+uint32_t gLowBatteryReminderLastMs = 0;
 
 float clampBatteryVoltage(float value)
 {
@@ -1543,6 +1549,38 @@ bool appGetBatteryStatus(BatteryStatus &outStatus)
   outStatus = gBatteryStatus;
   portEXIT_CRITICAL(&gBatteryMux);
   return outStatus.available && outStatus.initialized;
+}
+
+void serviceLowBatteryWarning()
+{
+  BatteryStatus batteryStatus{};
+  const bool batteryOk = appGetBatteryStatus(batteryStatus);
+  const bool lowBattery = batteryOk && !batteryStatus.charging &&
+                          batteryStatus.filteredVinVoltage < kLowBatteryWarningVoltage;
+  const bool stateChanged = !gLowBatteryStateInitialized || lowBattery != gLowBatteryState;
+  if (stateChanged)
+  {
+    gLowBatteryStateInitialized = true;
+    gLowBatteryState = lowBattery;
+    lowBatteryWarning(lowBattery);
+    gLowBatteryReminderLastMs = lowBattery ? 0U : millis();
+  }
+
+  if (!lowBattery)
+  {
+    return;
+  }
+
+  const uint32_t now = millis();
+  if (gLowBatteryReminderLastMs != 0U && (now - gLowBatteryReminderLastMs) < kLowBatteryReminderIntervalMs)
+  {
+    return;
+  }
+
+  if (wirelessPortalPushHostMessageForRestore(String(kLowBatteryReminderMessage)))
+  {
+    gLowBatteryReminderLastMs = now ? now : 1U;
+  }
 }
 
 static bool wlWriteRmw(size_t addr, const uint8_t *src, size_t len)
@@ -2081,9 +2119,9 @@ void applyAudioGainsFromSettingIni()
     Serial.printf("[APP] SleepTime missing, default=%d\n", gSleepTimeMin);
   Serial.printf("[APP] gains: insert=%.3f bg=%.3f backlight=%.3f\n", gInsertGain, gBgGain, gBacklightLevel);
   Serial.printf(
-      "[APP] glitch: p3=%d p5=%d insertBase=%d insertInc=%d reprint=%d backlightTime=%d closeTime=%d sleepTimeMin=%d\n",
+      "[APP] glitch: p3=%d p5=%d insertBase=%d insertInc=%d reprint=%d backlightTime=%d closeTime=%d sleepTimeMin=%d lowBattery=%.2f\n",
       gWrongProb3, gWrongProb5, gInsertSoundBaseProbability, gInsertSoundIncreaseProbability, gEnableReprint ? 1 : 0,
-      gBacklightTimeSec, gBacklightCloseTimeSec, gSleepTimeMin);
+      gBacklightTimeSec, gBacklightCloseTimeSec, gSleepTimeMin, kLowBatteryWarningVoltage);
 }
 
 void unmountFat()
@@ -2450,6 +2488,7 @@ static void playMessageWithGlitch(const char *text)
   mixer.playInsert("/BGstart.wav");
   Text.fillRect(0, 0, tft.width(), 100, TFT_BLACK);
   Text.pushImage(160 - 60, 50 - 60, 120, 120, (uint16_t *)Index_B);
+  overlayLowBatteryWarningOnTextSprite();
   Text.pushSprite(0, 150 - 50);
   showGlitchEffectUTF8(text);
   mixer.stopBG();
@@ -5169,6 +5208,7 @@ void processAppLoop()
   };
 
   serviceBatteryMonitor(false);
+  serviceLowBatteryWarning();
 
   enum class ImageResumeTarget : uint8_t
   {
