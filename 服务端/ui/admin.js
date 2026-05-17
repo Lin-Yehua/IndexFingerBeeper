@@ -1,7 +1,7 @@
 ﻿(() => {
   const params = new URLSearchParams(window.location.search);
   const page = params.get("page") || "1";
-  const storageKey = `admin-scroll-${page}`;
+  const storageKey = `admin-scroll-${page}-${window.location.search}`;
 
   function restorePosition() {
     if (window.location.hash) {

@@ -56,6 +56,9 @@ void drawLowBatteryWarningIconOnTft(bool status)
     tft.fillRect(kLowBatteryIconX + 12, kLowBatteryIconScreenY + 2, 2, 2, TFT_YELLOW);
     tft.fillRect(kLowBatteryIconX + 1, kLowBatteryIconScreenY + 1, 3, 4, TFT_RED);
   }
+uint32_t displayIntervalDelayMs()
+{
+  return static_cast<uint32_t>(constrain(gDisplayIntervalMs, 0, 1000));
 }
 } // namespace
 
@@ -614,7 +617,7 @@ void showGlitchEffectUTF8(const char *text)
 
     buildFrame(i, true);
     drawWrapped(i, false);
-    delay(10);
+    delay(displayIntervalDelayMs());
 
     // 回滚触发：仅检查光标左侧 3 个字符（dist=1,2,3）。
     if (!didRollbackThisFrame && rollbackEnabled && i >= 3)

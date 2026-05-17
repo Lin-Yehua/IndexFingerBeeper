@@ -74,9 +74,9 @@ constexpr char kUpdateSpiffsPath[] = "/Update/spiffs.bin";
 constexpr char kLittleFsBackupDirPath[] = "/Backup";
 constexpr const char *kCsvEmptyFallbackMessage = u8"痛苦啊，你是我的唯一...";
 constexpr const char *kFatRecoveryNoticeLine1 = u8"你的设备出现了一些问题";
-constexpr const char *kFatRecoveryNoticeLine2 = u8"我们已经为你恢复到了初始状态";
-constexpr const char *kFatRecoveryNoticeLine3 = u8"不过我还是建议你去连续你的部门主管";
-constexpr const char *kFatRecoveryFailedLine = u8"我们遇到了不可逆转的错误，请联系部门主管";
+constexpr const char *kFatRecoveryNoticeLine2 = u8"不必担心,我们已经为你恢复到了初始状态";
+constexpr const char *kFatRecoveryNoticeLine3 = u8"尽管如此,我们还是建议你去联系你的部门主管";
+constexpr const char *kFatRecoveryFailedLine = u8"我们遇到了不可逆转的熔毁，请联系部门主管";
 constexpr const char *kDefaultReminderMessage = u8"这个时候你似乎有什么事要干";
 constexpr uint32_t kSleepFileMagic = 0x53534E50UL; // "SSNP"
 constexpr uint16_t kSleepFileVersion = 1;
@@ -1969,6 +1969,7 @@ void applyAudioGainsFromSettingIni()
   static constexpr int kDefaultInsertSoundBaseProbability = 10;
   static constexpr int kDefaultInsertSoundIncreaseProbability = 5;
   static constexpr bool kDefaultEnableReprint = true;
+  static constexpr int kDefaultDisplayIntervalMs = 1;
   static constexpr float kDefaultBacklightLevel = 1.0f;
   static constexpr int kDefaultBacklightTimeSec = -1;
   static constexpr int kDefaultBacklightCloseTime = kDefaultBacklightCloseTimeSec;
@@ -1982,6 +1983,7 @@ void applyAudioGainsFromSettingIni()
   gInsertSoundBaseProbability = kDefaultInsertSoundBaseProbability;
   gInsertSoundIncreaseProbability = kDefaultInsertSoundIncreaseProbability;
   gEnableReprint = kDefaultEnableReprint;
+  gDisplayIntervalMs = kDefaultDisplayIntervalMs;
   gBacklightTimeSec = kDefaultBacklightTimeSec;
   gBacklightCloseTimeSec = kDefaultBacklightCloseTime;
   gSleepTimeMin = kDefaultSleepTimeMinutes;
@@ -2000,6 +2002,7 @@ void applyAudioGainsFromSettingIni()
   bool gotInsertSoundBase = false;
   bool gotInsertSoundIncrease = false;
   bool gotReprint = false;
+  bool gotDisplayInterval = false;
   bool gotBacklight = false;
   bool gotBacklightTime = false;
   bool gotBacklightCloseTime = false;
@@ -2071,6 +2074,12 @@ void applyAudioGainsFromSettingIni()
       gEnableReprint = (value == "1" || value == "true" || value == "on" || value == "yes");
       gotReprint = true;
     }
+    else if (key == "displayintervalms" || key == "displayinterval" || key == "glitchframedelayms" ||
+             key == "glitchframedelay")
+    {
+      gDisplayIntervalMs = constrain(value.toInt(), 0, 1000);
+      gotDisplayInterval = true;
+    }
     else if (key == "backlighttime")
     {
       gBacklightTimeSec = value.toInt();
@@ -2109,6 +2118,8 @@ void applyAudioGainsFromSettingIni()
   }
   if (!gotReprint)
     Serial.printf("[APP] EnableReprint missing, default=%d\n", gEnableReprint ? 1 : 0);
+  if (!gotDisplayInterval)
+    Serial.printf("[APP] DisplayIntervalMs missing, default=%d\n", gDisplayIntervalMs);
   if (!gotBacklight)
     Serial.printf("[APP] BackLight missing, default=%.3f\n", gBacklightLevel);
   if (!gotBacklightTime)
@@ -2121,7 +2132,7 @@ void applyAudioGainsFromSettingIni()
   Serial.printf(
       "[APP] glitch: p3=%d p5=%d insertBase=%d insertInc=%d reprint=%d backlightTime=%d closeTime=%d sleepTimeMin=%d lowBattery=%.2f\n",
       gWrongProb3, gWrongProb5, gInsertSoundBaseProbability, gInsertSoundIncreaseProbability, gEnableReprint ? 1 : 0,
-      gBacklightTimeSec, gBacklightCloseTimeSec, gSleepTimeMin, kLowBatteryWarningVoltage);
+      gDisplayIntervalMs, gBacklightTimeSec, gBacklightCloseTimeSec, gSleepTimeMin, kLowBatteryWarningVoltage);
 }
 
 void unmountFat()

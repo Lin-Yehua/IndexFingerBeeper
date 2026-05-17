@@ -118,7 +118,18 @@ textarea {
   font-size: 15px;
 }
 
+input[type="text"],
+input[type="date"] {
+  width: 100%;
+  border: 2px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  padding: 10px;
+  font-size: 15px;
+}
+
 textarea:focus,
+input:focus,
 button:focus,
 a:focus {
   outline: none;
@@ -129,6 +140,32 @@ a:focus {
   display: flex;
   justify-content: space-between;
   align-items: center;
+}
+
+.device-filter {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
+  margin-bottom: 12px;
+}
+
+.device-filter label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+}
+
+.device-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.device-pager {
+  border: 0;
+  padding: 0;
+  margin: 0 0 12px;
 }
 
 .item {
@@ -167,6 +204,11 @@ a:focus {
     flex-direction: column;
     align-items: flex-start;
     gap: 10px;
+  }
+
+  .device-filter,
+  .device-summary {
+    grid-template-columns: 1fr;
   }
 
   .nav a,
