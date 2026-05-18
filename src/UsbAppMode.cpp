@@ -1396,7 +1396,7 @@ constexpr float kLowBatteryWarningVoltage = 3.25f;
 // Low-voltage sleep protection threshold. Change this value to adjust protection.
 constexpr float kLowBatterySleepVoltage = 3.10f;
 constexpr uint32_t kLowBatterySleepMessageMs = 2000UL;
-constexpr const char *kLowBatterySleepMessage = "Low Barry";
+constexpr const char *kLowBatterySleepMessage = "Low Battery";
 constexpr uint32_t kLowBatteryReminderIntervalMs = 60000UL;
 constexpr const char *kLowBatteryReminderMessage = u8"电量过低，低电压工作会损坏设备，请及时充电";
 
