@@ -2179,19 +2179,6 @@ void registerRoutes()
                      gWebServer->send(500, "text/plain", "DS1302 write failed");
                      return;
                    }
-                   String uuid;
-                   String uuidError;
-                   if (!deviceUuidEnsureFromDateTime(dt, uuid, uuidError))
-                   {
-                     String msg = "UUID save failed";
-                     if (uuidError.length())
-                     {
-                       msg += ": ";
-                       msg += uuidError;
-                     }
-                     gWebServer->send(500, "text/plain", msg);
-                     return;
-                   }
                    // RTC adjusted manually, force schedule slots to rebuild against new time.
                    setScheduleReloadRequested();
                    gWebServer->send(200, "application/json", rtcDateTimeJson());

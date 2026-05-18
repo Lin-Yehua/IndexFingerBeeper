@@ -7,6 +7,8 @@ namespace
 
 constexpr char kDeviceUuidPrefsNs[] = "deviceid";
 constexpr char kDeviceUuidPrefsKey[] = "uuid";
+constexpr char kDeviceUuidTrustedPrefsKey[] = "trusted";
+constexpr char kDeviceUuidSourcePrefsKey[] = "source";
 constexpr char kDeviceUuidPrefix[] = "UUID";
 constexpr size_t kDeviceUuidLen = 18; // UUID + ssmmhhddmmyyyy
 
@@ -47,30 +49,93 @@ String buildDeviceUuidFromDateTime(const Ds1302DateTime &dt)
   return String(buf);
 }
 
-} // namespace
-
-bool deviceUuidRead(String &outUuid)
+bool readDeviceUuidRecord(String &outUuid, bool &outTrusted)
 {
   outUuid = "";
+  outTrusted = false;
+
   Preferences prefs;
-  // Open RW so first boot can create namespace automatically.
-  // RO begin would fail when namespace does not exist yet.
   if (!prefs.begin(kDeviceUuidPrefsNs, false))
   {
     return false;
   }
 
   String uuid = prefs.getString(kDeviceUuidPrefsKey, "");
+  outTrusted = prefs.getBool(kDeviceUuidTrustedPrefsKey, false);
   prefs.end();
+
   uuid = normalizeUuid(uuid);
   if (isDeviceUuidValid(uuid))
   {
     outUuid = uuid;
   }
+  else
+  {
+    outTrusted = false;
+  }
   return true;
 }
 
-bool deviceUuidEnsureFromDateTime(const Ds1302DateTime &dt, String &outUuid, String &errorOut)
+bool writeDeviceUuidRecord(const String &uuid, bool trusted, const char *source, String &errorOut)
+{
+  Preferences prefs;
+  if (!prefs.begin(kDeviceUuidPrefsNs, false))
+  {
+    errorOut = "preferences write open failed";
+    return false;
+  }
+
+  const size_t stored = prefs.putString(kDeviceUuidPrefsKey, uuid);
+  (void)prefs.putBool(kDeviceUuidTrustedPrefsKey, trusted);
+  const char *sourceText = source && source[0] ? source : (trusted ? "trusted" : "rtc");
+  (void)prefs.putString(kDeviceUuidSourcePrefsKey, sourceText);
+  prefs.end();
+
+  if (stored != uuid.length())
+  {
+    errorOut = "preferences write failed";
+    return false;
+  }
+
+  String verified;
+  bool ignoredTrusted = false;
+  if (!readDeviceUuidRecord(verified, ignoredTrusted) || verified != uuid)
+  {
+    errorOut = "preferences readback failed";
+    return false;
+  }
+  return true;
+}
+
+bool buildAndStoreDeviceUuid(const Ds1302DateTime &dt, bool trusted, const char *source, String &outUuid,
+                             String &errorOut)
+{
+  const String uuid = buildDeviceUuidFromDateTime(dt);
+  if (!isDeviceUuidValid(uuid))
+  {
+    errorOut = "uuid format invalid";
+    return false;
+  }
+
+  if (!writeDeviceUuidRecord(uuid, trusted, source, errorOut))
+  {
+    return false;
+  }
+
+  outUuid = uuid;
+  return true;
+}
+
+} // namespace
+
+bool deviceUuidRead(String &outUuid)
+{
+  outUuid = "";
+  bool trusted = false;
+  return readDeviceUuidRecord(outUuid, trusted);
+}
+
+bool deviceUuidEnsureFromNtpDateTime(const Ds1302DateTime &dt, String &outUuid, String &errorOut)
 {
   outUuid = "";
   errorOut = "";
@@ -82,7 +147,8 @@ bool deviceUuidEnsureFromDateTime(const Ds1302DateTime &dt, String &outUuid, Str
   }
 
   String existing;
-  if (!deviceUuidRead(existing))
+  bool trusted = false;
+  if (!readDeviceUuidRecord(existing, trusted))
   {
     errorOut = "preferences read failed";
     return false;
@@ -93,42 +159,5 @@ bool deviceUuidEnsureFromDateTime(const Ds1302DateTime &dt, String &outUuid, Str
     return true;
   }
 
-  const String uuid = buildDeviceUuidFromDateTime(dt);
-  if (!isDeviceUuidValid(uuid))
-  {
-    errorOut = "uuid format invalid";
-    return false;
-  }
-
-  Preferences prefs;
-  if (!prefs.begin(kDeviceUuidPrefsNs, false))
-  {
-    errorOut = "preferences write open failed";
-    return false;
-  }
-  const size_t stored = prefs.putString(kDeviceUuidPrefsKey, uuid);
-  prefs.end();
-  if (stored != uuid.length())
-  {
-    errorOut = "preferences write failed";
-    return false;
-  }
-
-  outUuid = uuid;
-  return true;
-}
-
-bool deviceUuidEnsureFromRtc(String &outUuid, String &errorOut)
-{
-  outUuid = "";
-  errorOut = "";
-
-  Ds1302DateTime dt;
-  if (!rtc.readDateTime(dt) || !ds1302IsValidDateTime(dt))
-  {
-    errorOut = "rtc invalid";
-    return false;
-  }
-
-  return deviceUuidEnsureFromDateTime(dt, outUuid, errorOut);
+  return buildAndStoreDeviceUuid(dt, true, "ntp", outUuid, errorOut);
 }

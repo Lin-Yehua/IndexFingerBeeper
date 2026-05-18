@@ -4507,13 +4507,9 @@ static String appendDeviceIdentityToApiUrl(const String &baseUrl)
 
   const String mac = normalizeMacAddressForApi(WiFi.macAddress());
   String uuid;
-  if (!deviceUuidRead(uuid) || !uuid.length())
+  if (!deviceUuidRead(uuid))
   {
-    String uuidErr;
-    if (!deviceUuidEnsureFromRtc(uuid, uuidErr))
-    {
-      uuid = "";
-    }
+    uuid = "";
   }
   uuid.trim();
   uuid.toUpperCase();
@@ -5006,7 +5002,7 @@ static bool syncDs1302FromStaNtp(String &detailOut)
   }
   String uuid;
   String uuidError;
-  if (!deviceUuidEnsureFromDateTime(synced, uuid, uuidError))
+  if (!deviceUuidEnsureFromNtpDateTime(synced, uuid, uuidError))
   {
     detailOut = "uuid save failed";
     if (uuidError.length())
@@ -5787,16 +5783,14 @@ void processAppLoop()
     case StaOnlinePhase::kConnecting:
     {
       const wl_status_t status = WiFi.status();
+      const uint32_t elapsed = millis() - gStaAttemptStartMs;
       if (status == WL_CONNECTED)
       {
-        gStaOnlinePhase = StaOnlinePhase::kConnected;
-        clearStaMessageQueue();
-        gStaLastQueueEmptyHintMs = 0;
-        gStaNextFetchAllowedMs = 0;
         String okMsg = kStaConnectOkPrefix;
         okMsg += WiFi.localIP().toString();
         String ntpDetail;
-        if (syncDs1302FromStaNtp(ntpDetail))
+        const bool ntpOk = syncDs1302FromStaNtp(ntpDetail);
+        if (ntpOk)
         {
           Serial.printf("[STA] NTP sync -> DS1302 ok: %s\n", ntpDetail.c_str());
         }
@@ -5804,14 +5798,38 @@ void processAppLoop()
         {
           Serial.printf("[STA] NTP sync skipped/failed: %s\n", ntpDetail.c_str());
         }
-        playStaMessage(okMsg);
-        return;
+
+        String uuid;
+        const bool uuidReady = deviceUuidRead(uuid) && uuid.length();
+        if (!uuidReady)
+        {
+          Serial.println("[STA] UUID unavailable; wait for NTP before cloud fetch");
+          if (elapsed < kStaAttemptTimeoutMs)
+          {
+            return;
+          }
+        }
+        else
+        {
+          clearStaMessageQueue();
+          gStaLastQueueEmptyHintMs = 0;
+          gStaNextFetchAllowedMs = 0;
+          Serial.printf("[STA] device UUID ready: %s\n", uuid.c_str());
+          gStaOnlinePhase = StaOnlinePhase::kConnected;
+          playStaMessage(okMsg);
+          return;
+        }
       }
 
-      const uint32_t elapsed = millis() - gStaAttemptStartMs;
       if (elapsed < kStaAttemptTimeoutMs)
       {
         return;
+      }
+
+      if (status == WL_CONNECTED)
+      {
+        WiFi.disconnect(false, false);
+        delay(20);
       }
 
       gStaRetryCount++;
