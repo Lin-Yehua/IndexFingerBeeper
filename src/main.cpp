@@ -48,15 +48,17 @@ void setup()
 {
   Serial.begin(115200);
   // delay(300);
+  ledcSetup(0, 40000, 8);
+  ledcAttachPin(14, 0);
+  ledcWrite(0, 0);
+  appCheckLowBatterySleepIfNeeded(true, "early-boot");
+
   Serial.println("\n[BOOT] project + USB MSC + FAT CSV");
   logBootPartitionInfo();
   setAppModeInitCallback(APP_MODE_AP_STA, onApStaInit);
   setAppModeInitCallback(APP_MODE_STA_ONLINE, onStaOnlineInit);
   setAppModeInitCallback(APP_MODE_STA_ONLY, onStaOnlyInit);
 
-  ledcSetup(0, 40000, 8);
-  ledcAttachPin(14, 0);
-  ledcWrite(0, 0);
   // Enable audio output path early so boot animation BGM can be heard.
   pinMode(42, OUTPUT);
   digitalWrite(42, HIGH);

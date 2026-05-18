@@ -63,6 +63,7 @@ struct BatteryStatus
 
 void serviceBatteryMonitor(bool force = false);
 bool appGetBatteryStatus(BatteryStatus &outStatus);
+void appCheckLowBatterySleepIfNeeded(bool forceSample = false, const char *contextTag = nullptr);
 
 bool appHandleRtcMaintenanceWakeIfNeeded();
 bool appShouldFastResumeFromDeepSleep();

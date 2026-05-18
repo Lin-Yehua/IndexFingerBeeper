@@ -1389,10 +1389,14 @@ constexpr uint32_t kBatteryUpdateIntervalMs = 5000UL;
 constexpr uint8_t kBatterySampleCount = 8;
 constexpr uint32_t kBatterySampleGapMs = 2UL;
 constexpr float kBatteryFilterAlpha = 0.55f;
-constexpr float kBatteryVoltageEmpty = 3.10f;
+constexpr float kBatteryVoltageEmpty = 3.20f;
 constexpr float kBatteryVoltageFull = 4.10f;
 constexpr float kBatteryChargingDetectVoltage = 4.20f; // VIN around 5V when charging
-constexpr float kLowBatteryWarningVoltage = 3.15f;
+constexpr float kLowBatteryWarningVoltage = 3.25f;
+// Low-voltage sleep protection threshold. Change this value to adjust protection.
+constexpr float kLowBatterySleepVoltage = 3.10f;
+constexpr uint32_t kLowBatterySleepMessageMs = 2000UL;
+constexpr const char *kLowBatterySleepMessage = "Low Barry";
 constexpr uint32_t kLowBatteryReminderIntervalMs = 60000UL;
 constexpr const char *kLowBatteryReminderMessage = u8"电量过低，低电压工作会损坏设备，请及时充电";
 
@@ -1580,6 +1584,81 @@ void serviceLowBatteryWarning()
   if (wirelessPortalPushHostMessageForRestore(String(kLowBatteryReminderMessage)))
   {
     gLowBatteryReminderLastMs = now ? now : 1U;
+  }
+}
+
+void showLowBatterySleepScreen(float vinVoltage)
+{
+  ensureDisplayReady();
+  tft.fillScreen(TFT_BLACK);
+  ledcWrite(0, backlightDutyBrightFromLevel(gBacklightLevel));
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextSize(3);
+  tft.setTextColor(TFT_RED, TFT_BLACK);
+  tft.drawString(kLowBatterySleepMessage, tft.width() / 2, tft.height() / 2 - 12);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(String(vinVoltage, 2) + "V", tft.width() / 2, tft.height() / 2 + 28);
+  delay(kLowBatterySleepMessageMs);
+  ledcWrite(0, kBacklightDutyOff);
+}
+
+[[noreturn]] void enterLowBatteryProtectionSleep(float vinVoltage, const char *contextTag)
+{
+  Serial.printf("[POWER] low battery %.3fV < %.3fV (%s), entering deep sleep\n", vinVoltage, kLowBatterySleepVoltage,
+                (contextTag && contextTag[0]) ? contextTag : "unknown");
+
+  if (mixer.isRunning())
+  {
+    mixer.stop();
+  }
+  if (appInitialized)
+  {
+    wirelessPortalStop();
+    WiFi.mode(WIFI_OFF);
+  }
+  if (usbModeActive)
+  {
+    msc.mediaPresent(false);
+    usbModeActive = false;
+  }
+  closeRawBackend();
+  unmountFat();
+  clearSleepRtcContext();
+
+  showLowBatterySleepScreen(vinVoltage);
+  waitWakeKeyReleaseBeforeSleep();
+
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+  esp_sleep_enable_ext0_wakeup(kWakeKeyGpio, 0);
+  Serial.printf("[POWER] low battery sleep ext0(gpio=%d), timer disabled\n", static_cast<int>(kWakeKeyGpio));
+  delay(20);
+  esp_deep_sleep_start();
+  while (true)
+  {
+    delay(1000);
+  }
+}
+
+void appCheckLowBatterySleepIfNeeded(bool forceSample, const char *contextTag)
+{
+  if (forceSample)
+  {
+    serviceBatteryMonitor(true);
+  }
+
+  BatteryStatus batteryStatus{};
+  if (!appGetBatteryStatus(batteryStatus))
+  {
+    return;
+  }
+  if (batteryStatus.charging)
+  {
+    return;
+  }
+  if (batteryStatus.vinVoltage < kLowBatterySleepVoltage)
+  {
+    enterLowBatteryProtectionSleep(batteryStatus.vinVoltage, contextTag);
   }
 }
 
@@ -2130,9 +2209,10 @@ void applyAudioGainsFromSettingIni()
     Serial.printf("[APP] SleepTime missing, default=%d\n", gSleepTimeMin);
   Serial.printf("[APP] gains: insert=%.3f bg=%.3f backlight=%.3f\n", gInsertGain, gBgGain, gBacklightLevel);
   Serial.printf(
-      "[APP] glitch: p3=%d p5=%d insertBase=%d insertInc=%d reprint=%d backlightTime=%d closeTime=%d sleepTimeMin=%d lowBattery=%.2f\n",
+      "[APP] glitch: p3=%d p5=%d insertBase=%d insertInc=%d reprint=%d backlightTime=%d closeTime=%d sleepTimeMin=%d lowBattery=%.2f lowBatterySleep=%.2f\n",
       gWrongProb3, gWrongProb5, gInsertSoundBaseProbability, gInsertSoundIncreaseProbability, gEnableReprint ? 1 : 0,
-      gDisplayIntervalMs, gBacklightTimeSec, gBacklightCloseTimeSec, gSleepTimeMin, kLowBatteryWarningVoltage);
+      gDisplayIntervalMs, gBacklightTimeSec, gBacklightCloseTimeSec, gSleepTimeMin, kLowBatteryWarningVoltage,
+      kLowBatterySleepVoltage);
 }
 
 void unmountFat()
@@ -2356,6 +2436,7 @@ bool initProjectResources()
   Key_init();
   clearScheduleInterruptQueue();
   serviceBatteryMonitor(true);
+  appCheckLowBatterySleepIfNeeded(false, "app-init");
 
   if (!LittleFS.begin(false, "/littlefs", 10, kLittleFsPartitionLabel))
   {
@@ -5215,6 +5296,7 @@ void processAppLoop()
   };
 
   serviceBatteryMonitor(false);
+  appCheckLowBatterySleepIfNeeded(false, "app-loop");
   serviceLowBatteryWarning();
 
   enum class ImageResumeTarget : uint8_t
