@@ -650,16 +650,14 @@ static bool handleStaConnected(uint8_t key)
 static bool handleStaConnecting()
 {
   const wl_status_t status = WiFi.status();
+  const uint32_t elapsed = millis() - gStaAttemptStartMs;
   if (status == WL_CONNECTED)
   {
-    gStaOnlinePhase = StaOnlinePhase::kConnected;
-    clearStaMessageQueue();
-    gStaLastQueueEmptyHintMs = 0;
-    gStaNextFetchAllowedMs = 0;
     String okMsg = kStaConnectOkPrefix;
     okMsg += WiFi.localIP().toString();
     String ntpDetail;
-    if (syncDs1302FromStaNtp(ntpDetail))
+    const bool ntpOk = syncDs1302FromStaNtp(ntpDetail);
+    if (ntpOk)
     {
       Serial.printf("[STA] NTP sync -> DS1302 ok: %s\n", ntpDetail.c_str());
     }
@@ -667,14 +665,38 @@ static bool handleStaConnecting()
     {
       Serial.printf("[STA] NTP sync skipped/failed: %s\n", ntpDetail.c_str());
     }
-    playStaMessage(okMsg);
-    return true;
+
+    String uuid;
+    const bool uuidReady = deviceUuidRead(uuid) && uuid.length();
+    if (!uuidReady)
+    {
+      Serial.println("[STA] UUID unavailable; wait for NTP before cloud fetch");
+      if (elapsed < kStaAttemptTimeoutMs)
+      {
+        return true;
+      }
+    }
+    else
+    {
+      clearStaMessageQueue();
+      gStaLastQueueEmptyHintMs = 0;
+      gStaNextFetchAllowedMs = 0;
+      Serial.printf("[STA] device UUID ready: %s\n", uuid.c_str());
+      gStaOnlinePhase = StaOnlinePhase::kConnected;
+      playStaMessage(okMsg);
+      return true;
+    }
   }
 
-  const uint32_t elapsed = millis() - gStaAttemptStartMs;
   if (elapsed < kStaAttemptTimeoutMs)
   {
     return true;
+  }
+
+  if (status == WL_CONNECTED)
+  {
+    WiFi.disconnect(false, false);
+    delay(20);
   }
 
   gStaRetryCount++;
@@ -787,6 +809,8 @@ static bool handleCurrentMode(bool &syntheticKeyPress)
 void processAppLoop()
 {
   serviceBatteryMonitor(false);
+  appCheckLowBatterySleepIfNeeded(false, "app-loop");
+  serviceLowBatteryWarning();
 
   static LoopIrqState irq;
   bool syntheticKeyPress = false;

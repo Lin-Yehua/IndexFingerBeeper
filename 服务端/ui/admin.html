@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
@@ -11,7 +11,7 @@
   <main class="page">
     <header class="frame page-head">
       <h1>文本库管理</h1>
-      <p class="sub">HTTPS 管理端 · 黑底框线风格</p>
+      <p class="sub">轻量管理端 · 黑底框线风格</p>
       <nav class="nav">
         <a href="{{ url_for('submit_page') }}">外部提交</a>
         <a href="{{ url_for('review_page') }}">审核页</a>
@@ -26,6 +26,8 @@
     <section class="frame meta">
       <p>正式库数量：<strong>{{ total_approved }}</strong></p>
       <p>待审核数量：<strong>{{ pending_count }}</strong></p>
+      <p>设备总数：<strong>{{ total_devices }}</strong></p>
+      <p>当前筛选设备：<strong>{{ filtered_device_count }}</strong></p>
       <p>正式库文件：<code>{{ main_file }}</code></p>
       <p>每页显示：<strong>10</strong> 条</p>
     </section>
@@ -34,6 +36,9 @@
       <h2>新增正式文本</h2>
       <form method="post" action="{{ url_for('admin_add') }}" class="stack">
         <input type="hidden" name="page" value="{{ page }}">
+        <input type="hidden" name="device_page" value="{{ device_page }}">
+        <input type="hidden" name="device_from" value="{{ device_from }}">
+        <input type="hidden" name="device_to" value="{{ device_to }}">
         <textarea name="text" rows="4" maxlength="{{ max_text_len }}" placeholder="输入要加入正式库的文本"></textarea>
         <div class="row end">
           <button type="submit" class="btn">添加到正式库</button>
@@ -45,10 +50,10 @@
       <div>第 {{ page }} / {{ total_pages }} 页</div>
       <div class="row">
         {% if page > 1 %}
-          <a class="btn-link" href="{{ url_for('admin_page', page=page - 1) }}">上一页</a>
+          <a class="btn-link" href="{{ url_for('admin_page', page=page - 1, device_page=device_page, device_from=device_from, device_to=device_to) }}">上一页</a>
         {% endif %}
         {% if page < total_pages %}
-          <a class="btn-link" href="{{ url_for('admin_page', page=page + 1) }}">下一页</a>
+          <a class="btn-link" href="{{ url_for('admin_page', page=page + 1, device_page=device_page, device_from=device_from, device_to=device_to) }}">下一页</a>
         {% endif %}
       </div>
     </section>
@@ -63,6 +68,9 @@
             <form method="post" action="{{ url_for('admin_update') }}" class="stack">
               <input type="hidden" name="index" value="{{ row.global_index }}">
               <input type="hidden" name="page" value="{{ page }}">
+              <input type="hidden" name="device_page" value="{{ device_page }}">
+              <input type="hidden" name="device_from" value="{{ device_from }}">
+              <input type="hidden" name="device_to" value="{{ device_to }}">
               <textarea name="text" rows="3" maxlength="{{ max_text_len }}">{{ row.text }}</textarea>
               <div class="row">
                 <button type="submit" class="btn">保存修改</button>
@@ -72,6 +80,9 @@
             <form method="post" action="{{ url_for('admin_delete') }}" onsubmit="return confirm('确认删除这条正式文本吗？');">
               <input type="hidden" name="index" value="{{ row.global_index }}">
               <input type="hidden" name="page" value="{{ page }}">
+              <input type="hidden" name="device_page" value="{{ device_page }}">
+              <input type="hidden" name="device_from" value="{{ device_from }}">
+              <input type="hidden" name="device_to" value="{{ device_to }}">
               <button type="submit" class="btn btn-warn">删除</button>
             </form>
           </article>
@@ -81,14 +92,76 @@
       {% endif %}
     </section>
 
-    <section class="frame">
+    <section class="frame" id="devices">
       <h2>已发现设备与漂流瓶队列</h2>
+      <form method="get" action="{{ url_for('admin_page') }}" class="device-filter">
+        <input type="hidden" name="page" value="{{ page }}">
+        <label>最后联网从
+          <input type="date" name="device_from" value="{{ device_from }}">
+        </label>
+        <label>到
+          <input type="date" name="device_to" value="{{ device_to }}">
+        </label>
+        <div class="row end">
+          <button type="submit" class="btn">筛选设备</button>
+          <a class="btn-link" href="{{ url_for('admin_page', page=page) }}">清除筛选</a>
+        </div>
+      </form>
+
+      <section class="frame-lite device-summary">
+        <p>设备总数：<strong>{{ total_devices }}</strong></p>
+        <p>筛选结果：<strong>{{ filtered_device_count }}</strong></p>
+        <p>设备页：<strong>{{ device_page }} / {{ device_total_pages }}</strong></p>
+        <p>每页设备：<strong>{{ device_page_size }}</strong></p>
+      </section>
+
+      <section class="pager device-pager">
+        <div>设备第 {{ device_page }} / {{ device_total_pages }} 页</div>
+        <div class="row">
+          {% if device_page > 1 %}
+            <a class="btn-link" href="{{ url_for('admin_page', page=page, device_page=device_page - 1, device_from=device_from, device_to=device_to) }}#devices">上一页</a>
+          {% endif %}
+          {% if device_page < device_total_pages %}
+            <a class="btn-link" href="{{ url_for('admin_page', page=page, device_page=device_page + 1, device_from=device_from, device_to=device_to) }}#devices">下一页</a>
+          {% endif %}
+        </div>
+      </section>
+
       {% if device_overview %}
         {% for dev in device_overview %}
-          <article class="item frame-lite">
+          <article class="item frame-lite" id="device-{{ dev.anchor }}">
             <div class="item-title">{{ dev.uuid }} / {{ dev.mac }}</div>
+            <p>备注：<strong>{{ dev.note or "无" }}</strong></p>
+            <p>最后联网：<strong>{{ dev.last_seen_text }}</strong></p>
             <p>文件：<code>{{ dev.file_name }}</code></p>
             <p>待发送：<strong>{{ dev.queue_count }}</strong></p>
+
+            <form method="post" action="{{ url_for('admin_device_note') }}" class="stack">
+              <input type="hidden" name="uuid" value="{{ dev.uuid }}">
+              <input type="hidden" name="mac" value="{{ dev.mac_compact }}">
+              <input type="hidden" name="page" value="{{ page }}">
+              <input type="hidden" name="device_page" value="{{ device_page }}">
+              <input type="hidden" name="device_from" value="{{ device_from }}">
+              <input type="hidden" name="device_to" value="{{ device_to }}">
+              <input name="note" type="text" maxlength="{{ max_device_note_len }}" value="{{ dev.note }}" placeholder="给这个设备添加备注">
+              <div class="row">
+                <button type="submit" class="btn">保存备注</button>
+              </div>
+            </form>
+
+            <form method="post" action="{{ url_for('admin_device_bottle') }}" class="stack">
+              <input type="hidden" name="uuid" value="{{ dev.uuid }}">
+              <input type="hidden" name="mac" value="{{ dev.mac_compact }}">
+              <input type="hidden" name="page" value="{{ page }}">
+              <input type="hidden" name="device_page" value="{{ device_page }}">
+              <input type="hidden" name="device_from" value="{{ device_from }}">
+              <input type="hidden" name="device_to" value="{{ device_to }}">
+              <textarea name="message" rows="2" maxlength="{{ max_bottle_message_len }}" placeholder="直接给这个设备发送漂流瓶"></textarea>
+              <div class="row">
+                <button type="submit" class="btn">发送漂流瓶</button>
+              </div>
+            </form>
+
             {% if dev.messages %}
               <ol>
                 {% for m in dev.messages %}

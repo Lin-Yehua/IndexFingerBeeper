@@ -17,14 +17,16 @@ void setup()
 {
   Serial.begin(115200);
   // delay(300);
+  ledcSetup(0, 40000, 8);
+  ledcAttachPin(14, 0);
+  ledcWrite(0, 0);
+  appCheckLowBatterySleepIfNeeded(true, "early-boot");
+
   Serial.println("\n[BOOT] project + USB MSC + FAT CSV");
   setAppModeInitCallback(APP_MODE_AP_STA, onApStaInit);
   setAppModeInitCallback(APP_MODE_STA_ONLINE, onStaOnlineInit);
   setAppModeInitCallback(APP_MODE_STA_ONLY, onStaOnlyInit);
 
-  ledcSetup(0, 40000, 8);
-  ledcAttachPin(14, 0);
-  ledcWrite(0, 0);
   routeBootPath();
 }
 

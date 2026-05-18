@@ -54,6 +54,7 @@ int gWrongProb5 = 12;
 int gInsertSoundBaseProbability = 10;
 int gInsertSoundIncreaseProbability = 5;
 bool gEnableReprint = true;
+int gDisplayIntervalMs = 1;
 int gBacklightTimeSec = -1;
 int gBacklightCloseTimeSec = 20;
 int gSleepTimeMin = 1;

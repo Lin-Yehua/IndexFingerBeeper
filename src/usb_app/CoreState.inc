@@ -597,17 +597,27 @@ namespace
 
 constexpr uint8_t kBatteryAdcPin = 1;        // IO1
 constexpr float kBatteryDividerRatio = 2.0f; // 47k:47k divider -> VIN = 2 * Vpin
-constexpr uint32_t kBatteryUpdateIntervalMs = 30000UL;
+constexpr uint32_t kBatteryUpdateIntervalMs = 5000UL;
 constexpr uint8_t kBatterySampleCount = 8;
 constexpr uint32_t kBatterySampleGapMs = 2UL;
-constexpr float kBatteryFilterAlpha = 0.35f;
-constexpr float kBatteryVoltageEmpty = 3.30f;
-constexpr float kBatteryVoltageFull = 4.20f;
-constexpr float kBatteryChargingDetectVoltage = 4.60f; // VIN around 5V when charging
+constexpr float kBatteryFilterAlpha = 0.55f;
+constexpr float kBatteryVoltageEmpty = 3.20f;
+constexpr float kBatteryVoltageFull = 4.10f;
+constexpr float kBatteryChargingDetectVoltage = 4.20f; // VIN around 5V when charging
+constexpr float kLowBatteryWarningVoltage = 3.25f;
+// Low-voltage sleep protection threshold. Change this value to adjust protection.
+constexpr float kLowBatterySleepVoltage = 3.05f;
+constexpr uint32_t kLowBatterySleepMessageMs = 2000UL;
+constexpr const char *kLowBatterySleepMessage = "Low Battery";
+constexpr uint32_t kLowBatteryReminderIntervalMs = 60000UL;
+constexpr const char *kLowBatteryReminderMessage = u8"电量过低，低电压工作会损坏设备，请及时充电";
 
 portMUX_TYPE gBatteryMux = portMUX_INITIALIZER_UNLOCKED;
 BatteryStatus gBatteryStatus;
 bool gBatteryPinConfigured = false;
+bool gLowBatteryStateInitialized = false;
+bool gLowBatteryState = false;
+uint32_t gLowBatteryReminderLastMs = 0;
 
 float clampBatteryVoltage(float value)
 {
@@ -755,6 +765,105 @@ bool appGetBatteryStatus(BatteryStatus &outStatus)
   outStatus = gBatteryStatus;
   portEXIT_CRITICAL(&gBatteryMux);
   return outStatus.available && outStatus.initialized;
+}
+
+void serviceLowBatteryWarning()
+{
+  BatteryStatus batteryStatus{};
+  const bool batteryOk = appGetBatteryStatus(batteryStatus);
+  const bool lowBattery = batteryOk && !batteryStatus.charging &&
+                          batteryStatus.filteredVinVoltage < kLowBatteryWarningVoltage;
+  const bool stateChanged = !gLowBatteryStateInitialized || lowBattery != gLowBatteryState;
+  if (stateChanged)
+  {
+    gLowBatteryStateInitialized = true;
+    gLowBatteryState = lowBattery;
+    lowBatteryWarning(lowBattery);
+    gLowBatteryReminderLastMs = lowBattery ? 0U : millis();
+  }
+
+  if (!lowBattery)
+    return;
+
+  const uint32_t now = millis();
+  if (gLowBatteryReminderLastMs != 0U && (now - gLowBatteryReminderLastMs) < kLowBatteryReminderIntervalMs)
+    return;
+
+  if (wirelessPortalPushHostMessageForRestore(String(kLowBatteryReminderMessage)))
+  {
+    gLowBatteryReminderLastMs = now ? now : 1U;
+  }
+}
+
+void showLowBatterySleepScreen(float vinVoltage)
+{
+  ensureDisplayReady();
+  tft.fillScreen(TFT_BLACK);
+  ledcWrite(0, backlightDutyBrightFromLevel(gBacklightLevel));
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextSize(3);
+  tft.setTextColor(TFT_RED, TFT_BLACK);
+  tft.drawString(kLowBatterySleepMessage, tft.width() / 2, tft.height() / 2 - 12);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
+  tft.drawString(String(vinVoltage, 2) + "V", tft.width() / 2, tft.height() / 2 + 28);
+  delay(kLowBatterySleepMessageMs);
+  ledcWrite(0, kBacklightDutyOff);
+}
+
+[[noreturn]] void enterLowBatteryProtectionSleep(float vinVoltage, const char *contextTag)
+{
+  Serial.printf("[POWER] low battery %.3fV < %.3fV (%s), entering deep sleep\n", vinVoltage, kLowBatterySleepVoltage,
+                (contextTag && contextTag[0]) ? contextTag : "unknown");
+
+  if (mixer.isRunning())
+  {
+    mixer.stop();
+  }
+  if (appInitialized)
+  {
+    wirelessPortalStop();
+    WiFi.mode(WIFI_OFF);
+  }
+  if (usbModeActive)
+  {
+    msc.mediaPresent(false);
+    usbModeActive = false;
+  }
+  closeRawBackend();
+  unmountFat();
+  clearSleepRtcContext();
+
+  showLowBatterySleepScreen(vinVoltage);
+  waitWakeKeyReleaseBeforeSleep();
+
+  esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+  esp_sleep_enable_ext0_wakeup(kWakeKeyGpio, 0);
+  Serial.printf("[POWER] low battery sleep ext0(gpio=%d), timer disabled\n", static_cast<int>(kWakeKeyGpio));
+  delay(20);
+  esp_deep_sleep_start();
+  while (true)
+  {
+    delay(1000);
+  }
+}
+
+void appCheckLowBatterySleepIfNeeded(bool forceSample, const char *contextTag)
+{
+  if (forceSample)
+  {
+    serviceBatteryMonitor(true);
+  }
+
+  BatteryStatus batteryStatus{};
+  if (!appGetBatteryStatus(batteryStatus))
+    return;
+  if (batteryStatus.charging)
+    return;
+  if (batteryStatus.vinVoltage < kLowBatterySleepVoltage)
+  {
+    enterLowBatteryProtectionSleep(batteryStatus.vinVoltage, contextTag);
+  }
 }
 
 #include "UsbBootFlow.inc"

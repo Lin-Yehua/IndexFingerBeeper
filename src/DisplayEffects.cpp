@@ -29,11 +29,16 @@ constexpr int kGlitchLogoX = 160 - 60;
 constexpr int kGlitchLogoY = 50 - 60;
 constexpr int kGlitchLogoW = 120;
 constexpr int kGlitchLogoH = 120;
-constexpr int kGlitchFrameDelayMs = 8;
 constexpr int kGlitchRollbackClearLeft = 8;
 constexpr int kGlitchRollbackClearRight = 12;
 constexpr int kGlitchMaxRollbackCount = 8;
 constexpr const char *kGlitchEnglishChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+bool gLowBatteryWarningVisible = false;
+constexpr int kLowBatteryIconX = 8;
+constexpr int kLowBatteryIconScreenY = 105;
+constexpr int kLowBatteryIconY = kLowBatteryIconScreenY - kGlitchSpriteScreenY;
+constexpr int kLowBatteryIconW = 15;
+constexpr int kLowBatteryIconH = 6;
 
 struct GlitchEffectState
 {
@@ -117,6 +122,33 @@ uint8_t scaledBacklightDuty(uint8_t rawDuty)
   return static_cast<uint8_t>(duty);
 }
 
+uint32_t displayIntervalDelayMs()
+{
+  return static_cast<uint32_t>(constrain(gDisplayIntervalMs, 0, 1000));
+}
+
+void drawLowBatteryWarningIconOnTextSprite(bool status)
+{
+  Text.fillRect(kLowBatteryIconX, kLowBatteryIconY, kLowBatteryIconW, kLowBatteryIconH, TFT_BLACK);
+  if (!status)
+    return;
+
+  Text.drawRect(kLowBatteryIconX, kLowBatteryIconY, 12, 6, TFT_YELLOW);
+  Text.fillRect(kLowBatteryIconX + 12, kLowBatteryIconY + 2, 2, 2, TFT_YELLOW);
+  Text.fillRect(kLowBatteryIconX + 1, kLowBatteryIconY + 1, 3, 4, TFT_RED);
+}
+
+void drawLowBatteryWarningIconOnTft(bool status)
+{
+  tft.fillRect(kLowBatteryIconX, kLowBatteryIconScreenY, kLowBatteryIconW, kLowBatteryIconH, TFT_BLACK);
+  if (!status)
+    return;
+
+  tft.drawRect(kLowBatteryIconX, kLowBatteryIconScreenY, 12, 6, TFT_YELLOW);
+  tft.fillRect(kLowBatteryIconX + 12, kLowBatteryIconScreenY + 2, 2, 2, TFT_YELLOW);
+  tft.fillRect(kLowBatteryIconX + 1, kLowBatteryIconScreenY + 1, 3, 4, TFT_RED);
+}
+
 String normalizeGlitchInput(const char *text)
 {
   String normalized;
@@ -185,6 +217,7 @@ void drawLogoOnlyGlitchFrame()
 {
   Text.fillRect(0, 0, kGlitchSpriteW, kGlitchSpriteH, TFT_BLACK);
   Text.pushImage(kGlitchLogoX, kGlitchLogoY, kGlitchLogoW, kGlitchLogoH, (uint16_t *)Index_B);
+  overlayLowBatteryWarningOnTextSprite();
   Text.pushSprite(0, kGlitchSpriteScreenY);
 }
 
@@ -614,6 +647,7 @@ void drawWrappedFrame(GlitchEffectState &state, int progressI, bool forceGlobalR
     drawMultiLineText(state, lineCount, baseY, drawFrom);
   Text.setTextDatum(MC_DATUM);
 
+  overlayLowBatteryWarningOnTextSprite();
   Text.pushSprite(0, kGlitchSpriteScreenY + dirtyY0, 0, dirtyY0, kGlitchSpriteW, dirtyY1 - dirtyY0);
   rememberFrameLines(state, lineCount);
 }
@@ -704,7 +738,7 @@ bool runGlitchAnimationStep(GlitchEffectState &state, GlitchRuntime &runtime)
 
   buildGlitchFrame(state, runtime.cursor, true);
   drawWrappedFrame(state, runtime.cursor, false);
-  delay(kGlitchFrameDelayMs);
+  delay(displayIntervalDelayMs());
 
   scheduleRollbackIfNeeded(state, runtime, didRollbackThisFrame);
   handleGlitchAnimationKey(runtime);
@@ -851,4 +885,20 @@ void generateUniqueRandomNumbers(int low, int high, int count, int *result)
     result[i] = result[j];
     result[j] = tmp;
   }
+}
+
+void lowBatteryWarning(bool status)
+{
+  if (gLowBatteryWarningVisible == status)
+    return;
+  gLowBatteryWarningVisible = status;
+  drawLowBatteryWarningIconOnTextSprite(status);
+  drawLowBatteryWarningIconOnTft(status);
+}
+
+void overlayLowBatteryWarningOnTextSprite()
+{
+  if (!gLowBatteryWarningVisible)
+    return;
+  drawLowBatteryWarningIconOnTextSprite(true);
 }

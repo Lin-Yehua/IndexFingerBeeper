@@ -384,13 +384,9 @@ static String appendDeviceIdentityToApiUrl(const String &baseUrl)
 
   const String mac = normalizeMacAddressForApi(WiFi.macAddress());
   String uuid;
-  if (!deviceUuidRead(uuid) || !uuid.length())
+  if (!deviceUuidRead(uuid))
   {
-    String uuidErr;
-    if (!deviceUuidEnsureFromRtc(uuid, uuidErr))
-    {
-      uuid = "";
-    }
+    uuid = "";
   }
   uuid.trim();
   uuid.toUpperCase();
@@ -883,7 +879,7 @@ static bool syncDs1302FromStaNtp(String &detailOut)
   }
   String uuid;
   String uuidError;
-  if (!deviceUuidEnsureFromDateTime(synced, uuid, uuidError))
+  if (!deviceUuidEnsureFromNtpDateTime(synced, uuid, uuidError))
   {
     detailOut = "uuid save failed";
     if (uuidError.length())
