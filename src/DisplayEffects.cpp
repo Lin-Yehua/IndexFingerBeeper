@@ -11,6 +11,14 @@
 
 namespace
 {
+bool gLowBatteryWarningVisible = false;
+static constexpr int kTextSpriteScreenY = 100;
+static constexpr int kLowBatteryIconX = 8;
+static constexpr int kLowBatteryIconScreenY = 105;
+static constexpr int kLowBatteryIconY = kLowBatteryIconScreenY - kTextSpriteScreenY;
+static constexpr int kLowBatteryIconW = 15;
+static constexpr int kLowBatteryIconH = 6;
+
 uint8_t scaledBacklightDuty(uint8_t rawDuty)
 {
   float level = gBacklightLevel;
@@ -26,6 +34,28 @@ uint8_t scaledBacklightDuty(uint8_t rawDuty)
   if (duty > 255)
     return 255;
   return static_cast<uint8_t>(duty);
+}
+
+void drawLowBatteryWarningIconOnTextSprite(bool status)
+{
+  Text.fillRect(kLowBatteryIconX, kLowBatteryIconY, kLowBatteryIconW, kLowBatteryIconH, TFT_BLACK);
+  if (status)
+  {
+    Text.drawRect(kLowBatteryIconX, kLowBatteryIconY, 12, 6, TFT_YELLOW);
+    Text.fillRect(kLowBatteryIconX + 12, kLowBatteryIconY + 2, 2, 2, TFT_YELLOW);
+    Text.fillRect(kLowBatteryIconX + 1, kLowBatteryIconY + 1, 3, 4, TFT_RED);
+  }
+}
+
+void drawLowBatteryWarningIconOnTft(bool status)
+{
+  tft.fillRect(kLowBatteryIconX, kLowBatteryIconScreenY, kLowBatteryIconW, kLowBatteryIconH, TFT_BLACK);
+  if (status)
+  {
+    tft.drawRect(kLowBatteryIconX, kLowBatteryIconScreenY, 12, 6, TFT_YELLOW);
+    tft.fillRect(kLowBatteryIconX + 12, kLowBatteryIconScreenY + 2, 2, 2, TFT_YELLOW);
+    tft.fillRect(kLowBatteryIconX + 1, kLowBatteryIconScreenY + 1, 3, 4, TFT_RED);
+  }
 }
 
 uint32_t displayIntervalDelayMs()
@@ -161,6 +191,7 @@ void showGlitchEffectUTF8(const char *text)
   {
     Text.fillRect(0, 0, kSpriteW, kSpriteH, TFT_BLACK);
     Text.pushImage(kLogoX, kLogoY, kLogoW, kLogoH, (uint16_t *)Index_B);
+    overlayLowBatteryWarningOnTextSprite();
     Text.pushSprite(0, kSpriteScreenY);
     return;
   }
@@ -560,6 +591,7 @@ void showGlitchEffectUTF8(const char *text)
     }
     Text.setTextDatum(MC_DATUM);
 
+    overlayLowBatteryWarningOnTextSprite();
     Text.pushSprite(0, kSpriteScreenY + dirtyY0, 0, dirtyY0, kSpriteW, dirtyY1 - dirtyY0);
 
     prevCurrentLineCount = lineCount;
@@ -752,4 +784,20 @@ void generateUniqueRandomNumbers(int low, int high, int count, int *result)
     result[i] = result[j];
     result[j] = tmp;
   }
+}
+
+void lowBatteryWarning(bool status)
+{
+  if (gLowBatteryWarningVisible == status)
+    return;
+  gLowBatteryWarningVisible = status;
+  drawLowBatteryWarningIconOnTextSprite(status);
+  drawLowBatteryWarningIconOnTft(status);
+}
+
+void overlayLowBatteryWarningOnTextSprite()
+{
+  if (!gLowBatteryWarningVisible)
+    return;
+  drawLowBatteryWarningIconOnTextSprite(true);
 }
