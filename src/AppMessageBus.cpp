@@ -6,7 +6,7 @@ AppMessageBus gAppMessageBus;
 
 bool AppMessageBus::begin(size_t depth)
 {
-  if (_queue)
+  if (ready())
   {
     return true;
   }
@@ -14,20 +14,35 @@ bool AppMessageBus::begin(size_t depth)
   {
     depth = kAppMessageDefaultQueueDepth;
   }
-  _queue = xQueueCreate(depth, sizeof(AppMessage));
-  if (!_queue)
+
+  for (size_t i = 0; i < kPriorityCount; ++i)
   {
-    Serial.println("[APPBUS] queue create failed");
-    return false;
+    _queues[i] = xQueueCreate(depth, sizeof(AppMessage));
+    if (!_queues[i])
+    {
+      Serial.printf("[APPBUS] queue create failed index=%u\n", static_cast<unsigned int>(i));
+      return false;
+    }
   }
-  Serial.printf("[APPBUS] ready depth=%u item=%u\n", static_cast<unsigned int>(depth),
-                static_cast<unsigned int>(sizeof(AppMessage)));
+
+  Serial.printf("[APPBUS] ready priorities=%u depth=%u item=%u\n", static_cast<unsigned int>(kPriorityCount),
+                static_cast<unsigned int>(depth), static_cast<unsigned int>(sizeof(AppMessage)));
   return true;
+}
+
+size_t AppMessageBus::priorityIndex(AppMsgPriority priority)
+{
+  const size_t raw = static_cast<size_t>(priority);
+  if (raw >= kPriorityCount)
+  {
+    return static_cast<size_t>(AppMsgPriority::Normal);
+  }
+  return raw;
 }
 
 bool AppMessageBus::publish(const AppMessage &msg, uint32_t timeoutMs)
 {
-  if (!_queue && !begin())
+  if (!ready() && !begin())
   {
     return false;
   }
@@ -40,31 +55,57 @@ bool AppMessageBus::publish(const AppMessage &msg, uint32_t timeoutMs)
   copy.text[kAppMessageTextMaxLen] = '\0';
 
   const TickType_t waitTicks = timeoutMs == 0 ? 0 : pdMS_TO_TICKS(timeoutMs);
-  return xQueueSend(_queue, &copy, waitTicks) == pdTRUE;
+  QueueHandle_t queue = _queues[priorityIndex(copy.priority)];
+  return queue && xQueueSend(queue, &copy, waitTicks) == pdTRUE;
 }
 
 bool AppMessageBus::poll(AppMessage &outMsg, uint32_t timeoutMs)
 {
-  if (!_queue)
+  if (!ready())
   {
     return false;
   }
   const TickType_t waitTicks = timeoutMs == 0 ? 0 : pdMS_TO_TICKS(timeoutMs);
-  return xQueueReceive(_queue, &outMsg, waitTicks) == pdTRUE;
+
+  for (int index = static_cast<int>(kPriorityCount) - 1; index >= 0; --index)
+  {
+    const TickType_t wait = (index == 0) ? waitTicks : 0;
+    QueueHandle_t queue = _queues[index];
+    if (queue && xQueueReceive(queue, &outMsg, wait) == pdTRUE)
+    {
+      return true;
+    }
+  }
+  return false;
 }
 
 size_t AppMessageBus::pending() const
 {
-  if (!_queue)
+  if (!ready())
   {
     return 0;
   }
-  return static_cast<size_t>(uxQueueMessagesWaiting(_queue));
+  size_t total = 0;
+  for (size_t i = 0; i < kPriorityCount; ++i)
+  {
+    if (_queues[i])
+    {
+      total += static_cast<size_t>(uxQueueMessagesWaiting(_queues[i]));
+    }
+  }
+  return total;
 }
 
 bool AppMessageBus::ready() const
 {
-  return _queue != nullptr;
+  for (size_t i = 0; i < kPriorityCount; ++i)
+  {
+    if (!_queues[i])
+    {
+      return false;
+    }
+  }
+  return true;
 }
 
 void appMessageCopyText(AppMessage &msg, const char *text)

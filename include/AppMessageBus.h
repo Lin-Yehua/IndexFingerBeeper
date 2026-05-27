@@ -98,7 +98,10 @@ public:
   bool ready() const;
 
 private:
-  QueueHandle_t _queue = nullptr;
+  static constexpr size_t kPriorityCount = 5;
+  QueueHandle_t _queues[kPriorityCount] = {};
+
+  static size_t priorityIndex(AppMsgPriority priority);
 };
 
 extern AppMessageBus gAppMessageBus;

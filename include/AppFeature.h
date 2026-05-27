@@ -11,10 +11,17 @@ enum AppFeatureId : uint16_t
   APP_FEATURE_MUSIC = 4,
 };
 
+enum AppFeatureCommand : uint16_t
+{
+  APP_FEATURE_COMMAND_NONE = 0,
+  APP_TEXT_PUSH_COMMAND_NEXT_MODE = 1,
+};
+
 struct AppContext
 {
   AppMessageBus *bus = nullptr;
   uint32_t nowMs = 0;
+  bool syntheticKeyPress = false;
 };
 
 class IAppFeature
