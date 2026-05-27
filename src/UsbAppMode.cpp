@@ -7,6 +7,9 @@
  */
 #include "UsbAppMode.h"
 #include "AppGlobals.h"
+#include "AppFeature.h"
+#include "AppMessageBus.h"
+#include "AppUi.h"
 #include "DeviceUuid.h"
 #include "DisplayEffects.h"
 #include "Ds1302Rtc.h"
