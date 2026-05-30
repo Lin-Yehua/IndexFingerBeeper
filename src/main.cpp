@@ -30,7 +30,7 @@ constexpr int kGpio2AdcMaxAbsDeviationMilliVolts = 90;
 constexpr uint16_t kGpio2AdcSampleCount = 40;
 constexpr uint16_t kGpio2AdcSampleIntervalMs = 20;
 
-constexpr uint16_t kDs1302DriftObserveSeconds = 40;
+constexpr uint16_t kDs1302DriftObserveSeconds = 10;
 constexpr int64_t kDs1302MaxAbsDriftMsPerDay = 45000;  // 45s/day
 
 TFT_eSPI tft = TFT_eSPI();
