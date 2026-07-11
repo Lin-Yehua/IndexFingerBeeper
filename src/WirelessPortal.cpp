@@ -36,6 +36,8 @@ constexpr uint32_t kWebTaskStack = 12288;
 constexpr size_t kTextMaxLen = 240;
 constexpr size_t kQueueDepth = 128;
 constexpr size_t kImageUploadByteLimit = 1024 * 1024;
+constexpr size_t kCsvUploadByteLimit = 4 * 1024 * 1024;
+constexpr char kCsvUploadTmpPath[] = "/data.upload.tmp";
 constexpr uint16_t kImageMaxWidth = 320;
 constexpr uint16_t kImageMaxHeight = 240;
 constexpr uint16_t kImageDefaultWidth = 320;
@@ -71,11 +73,59 @@ struct ImageUploadState
   char error[96] = {0};
 };
 
+struct CsvUploadState
+{
+  fs::File file;
+  size_t size = 0;
+  bool started = false;
+  bool failed = false;
+  bool completed = false;
+  bool lockHeld = false;
+  char error[96] = {0};
+};
+
+bool installCompletedTempFile(const char *path, const char *tmpPath)
+{
+  if (!path || !tmpPath || !FFat.exists(tmpPath))
+    return false;
+
+  const String backupPath = String(path) + ".bak";
+  bool originalMoved = false;
+  bool canInstall = true;
+  if (FFat.exists(path))
+  {
+    if (FFat.exists(backupPath.c_str()) && !FFat.remove(backupPath.c_str()))
+    {
+      canInstall = false;
+    }
+    else
+    {
+      originalMoved = FFat.rename(path, backupPath.c_str());
+      canInstall = originalMoved;
+    }
+  }
+
+  if (canInstall && FFat.rename(tmpPath, path))
+  {
+    if (FFat.exists(backupPath.c_str()))
+      (void)FFat.remove(backupPath.c_str());
+    return true;
+  }
+
+  if (originalMoved)
+  {
+    // Preserve both complete versions on failure: restore the old live path
+    // while leaving the new tmp file available for manual recovery.
+    (void)FFat.rename(backupPath.c_str(), path);
+  }
+  return false;
+}
+
 bool writeTextFileAtomically(const char *path, const char *tmpPath, const String &content)
 {
   if (!path || !tmpPath || !fatMounted)
     return false;
-  if (!fatFsTakeWriteMutex(2000))
+  if (!fatFsTakeWriteMutex(5000))
     return false;
 
   bool ok = false;
@@ -93,13 +143,9 @@ bool writeTextFileAtomically(const char *path, const char *tmpPath, const String
 
   if (written == content.length())
   {
-    if ((!FFat.exists(path) || FFat.remove(path)) && FFat.rename(tmpPath, path))
-    {
-      ok = true;
-    }
+    ok = installCompletedTempFile(path, tmpPath);
   }
-
-  if (!ok)
+  else
   {
     (void)FFat.remove(tmpPath);
   }
@@ -210,6 +256,7 @@ volatile bool gScheduleReloadRequested = false;
 bool gPortalStarted = false;
 PendingImageFrame gPendingImage;
 ImageUploadState gImageUpload;
+CsvUploadState gCsvUpload;
 portMUX_TYPE gFlagMux = portMUX_INITIALIZER_UNLOCKED;
 struct ImmediateMessageState
 {
@@ -1353,16 +1400,39 @@ bool takeScheduleReloadRequested()
   return value;
 }
 
-String readDataCsvText()
+void sendFatTextFileResponse(const char *path)
 {
+  if (!gWebServer)
+    return;
   if (!fatMounted)
-    return "";
-  fs::File f = FFat.open("/data.csv", FILE_READ);
+  {
+    gWebServer->send(503, "text/plain", "FAT not mounted");
+    return;
+  }
+  if (!fatFsTakeWriteMutex(5000))
+  {
+    gWebServer->send(503, "text/plain", "FAT busy");
+    return;
+  }
+
+  fs::File f = FFat.open(path, FILE_READ);
   if (!f)
-    return "";
-  String content = f.readString();
+  {
+    fatFsGiveWriteMutex();
+    gWebServer->send(404, "text/plain", "file not found");
+    return;
+  }
+
+  const size_t expected = f.size();
+  gWebServer->sendHeader("Cache-Control", "no-store");
+  const size_t sent = gWebServer->streamFile(f, "text/plain; charset=utf-8");
   f.close();
-  return content;
+  fatFsGiveWriteMutex();
+  if (sent != expected)
+  {
+    Serial.printf("[WEB] stream %s incomplete (%u/%u)\n", path, static_cast<unsigned int>(sent),
+                  static_cast<unsigned int>(expected));
+  }
 }
 
 bool saveDataCsvText(const String &content)
@@ -1375,16 +1445,139 @@ bool saveDataCsvText(const String &content)
   return true;
 }
 
-String readScheduleCsvText()
+void closeCsvUploadStorage(bool removeTemp)
 {
-  if (!fatMounted)
-    return "";
-  fs::File f = FFat.open("/schedule.csv", FILE_READ);
-  if (!f)
-    return "";
-  String content = f.readString();
-  f.close();
-  return content;
+  if (gCsvUpload.file)
+  {
+    gCsvUpload.file.close();
+  }
+  if (gCsvUpload.lockHeld)
+  {
+    if (removeTemp && fatMounted)
+      (void)FFat.remove(kCsvUploadTmpPath);
+    fatFsGiveWriteMutex();
+    gCsvUpload.lockHeld = false;
+  }
+}
+
+void resetCsvUploadState(bool removeTemp)
+{
+  closeCsvUploadStorage(removeTemp);
+  gCsvUpload.size = 0;
+  gCsvUpload.started = false;
+  gCsvUpload.failed = false;
+  gCsvUpload.completed = false;
+  gCsvUpload.error[0] = '\0';
+}
+
+void failCsvUpload(const char *message, bool removeTemp)
+{
+  gCsvUpload.failed = true;
+  copyStringToBuf(String(message ? message : "CSV upload failed"), gCsvUpload.error, sizeof(gCsvUpload.error));
+  closeCsvUploadStorage(removeTemp);
+}
+
+void handleCsvUpload()
+{
+  HTTPUpload &upload = gWebServer->upload();
+  if (upload.status == UPLOAD_FILE_START)
+  {
+    resetCsvUploadState(true);
+    gCsvUpload.started = true;
+    if (!fatMounted)
+    {
+      failCsvUpload("FAT not mounted", false);
+      return;
+    }
+    if (!fatFsTakeWriteMutex(5000))
+    {
+      failCsvUpload("FAT busy", false);
+      return;
+    }
+    gCsvUpload.lockHeld = true;
+    (void)FFat.remove(kCsvUploadTmpPath);
+    gCsvUpload.file = FFat.open(kCsvUploadTmpPath, "w");
+    if (!gCsvUpload.file)
+    {
+      failCsvUpload("open upload temp failed", true);
+    }
+    return;
+  }
+
+  if (!gCsvUpload.started || gCsvUpload.failed)
+    return;
+
+  if (upload.status == UPLOAD_FILE_WRITE)
+  {
+    if (upload.currentSize > kCsvUploadByteLimit - gCsvUpload.size)
+    {
+      failCsvUpload("data.csv exceeds 4MB", true);
+      return;
+    }
+    const size_t written = gCsvUpload.file.write(upload.buf, upload.currentSize);
+    if (written != upload.currentSize)
+    {
+      failCsvUpload("data.csv upload write failed", true);
+      return;
+    }
+    gCsvUpload.size += written;
+    return;
+  }
+
+  if (upload.status == UPLOAD_FILE_END)
+  {
+    gCsvUpload.file.flush();
+    gCsvUpload.file.close();
+    if (!installCompletedTempFile("/data.csv", kCsvUploadTmpPath))
+    {
+      // The completed tmp file is intentionally retained for recovery.
+      failCsvUpload("install uploaded data.csv failed", false);
+      return;
+    }
+    gCsvUpload.completed = true;
+    closeCsvUploadStorage(false);
+    return;
+  }
+
+  if (upload.status == UPLOAD_FILE_ABORTED)
+  {
+    failCsvUpload("data.csv upload aborted", true);
+  }
+}
+
+void handleCsvUploadFinalize()
+{
+  if (!gCsvUpload.started)
+  {
+    // Backward-compatible path for older clients posting a text form field.
+    String content = gWebServer->arg("content");
+    if (!content.length() && gWebServer->hasArg("plain"))
+      content = gWebServer->arg("plain");
+    if (!content.length())
+    {
+      gWebServer->send(400, "text/plain", "content is empty");
+      return;
+    }
+    if (!saveDataCsvText(content))
+    {
+      gWebServer->send(500, "text/plain", "save failed");
+      return;
+    }
+    gWebServer->send(200, "text/plain", "saved /data.csv, reload scheduled");
+    return;
+  }
+
+  const bool ok = gCsvUpload.completed && !gCsvUpload.failed;
+  const String error = gCsvUpload.error[0] ? String(gCsvUpload.error) : String("CSV upload failed");
+  if (ok)
+    setCsvReloadRequested();
+  resetCsvUploadState(false);
+  if (!ok)
+  {
+    gWebServer->send(500, "text/plain", error);
+    return;
+  }
+  gWebServer->send(200, "text/plain", "saved /data.csv, reload scheduled");
 }
 
 bool saveScheduleCsvText(const String &content)
@@ -2829,45 +3022,15 @@ void registerRoutes()
   gWebServer->on("/api/csv", HTTP_GET,
                  []()
                  {
-                   if (!fatMounted)
-                   {
-                     gWebServer->send(503, "text/plain", "FAT not mounted");
-                     return;
-                   }
-                   const String csvText = readDataCsvText();
-                   gWebServer->send(200, "text/plain", csvText);
+                   sendFatTextFileResponse("/data.csv");
                  });
 
-  gWebServer->on("/api/csv", HTTP_POST,
-                 []()
-                 {
-                   String content = gWebServer->arg("content");
-                   if (!content.length() && gWebServer->hasArg("plain"))
-                   {
-                     content = gWebServer->arg("plain");
-                   }
-                   if (!content.length())
-                   {
-                     gWebServer->send(400, "text/plain", "content is empty");
-                     return;
-                   }
-                   if (!saveDataCsvText(content))
-                   {
-                     gWebServer->send(500, "text/plain", "save failed");
-                     return;
-                   }
-                   gWebServer->send(200, "text/plain", "saved /data.csv, reload scheduled");
-                 });
+  gWebServer->on("/api/csv", HTTP_POST, handleCsvUploadFinalize, handleCsvUpload);
 
   gWebServer->on("/api/schedule", HTTP_GET,
                  []()
                  {
-                   if (!fatMounted)
-                   {
-                     gWebServer->send(503, "text/plain", "FAT not mounted");
-                     return;
-                   }
-                   gWebServer->send(200, "text/plain", readScheduleCsvText());
+                   sendFatTextFileResponse("/schedule.csv");
                  });
 
   gWebServer->on("/api/schedule", HTTP_POST,
@@ -3039,6 +3202,7 @@ bool wirelessPortalStart()
     gPendingImage.ready = false;
     xSemaphoreGive(gImageMutex);
   }
+  resetCsvUploadState(true);
 
   loadApCredentialsFromSettingIni();
   if (!gEnableAp && !gEnableEspNow)
@@ -3275,6 +3439,7 @@ void wirelessPortalStop()
     gPendingImage.ready = false;
     xSemaphoreGive(gImageMutex);
   }
+  resetCsvUploadState(true);
 
   portENTER_CRITICAL(&gFlagMux);
   gCsvReloadRequested = false;

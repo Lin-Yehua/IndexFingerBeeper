@@ -179,6 +179,20 @@
           <button id="btnScheduleRetry" class="ghost" type="button" hidden>重试保存</button>
         </div>
       </details>
+
+      <div id="scheduleTrashCard" class="sub-card schedule-trash-card">
+        <h3>日程垃圾桶</h3>
+        <p class="trash-help">仅列出已经过期的一次性日程；重复日程不会进入垃圾桶。修改日期、时间或重复规则后，可将日程恢复为有效状态。</p>
+        <div class="btn-row compact-row trash-toolbar">
+          <button id="btnScheduleTrashFoldAll" class="ghost" type="button">全部收起</button>
+          <button id="btnScheduleTrashExpandAll" class="ghost" type="button">全部展开</button>
+          <button id="btnScheduleTrashDeleteAll" class="danger" type="button">一键删除全部过期</button>
+        </div>
+        <p id="scheduleTrashCount" class="trash-count"></p>
+        <div id="scheduleTrashList" class="list"></div>
+        <div id="scheduleTrashPager" class="pager"></div>
+        <p id="scheduleTrashStatus" class="status"></p>
+      </div>
     </section>
 
     <section class="card">

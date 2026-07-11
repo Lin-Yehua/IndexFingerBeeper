@@ -20,6 +20,7 @@
 #include <WiFiClientSecure.h>
 #include <algorithm>
 #include <ctype.h>
+#include <esp_heap_caps.h>
 #include <esp_ota_ops.h>
 #include <limits>
 #include <time.h>
@@ -46,6 +47,21 @@ bool handleRtcMaintenanceWake();
 namespace
 {
 
+class ScopedFatFsLock
+{
+public:
+  explicit ScopedFatFsLock(uint32_t timeoutMs) : locked(fatFsTakeWriteMutex(timeoutMs)) {}
+  ~ScopedFatFsLock()
+  {
+    if (locked)
+      fatFsGiveWriteMutex();
+  }
+  explicit operator bool() const { return locked; }
+
+private:
+  bool locked;
+};
+
 constexpr uint8_t kBacklightDutyOff = 0;
 constexpr int kDefaultBacklightCloseTimeSec = 20;
 constexpr int kDefaultSleepTimeMin = 1;
@@ -61,7 +77,7 @@ constexpr size_t kSleepTextMaxLen = 240;
 constexpr size_t kSleepPortalQueueMax = 128;
 constexpr size_t kSleepStaQueueMax = 20;
 constexpr size_t kMaxReminderTimes = 128;
-constexpr size_t kScheduleInterruptQueueMax = 64;
+constexpr size_t kScheduleInterruptQueueMax = 128;
 constexpr char kSleepSnapshotPath[] = "/sleep_state.bin";
 constexpr char kSleepSnapshotTmpPath[] = "/sleep_state.tmp";
 constexpr char kUpdateDirPath[] = "/Update";
@@ -79,7 +95,7 @@ constexpr const char *kFatRecoveryNoticeLine3 = u8"尽管如此,我们还是建�
 constexpr const char *kFatRecoveryFailedLine = u8"我们遇到了不可逆转的熔毁，请联系部门主管";
 constexpr const char *kDefaultReminderMessage = u8"这个时候你似乎有什么事要干";
 constexpr uint32_t kSleepFileMagic = 0x53534E50UL; // "SSNP"
-constexpr uint16_t kSleepFileVersion = 1;
+constexpr uint16_t kSleepFileVersion = 2;
 constexpr uint32_t kSleepRtcCtxMagic = 0x54534654UL; // "TSFT"
 constexpr uint16_t kSleepRtcCtxVersion = 2;
 
@@ -106,6 +122,7 @@ struct SleepSnapshotHeader
   uint8_t firstFlag = 0;
   uint8_t staPhase = 0;
   int32_t csvCount = 0;
+  uint32_t csvOrderCount = 0;
   uint8_t staRetryCount = 0;
   uint8_t staQueueCount = 0;
   uint8_t regularQueueCount = 0;
@@ -151,11 +168,15 @@ struct ScheduleInterruptQueueItem
 
 struct DailyReminderSlot
 {
+  uint32_t fileOffset = 0;
+  uint32_t lineFingerprint = 0;
+  uint32_t sourceIndex = 0;
   uint8_t hour = 0;
   uint8_t minute = 0;
   uint8_t priority = 0;
   uint16_t number = 0;
-  uint16_t scheduleIndex = 0;
+  uint16_t intervalSec = 0;
+  uint16_t reminderTimes = 0;
   bool triggered = false;
 };
 
@@ -175,7 +196,7 @@ constexpr FatRecoveryTarget kFatRecoveryTargets[] = {
     {"sound", "/sound", "/Backup/sound", true},
 };
 
-ScheduleInterruptQueueItem gScheduleInterruptQueue[kScheduleInterruptQueueMax];
+ScheduleInterruptQueueItem *gScheduleInterruptQueue = nullptr;
 size_t gScheduleInterruptCount = 0;
 bool gScheduleInterruptActive = false;
 bool gScheduleInterruptKeyLatch = false;
@@ -185,7 +206,117 @@ DailyReminderSlot gTodayReminderSlots[kMaxReminderTimes];
 size_t gTodayReminderCount = 0;
 uint32_t gTodayReminderDateKey = 0;
 uint16_t gTodayReminderLastCheckedMinute = 0xFFFFU;
+size_t gTodayReminderEligibleCount = 0;
+bool gTodayReminderWindowTruncated = false;
+uint32_t gScheduleScanRetryAtMs = 0;
+uint32_t gScheduleEnqueueRetryAtMs = 0;
+bool gScheduleOffsetMismatchDetected = false;
+bool gCsvReloadRetryPending = false;
+uint32_t gCsvReloadRetryAtMs = 0;
 char gPostRecoveryManualMessage[kSleepTextMaxLen + 1] = {0};
+int *gCsvPlaybackOrder = nullptr;
+size_t gCsvPlaybackOrderCapacity = 0;
+size_t gCsvPlaybackOrderCount = 0;
+
+bool ensureCsvPlaybackOrderCapacity(size_t required)
+{
+  if (required == 0)
+    return true;
+  if (gCsvPlaybackOrder && required <= gCsvPlaybackOrderCapacity)
+    return true;
+  if (required > static_cast<size_t>(std::numeric_limits<int>::max()) ||
+      required > std::numeric_limits<size_t>::max() / sizeof(int))
+  {
+    Serial.printf("[CSV] playback order too large: %u\n", static_cast<unsigned int>(required));
+    return false;
+  }
+
+  const size_t bytes = required * sizeof(int);
+  void *memory = heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  bool inPsram = memory != nullptr;
+  if (!memory)
+  {
+    memory = heap_caps_malloc(bytes, MALLOC_CAP_8BIT);
+  }
+  if (!memory)
+  {
+    Serial.printf("[CSV] playback order allocation failed rows=%u bytes=%u\n",
+                  static_cast<unsigned int>(required), static_cast<unsigned int>(bytes));
+    return false;
+  }
+
+  heap_caps_free(gCsvPlaybackOrder);
+  gCsvPlaybackOrder = static_cast<int *>(memory);
+  gCsvPlaybackOrderCapacity = required;
+  gCsvPlaybackOrderCount = 0;
+  Serial.printf("[CSV] playback order allocated rows=%u bytes=%u memory=%s\n",
+                static_cast<unsigned int>(required), static_cast<unsigned int>(bytes),
+                inPsram ? "PSRAM" : "internal");
+  return true;
+}
+
+void resetCsvPlaybackCycle()
+{
+  csvCount = 0;
+  gCsvPlaybackOrderCount = 0;
+  RUNSTATE = 0;
+}
+
+bool beginCsvPlaybackCycle(int totalRows)
+{
+  if (totalRows <= 0 || !ensureCsvPlaybackOrderCapacity(static_cast<size_t>(totalRows)))
+  {
+    resetCsvPlaybackCycle();
+    return false;
+  }
+
+  // Build a complete permutation. Only row numbers live in memory; message
+  // text is still opened and read from data.csv when its turn is consumed.
+  generateUniqueRandomNumbers(0, totalRows - 1, totalRows, gCsvPlaybackOrder);
+  gCsvPlaybackOrderCount = static_cast<size_t>(totalRows);
+  csvCount = 0;
+  RUNSTATE = 1;
+  return true;
+}
+
+bool ensureCsvPlaybackCycle(int totalRows)
+{
+  if (totalRows <= 0)
+    return false;
+  if (RUNSTATE == 1 && gCsvPlaybackOrder &&
+      gCsvPlaybackOrderCount == static_cast<size_t>(totalRows) && csvCount >= 0 &&
+      static_cast<size_t>(csvCount) <= gCsvPlaybackOrderCount)
+  {
+    return true;
+  }
+  return beginCsvPlaybackCycle(totalRows);
+}
+
+bool loadNextCsvPlaybackMessage(int totalRows, String &outMessage, int &outPhysicalRow)
+{
+  outMessage = "";
+  outPhysicalRow = 0;
+  if (!ensureCsvPlaybackCycle(totalRows))
+    return false;
+  if (static_cast<size_t>(csvCount) >= gCsvPlaybackOrderCount)
+  {
+    if (!beginCsvPlaybackCycle(totalRows))
+      return false;
+  }
+
+  const int rowIndex = gCsvPlaybackOrder[csvCount];
+  outPhysicalRow = rowIndex + 1;
+  const char *csvMessage = csv.getTextByIndex(rowIndex);
+  if (!csvMessage)
+  {
+    // Do not consume the row on a transient FAT/open/seek/read failure. The
+    // next request retries the same row, preserving once-per-cycle semantics.
+    return false;
+  }
+  outMessage = csvMessage;
+  ++csvCount;
+  return true;
+}
 
 void sanitizeMessageForSnapshot(const String &in, char out[kSleepTextMaxLen + 1])
 {
@@ -286,7 +417,7 @@ bool writeTextFileAtomicallyToFat(const char *path, const char *tmpPath, const S
 {
   if (!path || !tmpPath || !fatMounted)
     return false;
-  if (!fatFsTakeWriteMutex(2000))
+  if (!fatFsTakeWriteMutex(5000))
     return false;
 
   bool ok = false;
@@ -304,13 +435,34 @@ bool writeTextFileAtomicallyToFat(const char *path, const char *tmpPath, const S
 
   if (written == content.length())
   {
-    if ((!FFat.exists(path) || FFat.remove(path)) && FFat.rename(tmpPath, path))
+    const String backupPath = String(path) + ".bak";
+    bool originalMoved = false;
+    bool canInstall = true;
+    if (FFat.exists(path))
+    {
+      if (FFat.exists(backupPath.c_str()) && !FFat.remove(backupPath.c_str()))
+      {
+        canInstall = false;
+      }
+      else
+      {
+        originalMoved = FFat.rename(path, backupPath.c_str());
+        canInstall = originalMoved;
+      }
+    }
+
+    if (canInstall && FFat.rename(tmpPath, path))
     {
       ok = true;
+      if (FFat.exists(backupPath.c_str()))
+        (void)FFat.remove(backupPath.c_str());
+    }
+    else if (originalMoved)
+    {
+      (void)FFat.rename(backupPath.c_str(), path);
     }
   }
-
-  if (!ok)
+  else
   {
     (void)FFat.remove(tmpPath);
   }
@@ -1061,6 +1213,32 @@ bool applySingleFatBinUpdate(const String &path, int command, const char *label)
   return true;
 }
 
+bool ensureScheduleInterruptQueueAllocated()
+{
+  if (gScheduleInterruptQueue)
+    return true;
+
+  const size_t bytes = sizeof(ScheduleInterruptQueueItem) * kScheduleInterruptQueueMax;
+  void *memory = heap_caps_calloc(kScheduleInterruptQueueMax, sizeof(ScheduleInterruptQueueItem),
+                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  bool inPsram = (memory != nullptr);
+  if (!memory)
+  {
+    memory = calloc(kScheduleInterruptQueueMax, sizeof(ScheduleInterruptQueueItem));
+  }
+  if (!memory)
+  {
+    Serial.printf("[SCHEDULE] interrupt queue allocation failed (%u bytes)\n", static_cast<unsigned int>(bytes));
+    return false;
+  }
+
+  gScheduleInterruptQueue = static_cast<ScheduleInterruptQueueItem *>(memory);
+  Serial.printf("[SCHEDULE] interrupt queue capacity=%u allocated in %s (%u bytes)\n",
+                static_cast<unsigned int>(kScheduleInterruptQueueMax), inPsram ? "PSRAM" : "heap",
+                static_cast<unsigned int>(bytes));
+  return true;
+}
+
 void clearScheduleInterruptQueue()
 {
   gScheduleInterruptCount = 0;
@@ -1068,6 +1246,8 @@ void clearScheduleInterruptQueue()
   gScheduleInterruptKeyLatch = false;
   gScheduleInterruptPendingStart = false;
   gScheduleInterruptLastPlayMs = 0;
+  if (!gScheduleInterruptQueue)
+    return;
   for (size_t i = 0; i < kScheduleInterruptQueueMax; ++i)
   {
     gScheduleInterruptQueue[i].text[0] = '\0';
@@ -1083,6 +1263,8 @@ bool appendScheduleInterruptQueueItem(const String &rawText, uint16_t intervalSe
 {
   String normalized;
   if (!normalizeScheduleQueueMessage(rawText, normalized))
+    return false;
+  if (!ensureScheduleInterruptQueueAllocated())
     return false;
   if (gScheduleInterruptCount >= kScheduleInterruptQueueMax)
     return false;
@@ -1108,11 +1290,12 @@ bool insertHostMessageIntoScheduleInterruptQueueFront(const String &rawText)
   String normalized;
   if (!normalizeScheduleQueueMessage(rawText, normalized))
     return false;
+  if (!ensureScheduleInterruptQueueAllocated())
+    return false;
   if (gScheduleInterruptCount >= kScheduleInterruptQueueMax)
   {
-    if (gScheduleInterruptCount == 0)
-      return false;
-    --gScheduleInterruptCount; // Drop tail.
+    // Never sacrifice a scheduled reminder to make room for a host message.
+    return false;
   }
 
   size_t insertPos = gScheduleInterruptActive ? 1U : 0U;
@@ -2832,7 +3015,9 @@ struct ReminderSchedule
 {
   struct Entry
   {
-    uint16_t sourceIndex = 0;
+    uint32_t fileOffset = 0;
+    uint32_t lineFingerprint = 0;
+    uint32_t sourceIndex = 0;
     uint16_t number = 0;
     uint16_t year = 2000;
     uint8_t month = 1;
@@ -2847,7 +3032,6 @@ struct ReminderSchedule
     bool repeatMonth = false;
     bool repeatWeek = false;
     bool repeatYear = false;
-    char message[kSleepTextMaxLen + 1] = {0};
   };
 
   Entry entries[kMaxReminderTimes];
@@ -2863,6 +3047,21 @@ ReminderSchedule &scheduleScratchBuffer()
 uint8_t reminderEntryPriority(const ReminderSchedule::Entry &entry)
 {
   return reminderRepeatPriority(entry.repeatDay, entry.repeatMonth, entry.repeatWeek, entry.repeatYear);
+}
+
+bool reminderEntryComesBefore(const ReminderSchedule::Entry &a, const ReminderSchedule::Entry &b)
+{
+  const uint16_t aMinute = static_cast<uint16_t>(a.hour) * 60U + static_cast<uint16_t>(a.minute);
+  const uint16_t bMinute = static_cast<uint16_t>(b.hour) * 60U + static_cast<uint16_t>(b.minute);
+  if (aMinute != bMinute)
+    return aMinute < bMinute;
+  const uint8_t aPriority = reminderEntryPriority(a);
+  const uint8_t bPriority = reminderEntryPriority(b);
+  if (aPriority != bPriority)
+    return aPriority < bPriority;
+  if (a.number != b.number)
+    return a.number < b.number;
+  return a.sourceIndex < b.sourceIndex;
 }
 
 bool isLeapYearLocal(uint16_t year)
@@ -3001,6 +3200,17 @@ bool parseStrictIntWithTail(String value, int &out, String *outTail)
   return true;
 }
 
+uint32_t scheduleLineFingerprint(const String &line)
+{
+  uint32_t hash = 2166136261UL; // FNV-1a, sufficient for stale-offset detection.
+  for (size_t i = 0; i < line.length(); ++i)
+  {
+    hash ^= static_cast<uint8_t>(line[i]);
+    hash *= 16777619UL;
+  }
+  return hash;
+}
+
 bool parseScheduleCsvLine(const String &lineRaw, ReminderSchedule::Entry &outEntry, String *outMessage)
 {
   String line = lineRaw;
@@ -3021,8 +3231,12 @@ bool parseScheduleCsvLine(const String &lineRaw, ReminderSchedule::Entry &outEnt
   {
     if (colCount >= 13)
     {
-      cols[colCount++] = line.substring(start);
-      cols[colCount - 1].trim();
+      if (outMessage)
+      {
+        cols[colCount] = line.substring(start);
+        cols[colCount].trim();
+      }
+      ++colCount;
       break;
     }
     const int comma = line.indexOf(',', start);
@@ -3080,7 +3294,8 @@ bool parseScheduleCsvLine(const String &lineRaw, ReminderSchedule::Entry &outEnt
       return false;
     if (!parseStrictInt(cols[11], intervalSec) || intervalSec < 0 || intervalSec > 65535)
       return false;
-    if (!parseStrictIntWithTail(cols[12], reminderTimes, &messageTailFromTimes) || reminderTimes < 0 ||
+    if (!parseStrictIntWithTail(cols[12], reminderTimes, outMessage ? &messageTailFromTimes : nullptr) ||
+        reminderTimes < 0 ||
         reminderTimes > 65535)
     {
       return false;
@@ -3132,30 +3347,29 @@ bool parseScheduleCsvLine(const String &lineRaw, ReminderSchedule::Entry &outEnt
   outEntry.intervalSec = static_cast<uint16_t>(intervalSec);
   outEntry.reminderTimes = static_cast<uint16_t>(reminderTimes);
 
-  String messageField;
-  if (isV2)
-  {
-    if (colCount > 13)
-    {
-      messageField = cols[13];
-    }
-    else if (messageTailFromTimes.length())
-    {
-      messageField = messageTailFromTimes;
-    }
-  }
-  else if (colCount > 11)
-  {
-    messageField = cols[11];
-  }
-  String decoded = decodeScheduleMessageValue(messageField);
-  if (!decoded.length())
-  {
-    decoded = kDefaultReminderMessage;
-  }
-  sanitizeMessageForSnapshot(decoded, outEntry.message);
   if (outMessage)
   {
+    String messageField;
+    if (isV2)
+    {
+      if (colCount > 13)
+      {
+        messageField = cols[13];
+      }
+      else if (messageTailFromTimes.length())
+      {
+        messageField = messageTailFromTimes;
+      }
+    }
+    else if (colCount > 11)
+    {
+      messageField = cols[11];
+    }
+    String decoded = decodeScheduleMessageValue(messageField);
+    if (!decoded.length())
+    {
+      decoded = kDefaultReminderMessage;
+    }
     *outMessage = decoded;
   }
   return true;
@@ -3186,39 +3400,6 @@ bool openScheduleCsvRead(fs::File &outFile, bool &outMountedTemp)
   return true;
 }
 
-bool loadReminderSchedule(ReminderSchedule &outSchedule)
-{
-  outSchedule.count = 0;
-
-  fs::File f;
-  bool mountedTemp = false;
-  if (!openScheduleCsvRead(f, mountedTemp))
-    return false;
-
-  while (f.available() && outSchedule.count < kMaxReminderTimes)
-  {
-    const String line = f.readStringUntil('\n');
-    ReminderSchedule::Entry entry;
-    if (parseScheduleCsvLine(line, entry, nullptr))
-    {
-      entry.sourceIndex = static_cast<uint16_t>(outSchedule.count);
-      if (entry.number == 0)
-      {
-        entry.number = entry.sourceIndex;
-      }
-      outSchedule.entries[outSchedule.count++] = entry;
-    }
-  }
-  f.close();
-
-  if (mountedTemp)
-  {
-    unmountFat();
-  }
-
-  return outSchedule.count > 0;
-}
-
 uint32_t dateKeyFromDateTime(const Ds1302DateTime &dt)
 {
   return static_cast<uint32_t>(dt.year) * 10000U + static_cast<uint32_t>(dt.month) * 100U +
@@ -3243,106 +3424,156 @@ bool reminderEntryMatchesToday(const ReminderSchedule::Entry &entry, const Ds130
   return false;
 }
 
-bool loadReminderMessageBySourceIndex(uint16_t sourceIndex, String &outMessage)
+bool loadTodayReminderSchedule(ReminderSchedule &outSchedule, const Ds1302DateTime &nowDt, bool skipPastToday)
 {
-  outMessage = "";
+  outSchedule.count = 0;
+  gTodayReminderEligibleCount = 0;
+  gTodayReminderWindowTruncated = false;
+
+  ScopedFatFsLock fsLock(5000);
+  if (!fsLock)
+    return false;
+
   fs::File f;
   bool mountedTemp = false;
   if (!openScheduleCsvRead(f, mountedTemp))
     return false;
 
-  uint16_t currentIndex = 0;
+  const uint8_t todayWeek = weekdayMondayOneFromCivil(nowDt.year, nowDt.month, nowDt.day);
+  const int64_t todayDays = daysFromCivil(static_cast<int>(nowDt.year), nowDt.month, nowDt.day);
+  const uint16_t nowMinute = static_cast<uint16_t>(nowDt.hour) * 60U + static_cast<uint16_t>(nowDt.minute);
+  uint32_t sourceIndex = 0;
+  size_t validCount = 0;
+  size_t expiredOneTimeCount = 0;
+  size_t pastTodayCount = 0;
+
   while (f.available())
   {
+    const uint32_t fileOffset = static_cast<uint32_t>(f.position());
     const String line = f.readStringUntil('\n');
     ReminderSchedule::Entry entry;
-    String message;
-    if (!parseScheduleCsvLine(line, entry, &message))
+    if (!parseScheduleCsvLine(line, entry, nullptr))
       continue;
 
-    if (currentIndex == sourceIndex)
+    entry.fileOffset = fileOffset;
+    entry.lineFingerprint = scheduleLineFingerprint(line);
+    entry.sourceIndex = sourceIndex++;
+    ++validCount;
+    if (entry.number == 0 && entry.sourceIndex <= static_cast<uint32_t>(std::numeric_limits<uint16_t>::max()))
     {
-      f.close();
-      if (mountedTemp)
-      {
-        unmountFat();
-      }
-      message.trim();
-      if (!message.length())
-      {
-        message = kDefaultReminderMessage;
-      }
-      outMessage = message;
-      return true;
+      entry.number = static_cast<uint16_t>(entry.sourceIndex);
     }
-    ++currentIndex;
-  }
 
+    const bool anyRepeat = entry.repeatDay || entry.repeatMonth || entry.repeatWeek || entry.repeatYear;
+    if (!anyRepeat)
+    {
+      const int64_t entryDays = daysFromCivil(static_cast<int>(entry.year), entry.month, entry.day);
+      if (entryDays < todayDays)
+      {
+        ++expiredOneTimeCount;
+        continue;
+      }
+    }
+    if (!reminderEntryMatchesToday(entry, nowDt, todayWeek))
+      continue;
+
+    const uint16_t entryMinute = static_cast<uint16_t>(entry.hour) * 60U + static_cast<uint16_t>(entry.minute);
+    if (skipPastToday && entryMinute < nowMinute)
+    {
+      ++pastTodayCount;
+      continue;
+    }
+
+    ++gTodayReminderEligibleCount;
+    if (outSchedule.count < kMaxReminderTimes)
+    {
+      outSchedule.entries[outSchedule.count++] = entry;
+      continue;
+    }
+
+    // Keep the earliest active window while still scanning the complete file.
+    // Once this window has fired, the next minute refresh can load the following window.
+    size_t worstIndex = 0;
+    for (size_t i = 1; i < outSchedule.count; ++i)
+    {
+      if (reminderEntryComesBefore(outSchedule.entries[worstIndex], outSchedule.entries[i]))
+      {
+        worstIndex = i;
+      }
+    }
+    if (reminderEntryComesBefore(entry, outSchedule.entries[worstIndex]))
+    {
+      outSchedule.entries[worstIndex] = entry;
+    }
+  }
   f.close();
   if (mountedTemp)
   {
     unmountFat();
   }
-  return false;
+
+  gTodayReminderWindowTruncated = gTodayReminderEligibleCount > outSchedule.count;
+  Serial.printf("[SCHEDULE] CSV scan valid=%u expired-once=%u past-today=%u eligible=%u retained=%u%s\n",
+                static_cast<unsigned int>(validCount), static_cast<unsigned int>(expiredOneTimeCount),
+                static_cast<unsigned int>(pastTodayCount), static_cast<unsigned int>(gTodayReminderEligibleCount),
+                static_cast<unsigned int>(outSchedule.count), gTodayReminderWindowTruncated ? " (windowed)" : "");
+  return true;
 }
 
-bool loadReminderMessageByDateMinute(const Ds1302DateTime &today, uint8_t hour, uint8_t minute, String &outMessage)
+bool readScheduleFingerprintAtOffset(fs::File &file, uint32_t fileOffset, uint32_t &outFingerprint)
+{
+  outFingerprint = 0;
+  if (!file || !file.seek(fileOffset, fs::SeekSet))
+    return false;
+  const String line = file.readStringUntil('\n');
+  ReminderSchedule::Entry entry;
+  if (!parseScheduleCsvLine(line, entry, nullptr))
+    return false;
+  outFingerprint = scheduleLineFingerprint(line);
+  return true;
+}
+
+bool readScheduleMessageAtOffset(fs::File &file, uint32_t fileOffset, String &outMessage)
 {
   outMessage = "";
-  fs::File f;
-  bool mountedTemp = false;
-  if (!openScheduleCsvRead(f, mountedTemp))
+  if (!file || !file.seek(fileOffset, fs::SeekSet))
     return false;
-
-  const uint8_t todayWeek = weekdayMondayOneFromCivil(today.year, today.month, today.day);
-  while (f.available())
+  const String line = file.readStringUntil('\n');
+  ReminderSchedule::Entry entry;
+  if (!parseScheduleCsvLine(line, entry, &outMessage))
   {
-    const String line = f.readStringUntil('\n');
-    ReminderSchedule::Entry entry;
-    String message;
-    if (!parseScheduleCsvLine(line, entry, &message))
-      continue;
-    if (!reminderEntryMatchesToday(entry, today, todayWeek))
-      continue;
-    if (entry.hour != hour || entry.minute != minute)
-      continue;
-
-    f.close();
-    if (mountedTemp)
-    {
-      unmountFat();
-    }
-    message.trim();
-    if (!message.length())
-    {
-      message = kDefaultReminderMessage;
-    }
-    outMessage = message;
-    return true;
+    outMessage = "";
+    return false;
   }
-
-  f.close();
-  if (mountedTemp)
-  {
-    unmountFat();
-  }
-  return false;
+  outMessage.trim();
+  if (!outMessage.length())
+    outMessage = kDefaultReminderMessage;
+  return true;
 }
 
-void refreshTodayReminderSlots(const Ds1302DateTime &nowDt, bool markPastTriggered)
+bool refreshTodayReminderSlots(const Ds1302DateTime &nowDt, bool markPastTriggered)
 {
   ReminderSchedule &schedule = scheduleScratchBuffer();
-  const bool loaded = loadReminderSchedule(schedule);
+  const bool scanOk = loadTodayReminderSchedule(schedule, nowDt, markPastTriggered);
   gTodayReminderCount = 0;
-  gTodayReminderDateKey = dateKeyFromDateTime(nowDt);
   gTodayReminderLastCheckedMinute = 0xFFFFU;
 
-  if (!loaded)
+  if (!scanOk)
+  {
+    gTodayReminderDateKey = 0;
+    gScheduleScanRetryAtMs = millis() + 2000U;
+    Serial.println("[SCHEDULE] today slot refresh failed; retry scheduled");
+    return false;
+  }
+
+  gTodayReminderDateKey = dateKeyFromDateTime(nowDt);
+  gScheduleScanRetryAtMs = 0;
+  if (schedule.count == 0)
   {
     Serial.printf("[SCHEDULE] today slot refresh: no schedule (%04u-%02u-%02u)\n",
                   static_cast<unsigned int>(nowDt.year), static_cast<unsigned int>(nowDt.month),
                   static_cast<unsigned int>(nowDt.day));
-    return;
+    return true;
   }
 
   const uint8_t todayWeek = weekdayMondayOneFromCivil(nowDt.year, nowDt.month, nowDt.day);
@@ -3356,7 +3587,11 @@ void refreshTodayReminderSlots(const Ds1302DateTime &nowDt, bool markPastTrigger
     slot.minute = entry.minute;
     slot.priority = reminderEntryPriority(entry);
     slot.number = entry.number;
-    slot.scheduleIndex = static_cast<uint16_t>(i);
+    slot.fileOffset = entry.fileOffset;
+    slot.lineFingerprint = entry.lineFingerprint;
+    slot.sourceIndex = entry.sourceIndex;
+    slot.intervalSec = entry.intervalSec;
+    slot.reminderTimes = entry.reminderTimes;
     slot.triggered = false;
     ++gTodayReminderCount;
   }
@@ -3372,7 +3607,7 @@ void refreshTodayReminderSlots(const Ds1302DateTime &nowDt, bool markPastTrigger
                 return a.priority < b.priority;
               if (a.number != b.number)
                 return a.number < b.number;
-              return a.scheduleIndex < b.scheduleIndex;
+              return a.sourceIndex < b.sourceIndex;
             });
 
   if (markPastTriggered)
@@ -3392,6 +3627,7 @@ void refreshTodayReminderSlots(const Ds1302DateTime &nowDt, bool markPastTrigger
   Serial.printf("[SCHEDULE] today slot refresh count=%u (%04u-%02u-%02u)\n",
                 static_cast<unsigned int>(gTodayReminderCount), static_cast<unsigned int>(nowDt.year),
                 static_cast<unsigned int>(nowDt.month), static_cast<unsigned int>(nowDt.day));
+  return true;
 }
 
 bool refreshTodayReminderSlotsFromRtc(bool forceReload, bool markPastTriggered)
@@ -3406,47 +3642,119 @@ bool refreshTodayReminderSlotsFromRtc(bool forceReload, bool markPastTriggered)
   {
     return true;
   }
-  refreshTodayReminderSlots(nowDt, markPastTriggered);
-  return true;
+  return refreshTodayReminderSlots(nowDt, markPastTriggered);
 }
 
-void replaceScheduleInterruptQueueBySlots(const uint16_t *slotIndices, size_t slotCount)
+size_t appendScheduleInterruptQueueBySlots(const uint16_t *slotIndices, size_t slotCount)
 {
-  clearScheduleInterruptQueue();
-  if (!slotIndices || slotCount == 0)
-    return;
+  gScheduleOffsetMismatchDetected = false;
+  if (!slotIndices || slotCount == 0 || gScheduleInterruptCount >= kScheduleInterruptQueueMax)
+    return 0;
 
-  ReminderSchedule &schedule = scheduleScratchBuffer();
-  for (size_t i = 0; i < slotCount && gScheduleInterruptCount < kScheduleInterruptQueueMax; ++i)
+  const size_t countBefore = gScheduleInterruptCount;
+  ScopedFatFsLock fsLock(5000);
+  if (!fsLock)
+    return 0;
+  fs::File file;
+  bool mountedTemp = false;
+  if (!openScheduleCsvRead(file, mountedTemp))
+    return 0;
+
+  const size_t appendCapacity = kScheduleInterruptQueueMax - gScheduleInterruptCount;
+  const size_t attemptCount = std::min(slotCount, appendCapacity);
+  // Validate every offset that will be appended before mutating the queue. A
+  // web save may atomically replace schedule.csv between the daily scan and
+  // the due minute; the line fingerprint prevents an old offset from silently
+  // selecting another row in the new file.
+  for (size_t i = 0; i < attemptCount; ++i)
   {
     const uint16_t slotIdx = slotIndices[i];
     if (slotIdx >= gTodayReminderCount)
-      continue;
+    {
+      gScheduleOffsetMismatchDetected = true;
+      break;
+    }
+    uint32_t actualFingerprint = 0;
     const DailyReminderSlot &slot = gTodayReminderSlots[slotIdx];
-    if (slot.scheduleIndex >= schedule.count)
-      continue;
-    const ReminderSchedule::Entry &entry = schedule.entries[slot.scheduleIndex];
-    const String text = String(entry.message);
-    (void)appendScheduleInterruptQueueItem(text, entry.intervalSec, entry.reminderTimes, false);
+    if (!readScheduleFingerprintAtOffset(file, slot.fileOffset, actualFingerprint) ||
+        actualFingerprint != slot.lineFingerprint)
+    {
+      gScheduleOffsetMismatchDetected = true;
+      break;
+    }
   }
 
-  if (gScheduleInterruptCount > 0)
+  if (!gScheduleOffsetMismatchDetected)
+  {
+    for (size_t i = 0; i < attemptCount; ++i)
+    {
+      const uint16_t slotIdx = slotIndices[i];
+      const DailyReminderSlot &slot = gTodayReminderSlots[slotIdx];
+      String text;
+      if (!readScheduleMessageAtOffset(file, slot.fileOffset, text))
+      {
+        Serial.printf("[SCHEDULE] message read failed offset=%u source=%u\n",
+                      static_cast<unsigned int>(slot.fileOffset), static_cast<unsigned int>(slot.sourceIndex));
+        break;
+      }
+      if (!appendScheduleInterruptQueueItem(text, slot.intervalSec, slot.reminderTimes, false))
+        break;
+    }
+  }
+
+  file.close();
+  if (mountedTemp)
+    unmountFat();
+
+  if (gScheduleOffsetMismatchDetected)
+  {
+    Serial.println("[SCHEDULE] stale row offsets detected; refresh required");
+    return 0;
+  }
+
+  if (gScheduleInterruptCount > countBefore && !gScheduleInterruptActive)
   {
     gScheduleInterruptPendingStart = true;
   }
+  return gScheduleInterruptCount - countBefore;
+}
+
+size_t replaceScheduleInterruptQueueBySlots(const uint16_t *slotIndices, size_t slotCount)
+{
+  clearScheduleInterruptQueue();
+  return appendScheduleInterruptQueueBySlots(slotIndices, slotCount);
 }
 
 void serviceScheduleInterruptByRtcMinute()
 {
-  const bool scheduleChanged = wirelessPortalConsumeScheduleReloadRequest();
   Ds1302DateTime nowDt;
   if (!rtc.readDateTime(nowDt) || !ds1302IsValidDateTime(nowDt))
   {
     return;
   }
+  // Consume only after RTC succeeds; otherwise a transient RTC read failure
+  // would discard the sole notification that stored row offsets are stale.
+  const bool scheduleChanged = wirelessPortalConsumeScheduleReloadRequest();
 
   const uint32_t dateKey = dateKeyFromDateTime(nowDt);
-  if (scheduleChanged || gTodayReminderDateKey != dateKey)
+  const uint16_t nowMinuteOfDay = static_cast<uint16_t>(nowDt.hour) * 60U + static_cast<uint16_t>(nowDt.minute);
+  bool activeWindowExhausted = gTodayReminderWindowTruncated && gTodayReminderCount > 0;
+  if (activeWindowExhausted)
+  {
+    for (size_t i = 0; i < gTodayReminderCount; ++i)
+    {
+      if (!gTodayReminderSlots[i].triggered)
+      {
+        activeWindowExhausted = false;
+        break;
+      }
+    }
+  }
+  const bool refillWindow = activeWindowExhausted && gTodayReminderLastCheckedMinute != nowMinuteOfDay;
+  const bool retryDue = gScheduleScanRetryAtMs == 0U ||
+                        static_cast<int32_t>(millis() - gScheduleScanRetryAtMs) >= 0;
+  const bool dateRefreshDue = gTodayReminderDateKey != dateKey && retryDue;
+  if (scheduleChanged || dateRefreshDue || refillWindow)
   {
     refreshTodayReminderSlots(nowDt, true);
   }
@@ -3456,10 +3764,25 @@ void serviceScheduleInterruptByRtcMinute()
     return;
   }
 
-  const uint16_t nowMinuteOfDay = static_cast<uint16_t>(nowDt.hour) * 60U + static_cast<uint16_t>(nowDt.minute);
   if (gTodayReminderLastCheckedMinute == nowMinuteOfDay)
   {
-    return;
+    if (gScheduleInterruptCount >= kScheduleInterruptQueueMax)
+      return;
+    if (gScheduleEnqueueRetryAtMs != 0U &&
+        static_cast<int32_t>(millis() - gScheduleEnqueueRetryAtMs) < 0)
+      return;
+    bool hasPendingCurrentMinute = false;
+    for (size_t i = 0; i < gTodayReminderCount; ++i)
+    {
+      const DailyReminderSlot &slot = gTodayReminderSlots[i];
+      if (!slot.triggered && slot.hour == nowDt.hour && slot.minute == nowDt.minute)
+      {
+        hasPendingCurrentMinute = true;
+        break;
+      }
+    }
+    if (!hasPendingCurrentMinute)
+      return;
   }
   gTodayReminderLastCheckedMinute = nowMinuteOfDay;
 
@@ -3478,7 +3801,6 @@ void serviceScheduleInterruptByRtcMinute()
     }
     if (slot.hour == nowDt.hour && slot.minute == nowDt.minute)
     {
-      slot.triggered = true;
       if (dueCount < kMaxReminderTimes)
       {
         dueSlots[dueCount++] = static_cast<uint16_t>(i);
@@ -3488,9 +3810,33 @@ void serviceScheduleInterruptByRtcMinute()
 
   if (dueCount > 0)
   {
-    replaceScheduleInterruptQueueBySlots(dueSlots, dueCount);
-    Serial.printf("[SCHEDULE] due now %02u:%02u queue=%u\n", static_cast<unsigned int>(nowDt.hour),
-                  static_cast<unsigned int>(nowDt.minute), static_cast<unsigned int>(dueCount));
+    const bool queueBusy = gScheduleInterruptActive || gScheduleInterruptPendingStart || gScheduleInterruptCount > 0;
+    const size_t queuedCount = queueBusy ? appendScheduleInterruptQueueBySlots(dueSlots, dueCount)
+                                         : replaceScheduleInterruptQueueBySlots(dueSlots, dueCount);
+    if (gScheduleOffsetMismatchDetected)
+    {
+      // The file changed after this window was indexed. Rebuild from the same
+      // RTC minute; refresh leaves current-minute rows eligible for retry.
+      if (refreshTodayReminderSlots(nowDt, true))
+        gTodayReminderLastCheckedMinute = nowMinuteOfDay;
+      gScheduleEnqueueRetryAtMs = millis() + 100U;
+    }
+    else
+    {
+      // appendScheduleInterruptQueueBySlots always processes a prefix. Mark
+      // only that prefix as fired; a full/busy queue or transient read failure
+      // leaves the suffix pending for another attempt during this minute.
+      for (size_t i = 0; i < queuedCount && i < dueCount; ++i)
+      {
+        const uint16_t slotIdx = dueSlots[i];
+        if (slotIdx < gTodayReminderCount)
+          gTodayReminderSlots[slotIdx].triggered = true;
+      }
+      gScheduleEnqueueRetryAtMs = (queuedCount < dueCount) ? millis() + 250U : 0U;
+    }
+    Serial.printf("[SCHEDULE] due now %02u:%02u matched=%u appended=%u%s\n", static_cast<unsigned int>(nowDt.hour),
+                  static_cast<unsigned int>(nowDt.minute), static_cast<unsigned int>(dueCount),
+                  static_cast<unsigned int>(queuedCount), queuedCount < dueCount ? " (truncated)" : "");
   }
 }
 
@@ -3527,9 +3873,24 @@ static bool markCurrentMinuteScheduleAsTriggeredFromRtc()
   return true;
 }
 
+size_t collectCurrentMinuteReminderSlots(uint16_t *outSlotIndices, size_t capacity)
+{
+  if (!outSlotIndices || capacity == 0 || gTodayReminderLastCheckedMinute == 0xFFFFU)
+    return 0;
+
+  size_t count = 0;
+  for (size_t i = 0; i < gTodayReminderCount && count < capacity; ++i)
+  {
+    const DailyReminderSlot &slot = gTodayReminderSlots[i];
+    const uint16_t slotMinute = static_cast<uint16_t>(slot.hour) * 60U + static_cast<uint16_t>(slot.minute);
+    if (slotMinute == gTodayReminderLastCheckedMinute)
+      outSlotIndices[count++] = static_cast<uint16_t>(i);
+  }
+  return count;
+}
+
 bool computeNextReminderDelta(const ReminderSchedule &schedule, uint64_t nowUnix, uint32_t &outDeltaSec,
-                              char outMessage[kSleepTextMaxLen + 1], uint16_t *outIntervalSec,
-                              uint16_t *outReminderTimes)
+                              uint16_t *outIntervalSec, uint16_t *outReminderTimes)
 {
   if (outIntervalSec)
   {
@@ -3722,20 +4083,138 @@ bool computeNextReminderDelta(const ReminderSchedule &schedule, uint64_t nowUnix
       *outReminderTimes = bestEntry->reminderTimes;
     }
   }
+  return true;
+}
+
+bool computeNextReminderDeltaFromCsv(uint64_t nowUnix, uint32_t &outDeltaSec,
+                                     char outMessage[kSleepTextMaxLen + 1], uint16_t *outIntervalSec,
+                                     uint16_t *outReminderTimes)
+{
+  outDeltaSec = 0;
   if (outMessage)
+    outMessage[0] = '\0';
+  if (outIntervalSec)
+    *outIntervalSec = 0;
+  if (outReminderTimes)
+    *outReminderTimes = 0;
+
+  ScopedFatFsLock fsLock(5000);
+  if (!fsLock)
+    return false;
+
+  fs::File f;
+  bool mountedTemp = false;
+  if (!openScheduleCsvRead(f, mountedTemp))
+    return false;
+
+  ReminderSchedule &singleEntrySchedule = scheduleScratchBuffer();
+  uint32_t sourceIndex = 0;
+  size_t validCount = 0;
+  size_t expiredOneTimeCount = 0;
+  bool found = false;
+  uint32_t bestDelta = std::numeric_limits<uint32_t>::max();
+  uint8_t bestPriority = 0xFFU;
+  uint16_t bestNumber = 0xFFFFU;
+  uint32_t bestSourceIndex = std::numeric_limits<uint32_t>::max();
+  uint32_t bestFileOffset = 0;
+  uint16_t bestIntervalSec = 0;
+  uint16_t bestReminderTimes = 0;
+
+  while (f.available())
   {
-    String message = kDefaultReminderMessage;
-    if (bestEntry)
+    const uint32_t fileOffset = static_cast<uint32_t>(f.position());
+    const String line = f.readStringUntil('\n');
+    ReminderSchedule::Entry entry;
+    if (!parseScheduleCsvLine(line, entry, nullptr))
+      continue;
+
+    entry.fileOffset = fileOffset;
+    entry.lineFingerprint = scheduleLineFingerprint(line);
+    entry.sourceIndex = sourceIndex++;
+    ++validCount;
+    if (entry.number == 0 && entry.sourceIndex <= static_cast<uint32_t>(std::numeric_limits<uint16_t>::max()))
     {
-      message = String(bestEntry->message);
-      message.trim();
-      if (!message.length())
+      entry.number = static_cast<uint16_t>(entry.sourceIndex);
+    }
+
+    const bool anyRepeat = entry.repeatDay || entry.repeatMonth || entry.repeatWeek || entry.repeatYear;
+    if (!anyRepeat)
+    {
+      Ds1302DateTime entryDt;
+      entryDt.year = entry.year;
+      entryDt.month = entry.month;
+      entryDt.day = entry.day;
+      entryDt.hour = entry.hour;
+      entryDt.minute = entry.minute;
+      entryDt.second = 0;
+      uint64_t entryUnix = 0;
+      if (!ds1302DateTimeToUnix(entryDt, entryUnix) ||
+          entryUnix + static_cast<uint64_t>(kReminderTriggerWindowSec) < nowUnix)
       {
-        message = kDefaultReminderMessage;
+        ++expiredOneTimeCount;
+        continue;
       }
     }
-    sanitizeMessageForSnapshot(message, outMessage);
+
+    singleEntrySchedule.entries[0] = entry;
+    singleEntrySchedule.count = 1;
+    uint32_t candidateDelta = 0;
+    uint16_t candidateIntervalSec = 0;
+    uint16_t candidateReminderTimes = 0;
+    if (!computeNextReminderDelta(singleEntrySchedule, nowUnix, candidateDelta, &candidateIntervalSec,
+                                  &candidateReminderTimes))
+    {
+      continue;
+    }
+
+    const uint8_t priority = reminderEntryPriority(entry);
+    if (!found || candidateDelta < bestDelta ||
+        (candidateDelta == bestDelta &&
+         (priority < bestPriority ||
+          (priority == bestPriority &&
+           (entry.number < bestNumber ||
+            (entry.number == bestNumber && entry.sourceIndex < bestSourceIndex))))))
+    {
+      found = true;
+      bestDelta = candidateDelta;
+      bestPriority = priority;
+      bestNumber = entry.number;
+      bestSourceIndex = entry.sourceIndex;
+      bestFileOffset = entry.fileOffset;
+      bestIntervalSec = candidateIntervalSec;
+      bestReminderTimes = candidateReminderTimes;
+    }
   }
+
+  String bestMessage = kDefaultReminderMessage;
+  if (found && !readScheduleMessageAtOffset(f, bestFileOffset, bestMessage))
+  {
+    Serial.printf("[SCHEDULE] next message read failed offset=%u; using fallback\n",
+                  static_cast<unsigned int>(bestFileOffset));
+    bestMessage = kDefaultReminderMessage;
+  }
+  f.close();
+  if (mountedTemp)
+  {
+    unmountFat();
+  }
+  singleEntrySchedule.count = 0;
+
+  Serial.printf("[SCHEDULE] next scan valid=%u expired-once=%u result=%s%s\n",
+                static_cast<unsigned int>(validCount), static_cast<unsigned int>(expiredOneTimeCount),
+                found ? "found" : "none", found ? " (full CSV)" : "");
+  if (!found)
+    return false;
+
+  outDeltaSec = bestDelta;
+  if (outMessage)
+  {
+    sanitizeMessageForSnapshot(bestMessage, outMessage);
+  }
+  if (outIntervalSec)
+    *outIntervalSec = bestIntervalSec;
+  if (outReminderTimes)
+    *outReminderTimes = bestReminderTimes;
   return true;
 }
 
@@ -3816,10 +4295,13 @@ bool saveSleepSnapshotToFat()
   header.magic = kSleepFileMagic;
   header.version = kSleepFileVersion;
   header.appMode = static_cast<uint8_t>(gAppLoopMode);
-  header.runState = RUNSTATE;
+  const bool csvOrderValid = RUNSTATE == 1 && gCsvPlaybackOrder && gCsvPlaybackOrderCount > 0 &&
+                             csvCount >= 0 && static_cast<size_t>(csvCount) <= gCsvPlaybackOrderCount;
+  header.runState = csvOrderValid ? 1U : 0U;
   header.firstFlag = firstFlag ? 1U : 0U;
   header.staPhase = static_cast<uint8_t>(gStaOnlinePhase);
-  header.csvCount = csvCount;
+  header.csvCount = csvOrderValid ? csvCount : 0;
+  header.csvOrderCount = csvOrderValid ? static_cast<uint32_t>(gCsvPlaybackOrderCount) : 0U;
   header.staRetryCount = gStaRetryCount;
   header.backlightTimeSec = gBacklightTimeSec;
   sanitizeMessageForSnapshot(String(gLastDisplayedText), header.lastDisplayed);
@@ -3880,9 +4362,9 @@ bool saveSleepSnapshotToFat()
   }
 
   bool ok = writeExact(f, &header, sizeof(header));
-  if (ok)
+  if (ok && header.csvOrderCount > 0)
   {
-    ok = writeExact(f, csvArray, sizeof(csvArray));
+    ok = writeExact(f, gCsvPlaybackOrder, static_cast<size_t>(header.csvOrderCount) * sizeof(int));
   }
   if (ok)
   {
@@ -3947,7 +4429,9 @@ bool saveSleepSnapshotToFat()
   }
   fatFsGiveWriteMutex();
 
-  Serial.printf("[SLEEP] snapshot saved mode=%u staQ=%u webQ=%u hostQ=%u\n", static_cast<unsigned int>(header.appMode),
+  Serial.printf("[SLEEP] snapshot saved mode=%u csv=%u/%u staQ=%u webQ=%u hostQ=%u\n",
+                static_cast<unsigned int>(header.appMode), static_cast<unsigned int>(header.csvCount),
+                static_cast<unsigned int>(header.csvOrderCount),
                 static_cast<unsigned int>(header.staQueueCount), static_cast<unsigned int>(header.regularQueueCount),
                 static_cast<unsigned int>(header.hostQueueCount));
   return true;
@@ -3978,10 +4462,33 @@ bool loadSleepSnapshotFromFat(SleepSnapshotData &outData)
     f.close();
     return false;
   }
-  if (!readExact(f, csvArray, sizeof(csvArray)))
+  const int currentCsvRows = csv.size();
+  if (header.csvOrderCount > static_cast<uint32_t>(std::numeric_limits<int>::max()) ||
+      header.csvCount < 0 || static_cast<uint32_t>(header.csvCount) > header.csvOrderCount ||
+      (header.csvOrderCount > 0 &&
+       (currentCsvRows <= 0 || header.csvOrderCount != static_cast<uint32_t>(currentCsvRows))))
   {
     f.close();
     return false;
+  }
+  if (header.csvOrderCount > 0)
+  {
+    if (!ensureCsvPlaybackOrderCapacity(header.csvOrderCount) ||
+        !readExact(f, gCsvPlaybackOrder, static_cast<size_t>(header.csvOrderCount) * sizeof(int)))
+    {
+      f.close();
+      resetCsvPlaybackCycle();
+      return false;
+    }
+    for (uint32_t i = 0; i < header.csvOrderCount; ++i)
+    {
+      if (gCsvPlaybackOrder[i] < 0 || gCsvPlaybackOrder[i] >= currentCsvRows)
+      {
+        f.close();
+        resetCsvPlaybackCycle();
+        return false;
+      }
+    }
   }
 
   outData.header = header;
@@ -3998,6 +4505,7 @@ bool loadSleepSnapshotFromFat(SleepSnapshotData &outData)
     if (!readFixedMessage(f, item))
     {
       f.close();
+      resetCsvPlaybackCycle();
       return false;
     }
     appendSnapshotMessage(outData.staQueue, item, kSleepStaQueueMax);
@@ -4007,6 +4515,7 @@ bool loadSleepSnapshotFromFat(SleepSnapshotData &outData)
     if (!readFixedMessage(f, item))
     {
       f.close();
+      resetCsvPlaybackCycle();
       return false;
     }
     appendSnapshotMessage(outData.regularQueue, item, kSleepPortalQueueMax);
@@ -4016,12 +4525,16 @@ bool loadSleepSnapshotFromFat(SleepSnapshotData &outData)
     if (!readFixedMessage(f, item))
     {
       f.close();
+      resetCsvPlaybackCycle();
       return false;
     }
     appendSnapshotMessage(outData.hostQueue, item, kSleepPortalQueueMax);
   }
 
   f.close();
+  // Commit the restored order only after the complete snapshot, including all
+  // variable-length message queues, has been validated.
+  gCsvPlaybackOrderCount = header.csvOrderCount;
   return true;
 }
 
@@ -4063,8 +4576,12 @@ bool applySleepSnapshot(const SleepSnapshotData &snapshot, bool replayLastDispla
   csvCount = snapshot.header.csvCount;
   if (csvCount < 0)
     csvCount = 0;
-  if (csvCount > kCsvArrayCapacity)
-    csvCount = kCsvArrayCapacity;
+  if (static_cast<size_t>(csvCount) > gCsvPlaybackOrderCount)
+    csvCount = static_cast<int>(gCsvPlaybackOrderCount);
+  if (RUNSTATE != 1 || !gCsvPlaybackOrder || gCsvPlaybackOrderCount == 0)
+  {
+    resetCsvPlaybackCycle();
+  }
 
   gStaOnlinePhase = decodeSnapshotStaPhase(snapshot.header.staPhase);
   gStaRetryCount = snapshot.header.staRetryCount;
@@ -4213,14 +4730,13 @@ bool handleRtcMaintenanceWake()
   }
   else
   {
-    ReminderSchedule &schedule = scheduleScratchBuffer();
     uint32_t nextReminderDelta = 0;
     char nextReminderMessage[kSleepTextMaxLen + 1] = {0};
     uint16_t nextReminderIntervalSec = 0;
     uint16_t nextReminderTimes = 0;
-    const bool hasSchedule = loadReminderSchedule(schedule);
-    if (hasSchedule && computeNextReminderDelta(schedule, nowUnix, nextReminderDelta, nextReminderMessage,
-                                                &nextReminderIntervalSec, &nextReminderTimes))
+    const bool hasSchedule = computeNextReminderDeltaFromCsv(nowUnix, nextReminderDelta, nextReminderMessage,
+                                                             &nextReminderIntervalSec, &nextReminderTimes);
+    if (hasSchedule)
     {
       if (nextReminderDelta <= kReminderTriggerWindowSec)
       {
@@ -5484,13 +6000,18 @@ void processAppLoop()
     }
   }
 
-  if (wirelessPortalConsumeCsvReloadRequest())
+  const bool csvReloadRequested = wirelessPortalConsumeCsvReloadRequest();
+  const bool csvReloadRetryDue = gCsvReloadRetryPending &&
+                                 static_cast<int32_t>(millis() - gCsvReloadRetryAtMs) >= 0;
+  if (csvReloadRequested || csvReloadRetryDue)
   {
-    notifyBacklightActivity();
+    if (csvReloadRequested)
+      notifyBacklightActivity();
     if (csv.load(FFat, "/data.csv"))
     {
-      csvCount = 0;
-      RUNSTATE = 0;
+      gCsvReloadRetryPending = false;
+      gCsvReloadRetryAtMs = 0;
+      resetCsvPlaybackCycle();
       if (csv.size() <= 0)
       {
         Serial.println("[WEB] /data.csv is empty, fallback message enabled");
@@ -5503,7 +6024,13 @@ void processAppLoop()
     }
     else
     {
-      Serial.println("[WEB] /data.csv reload failed");
+      // A lazy offset index must never outlive the file version it indexed.
+      // Clear it and retry instead of applying stale offsets to a replaced CSV.
+      csv.clear();
+      resetCsvPlaybackCycle();
+      gCsvReloadRetryPending = true;
+      gCsvReloadRetryAtMs = millis() + 5000U;
+      Serial.println("[WEB] /data.csv reload failed; retry in 5s");
     }
   }
   serviceScheduleInterruptByRtcMinute();
@@ -5753,11 +6280,7 @@ void processAppLoop()
 
   if (gAppLoopMode == APP_MODE_AP_STA)
   {
-    int csvTotal = csv.size();
-    if (csvTotal > kCsvArrayCapacity)
-    {
-      csvTotal = kCsvArrayCapacity;
-    }
+    const int csvTotal = csv.size();
     if (csvTotal <= 0)
     {
       uint8_t key = 255;
@@ -5799,13 +6322,6 @@ void processAppLoop()
       }
       return;
     }
-    if (RUNSTATE == 0)
-    {
-      generateUniqueRandomNumbers(1, csv.size(), csvTotal, csvArray);
-      csvCount = 0;
-      RUNSTATE = 1;
-    }
-    if (RUNSTATE == 1)
     {
       uint8_t key = 255;
       if (syntheticKeyPress)
@@ -5842,26 +6358,13 @@ void processAppLoop()
         {
           firstFlag = false;
         }
-        if (csvCount >= csvTotal)
-        {
-          generateUniqueRandomNumbers(1, csv.size(), csvTotal, csvArray);
-          csvCount = 0;
-          RUNSTATE = 1;
-        }
-
-        const int currentCsvId = csvArray[csvCount];
-        csvCount++;
-
         String localMessage;
-        const char *csvMessage = csv.getTextById(currentCsvId);
-        if (csvMessage)
+        int physicalRow = 0;
+        if (!loadNextCsvPlaybackMessage(csvTotal, localMessage, physicalRow))
         {
-          localMessage = csvMessage;
-        }
-        else
-        {
-          localMessage = "CSV id not found: ";
-          localMessage += String(currentCsvId);
+          localMessage = physicalRow > 0 ? "CSV row read failed: " : "CSV order allocation failed";
+          if (physicalRow > 0)
+            localMessage += String(physicalRow);
         }
         message = localMessage.c_str();
         playMessageWithGlitch(message);
@@ -6018,11 +6521,7 @@ void processAppLoop()
   }
   else if (gAppLoopMode == APP_MODE_STA_ONLY)
   {
-    int csvTotal = csv.size();
-    if (csvTotal > kCsvArrayCapacity)
-    {
-      csvTotal = kCsvArrayCapacity;
-    }
+    const int csvTotal = csv.size();
     uint8_t key = 255;
     if (syntheticKeyPress)
     {
@@ -6071,39 +6570,19 @@ void processAppLoop()
       }
       return;
     }
-    if (RUNSTATE == 0)
-    {
-      generateUniqueRandomNumbers(1, csv.size(), csvTotal, csvArray);
-      csvCount = 0;
-      RUNSTATE = 1;
-    }
-
     if (key == 2 || firstFlag)
     {
       if (firstFlag)
       {
         firstFlag = false;
       }
-      if (csvCount >= csvTotal)
-      {
-        generateUniqueRandomNumbers(1, csv.size(), csvTotal, csvArray);
-        csvCount = 0;
-        RUNSTATE = 1;
-      }
-
-      const int currentCsvId = csvArray[csvCount];
-      csvCount++;
-
       String localMessage;
-      const char *csvMessage = csv.getTextById(currentCsvId);
-      if (csvMessage)
+      int physicalRow = 0;
+      if (!loadNextCsvPlaybackMessage(csvTotal, localMessage, physicalRow))
       {
-        localMessage = csvMessage;
-      }
-      else
-      {
-        localMessage = "CSV id not found: ";
-        localMessage += String(currentCsvId);
+        localMessage = physicalRow > 0 ? "CSV row read failed: " : "CSV order allocation failed";
+        if (physicalRow > 0)
+          localMessage += String(physicalRow);
       }
       message = localMessage.c_str();
       playMessageWithGlitch(message);
@@ -6282,9 +6761,33 @@ bool appRestoreFromDeepSleepSnapshot()
 
   if (timerReminderWake)
   {
-    (void)markCurrentMinuteScheduleAsTriggeredFromRtc();
-    clearScheduleInterruptQueue();
-    if (appendScheduleInterruptQueueItem(String(reminderMessage), reminderIntervalSec, reminderTimes, false))
+    const bool marked = markCurrentMinuteScheduleAsTriggeredFromRtc();
+    uint16_t currentMinuteSlots[kMaxReminderTimes];
+    const size_t currentMinuteCount =
+        marked ? collectCurrentMinuteReminderSlots(currentMinuteSlots, kMaxReminderTimes) : 0;
+    size_t queuedCount = 0;
+    if (currentMinuteCount > 0)
+    {
+      queuedCount = replaceScheduleInterruptQueueBySlots(currentMinuteSlots, currentMinuteCount);
+      if (queuedCount > 0 && queuedCount < currentMinuteCount)
+      {
+        for (size_t i = queuedCount; i < currentMinuteCount; ++i)
+        {
+          const uint16_t slotIdx = currentMinuteSlots[i];
+          if (slotIdx < gTodayReminderCount)
+            gTodayReminderSlots[slotIdx].triggered = false;
+        }
+        gScheduleEnqueueRetryAtMs = millis() + 250U;
+      }
+    }
+    if (queuedCount == 0)
+    {
+      clearScheduleInterruptQueue();
+      if (appendScheduleInterruptQueueItem(String(reminderMessage), reminderIntervalSec, reminderTimes, false))
+        queuedCount = 1;
+    }
+
+    if (queuedCount > 0)
     {
       // Keep legacy behavior: timer reminder wake should play immediately
       // without waiting for processAppLoop state gates.
@@ -6294,8 +6797,8 @@ bool appRestoreFromDeepSleepSnapshot()
       gScheduleInterruptQueue[0].reminderCount = 0;
       playMessageWithGlitch(gScheduleInterruptQueue[0].text);
       gScheduleInterruptLastPlayMs = millis();
-      Serial.printf("[SLEEP] reminder played immediately and queued (interval=%u, times=%u)\n",
-                    static_cast<unsigned int>(reminderIntervalSec), static_cast<unsigned int>(reminderTimes));
+      Serial.printf("[SLEEP] reminder played immediately; current-minute queue=%u\n",
+                    static_cast<unsigned int>(queuedCount));
     }
     else
     {

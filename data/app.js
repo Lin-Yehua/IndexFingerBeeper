@@ -8,13 +8,16 @@ const st = {
   volTimer: null,
   cmdPage: 1,
   schedulePage: 1,
+  scheduleTrashPage: 1,
   cmdCollapsed: {},
   scheduleCollapsed: {},
+  scheduleTrashCollapsed: {},
   cmdAutoTimer: null,
   scheduleAutoTimer: null,
   cmdAutoSaving: false,
   cmdAutoResave: false,
   scheduleSaveChain: null,
+  scheduleRevision: 0,
   rtcBaseMs: 0,
   rtcSyncedAtMs: 0,
   scheduleDateTouched: false
@@ -41,6 +44,7 @@ const el = {
   cmdList: $("cmdList"), cmdPager: $("cmdPager"), cmdAddInput: $("cmdAddInput"), btnCmdAdd: $("btnCmdAdd"), btnCmdSave: $("btnCmdSave"), btnCmdRetry: $("btnCmdRetry"), cmdAutoSaveEnable: $("cmdAutoSaveEnable"), cmdAdvanced: $("cmdAdvanced"), btnCmdFoldAll: $("btnCmdFoldAll"), btnCmdExpandAll: $("btnCmdExpandAll"), cmdStatus: $("cmdStatus"),
   rtcNow: $("rtcNow"), rtcYear: $("rtcYear"), rtcMonth: $("rtcMonth"), rtcDay: $("rtcDay"), rtcHour: $("rtcHour"), rtcMinute: $("rtcMinute"), rtcSecond: $("rtcSecond"), btnRtcSet: $("btnRtcSet"), btnRtcSyncPhone: $("btnRtcSyncPhone"), rtcStatus: $("rtcStatus"),
   scheduleDate: $("scheduleDate"), scheduleList: $("scheduleList"), schedulePager: $("schedulePager"), scheduleAddTime: $("scheduleAddTime"), scheduleAddRepeat: $("scheduleAddRepeat"), scheduleAddInterval: $("scheduleAddInterval"), scheduleAddTimes: $("scheduleAddTimes"), scheduleAddText: $("scheduleAddText"), btnScheduleAdd: $("btnScheduleAdd"), btnScheduleSave: $("btnScheduleSave"), btnScheduleRetry: $("btnScheduleRetry"), scheduleAutoSaveEnable: $("scheduleAutoSaveEnable"), scheduleAdvanced: $("scheduleAdvanced"), scheduleStatus: $("scheduleStatus"),
+  scheduleTrashList: $("scheduleTrashList"), scheduleTrashPager: $("scheduleTrashPager"), scheduleTrashCount: $("scheduleTrashCount"), scheduleTrashStatus: $("scheduleTrashStatus"), btnScheduleTrashFoldAll: $("btnScheduleTrashFoldAll"), btnScheduleTrashExpandAll: $("btnScheduleTrashExpandAll"), btnScheduleTrashDeleteAll: $("btnScheduleTrashDeleteAll"),
   bgVol: $("bgVol"), insertVol: $("insertVol"), bgVolVal: $("bgVolVal"), insertVolVal: $("insertVolVal"), backlight: $("backlight"), backlightTime: $("backlightTime"), backlightCloseTime: $("backlightCloseTime"), displayIntervalMs: $("displayIntervalMs"), sleepAfterOffMin: $("sleepAfterOffMin"), btnSaveDisplay: $("btnSaveDisplay"), displayStatus: $("displayStatus"),
   apSsid: $("apSsid"), apPassword: $("apPassword"), apChannel: $("apChannel"), btnSaveAp: $("btnSaveAp"),
   staSsid: $("staSsid"), staPassword: $("staPassword"), staNet: $("staNet"), btnSaveSta: $("btnSaveSta"),
@@ -48,6 +52,11 @@ const el = {
   selfMac: $("selfMac"), btnCopySelfMac: $("btnCopySelfMac"), selfUuid: $("selfUuid"), btnCopySelfUuid: $("btnCopySelfUuid"), wirelessStatus: $("wirelessStatus"),
   batteryStatus: $("batteryStatus"),
   deviceMac: $("deviceMac"), btnCopyDeviceMac: $("btnCopyDeviceMac"), deviceUuid: $("deviceUuid"), btnCopyDeviceUuid: $("btnCopyDeviceUuid"), deviceStatus: $("deviceStatus")
+};
+
+const setScheduleUiStatus = (text, err = false) => {
+  setStatus(el.scheduleStatus, text, err);
+  setStatus(el.scheduleTrashStatus, text, err);
 };
 
 const pad2 = (n) => String(n).padStart(2, "0");
@@ -115,9 +124,13 @@ function syncRtcClockFromDevice(d) {
   return true;
 }
 
+function isRtcClockReady() {
+  return Number.isFinite(st.rtcBaseMs) && st.rtcBaseMs > 0 &&
+         Number.isFinite(st.rtcSyncedAtMs) && st.rtcSyncedAtMs > 0;
+}
+
 function nowByRtc() {
-  if (Number.isFinite(st.rtcBaseMs) && st.rtcBaseMs > 0 &&
-      Number.isFinite(st.rtcSyncedAtMs) && st.rtcSyncedAtMs > 0) {
+  if (isRtcClockReady()) {
     const elapsed = Math.max(0, Date.now() - st.rtcSyncedAtMs);
     return new Date(st.rtcBaseMs + elapsed);
   }
@@ -512,7 +525,9 @@ async function saveCommands(options = {}) {
   const showStatus = options.showStatus !== false;
   try {
     const lines = st.commands.map((t) => String(t || "").replace(/\r?\n+/g, " ").trim()).filter(Boolean).map((t, i) => cmdToLine(t, i + 1));
-    const b = new FormData(); b.append("content", lines.join("\n") + (lines.length ? "\n" : ""));
+    const content = lines.join("\n") + (lines.length ? "\n" : "");
+    const b = new FormData();
+    b.append("file", new Blob([content], { type: "text/csv;charset=utf-8" }), "data.csv");
     const r = await fetch("/api/csv", { method: "POST", body: b }); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`);
     if (reload) await loadCommands();
     if (showStatus) setStatus(el.cmdStatus, raw || "保存成功");
@@ -582,6 +597,32 @@ function setSchRepeat(it, type, day) {
 }
 function schPrefix(it) { if (it.d) return "日重复"; if (it.w) return "周重复"; if (it.m) return "月重复"; if (it.y) return "年重复"; return "不重复"; }
 function schTime(it) { return `${pad2(it.h)}:${pad2(it.i)}`; }
+function schDate(it) { return `${it.Y}-${pad2(it.M)}-${pad2(it.D)}`; }
+function schDateTime(it) { return new Date(it.Y, it.M - 1, it.D, it.h, it.i, 0, 0); }
+function isExpiredOneTimeSchedule(it, now = nowByRtc()) {
+  if (it.d || it.m || it.w || it.y) return false;
+  const due = schDateTime(it).getTime();
+  // Firmware accepts a minute-precision reminder throughout its scheduled
+  // minute. Move it to the trash only after that minute has fully elapsed.
+  return Number.isFinite(due) && due + 60000 <= now.getTime();
+}
+function expiredOneTimeSchedules() {
+  // Destructive cleanup must use the device RTC, never an unchecked browser
+  // clock. Until RTC synchronization succeeds, keep trash actions disabled.
+  if (!isRtcClockReady()) return [];
+  const now = nowByRtc();
+  return st.schedules
+    .filter((it) => isExpiredOneTimeSchedule(it, now))
+    .sort((a, b) => (a.Y - b.Y) || (a.M - b.M) || (a.D - b.D) || (a.h - b.h) || (a.i - b.i) || (toInt(a.number, 0) - toInt(b.number, 0)));
+}
+function renderScheduleViews() {
+  renderSchedules();
+  renderScheduleTrash();
+}
+function setScheduleTrashCollapsedAll(collapsed) {
+  expiredOneTimeSchedules().forEach((it) => { st.scheduleTrashCollapsed[it.id] = !!collapsed; });
+  renderScheduleTrash();
+}
 
 function parseSchedules(text) {
   const out = [];
@@ -635,9 +676,10 @@ function schedulesToCsv(list) {
   return `${lines.join("\n")}\n`;
 }
 
-function queueScheduleAutoSave() {
+function queueScheduleAutoSave(changeText = "日程已改动") {
+  st.scheduleRevision += 1;
   if (!isScheduleAutoSaveEnabled()) {
-    setStatus(el.scheduleStatus, "日程已改动（自动保存已关闭）");
+    setScheduleUiStatus(`${changeText}（自动保存已关闭）`);
     return;
   }
   if (st.scheduleAutoTimer) clearTimeout(st.scheduleAutoTimer);
@@ -645,20 +687,20 @@ function queueScheduleAutoSave() {
     st.scheduleAutoTimer = null;
     void runScheduleAutoSave();
   }, AUTO_SAVE_DELAY_MS);
-  setStatus(el.scheduleStatus, "日程已改动，等待自动保存...");
+  setScheduleUiStatus(`${changeText}，等待自动保存...`);
 }
 
 async function runScheduleAutoSave() {
   if (!isScheduleAutoSaveEnabled()) {
-    setStatus(el.scheduleStatus, "自动保存已关闭");
+    setScheduleUiStatus("自动保存已关闭");
     return;
   }
   const ret = await enqueueScheduleSave({ reload: false, showStatus: false });
   if (ret.ok) {
-    setStatus(el.scheduleStatus, "日程表已自动保存");
+    setScheduleUiStatus(ret.outdated ? "检测到后续修改，等待下一轮自动保存..." : "日程表已自动保存");
     setScheduleRetryVisible(false);
   } else {
-    setStatus(el.scheduleStatus, `日程自动保存失败: ${ret.message}`, true);
+    setScheduleUiStatus(`日程自动保存失败: ${ret.message}`, true);
     setScheduleRetryVisible(true);
   }
 }
@@ -688,7 +730,11 @@ function isScheduleEditorBusy() {
       a === el.scheduleAddInterval ||
       a === el.scheduleAddTimes ||
       a === el.scheduleAddText) return true;
-  return !!(el.scheduleList && el.scheduleList.contains(a));
+  const inScheduleList = (el.scheduleList && el.scheduleList.contains(a)) ||
+                         (el.scheduleTrashList && el.scheduleTrashList.contains(a));
+  if (!inScheduleList) return false;
+  const tag = String(a.tagName || "").toUpperCase();
+  return tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA" || !!a.isContentEditable;
 }
 function renderSchedules() {
   el.scheduleList.innerHTML = "";
@@ -721,7 +767,8 @@ function renderSchedules() {
     del.addEventListener("click", () => {
       st.schedules = st.schedules.filter((x) => x.id !== it.id);
       delete st.scheduleCollapsed[it.id];
-      renderSchedules();
+      delete st.scheduleTrashCollapsed[it.id];
+      renderScheduleViews();
       queueScheduleAutoSave();
     });
     actions.append(tg, del);
@@ -731,12 +778,12 @@ function renderSchedules() {
     const body = document.createElement("div"); body.className = "item-body";
     const row = document.createElement("div"); row.className = "item-row";
     const ti = document.createElement("input"); ti.type = "time"; ti.value = schTime(it);
-    ti.addEventListener("change", () => { const [h, m] = ti.value.split(":").map((v) => toInt(v, 0)); it.h = clamp(h, 0, 23); it.i = clamp(m, 0, 59); renderSchedules(); queueScheduleAutoSave(); });
+    ti.addEventListener("change", () => { const [h, m] = ti.value.split(":").map((v) => toInt(v, 0)); it.h = clamp(h, 0, 23); it.i = clamp(m, 0, 59); renderScheduleViews(); queueScheduleAutoSave(); });
 
     const rp = document.createElement("select");
     [["none", "不重复"], ["daily", "每日重复"], ["weekly", "每周重复"], ["monthly", "每月重复"], ["yearly", "每年重复"]].forEach(([v, t]) => { const o = document.createElement("option"); o.value = v; o.textContent = t; rp.appendChild(o); });
     rp.value = schRepeat(it);
-    rp.addEventListener("change", () => { setSchRepeat(it, rp.value, day); renderSchedules(); queueScheduleAutoSave(); });
+    rp.addEventListener("change", () => { setSchRepeat(it, rp.value, day); renderScheduleViews(); queueScheduleAutoSave(); });
 
     const intervalIn = document.createElement("input");
     intervalIn.type = "number";
@@ -793,29 +840,261 @@ function renderSchedules() {
   });
 }
 
-async function loadSchedules() {
+function trashEditorField(input, labelText, id) {
+  const field = document.createElement("div");
+  field.className = "schedule-field";
+  if (id) input.id = id;
+  const label = document.createElement("label");
+  label.className = "schedule-field-label";
+  if (id) label.setAttribute("for", id);
+  label.textContent = labelText;
+  field.append(label, input);
+  return field;
+}
+
+function renderScheduleTrash() {
+  if (!el.scheduleTrashList || !el.scheduleTrashPager) return;
+  el.scheduleTrashList.innerHTML = "";
+  const rtcReady = isRtcClockReady();
+  const expired = expiredOneTimeSchedules();
+  if (el.scheduleTrashCount) {
+    el.scheduleTrashCount.textContent = !rtcReady
+      ? "等待设备 RTC 同步后再判定过期日程"
+      : (expired.length ? `共 ${expired.length} 条过期一次性日程` : "当前没有过期的一次性日程");
+  }
+  if (el.btnScheduleTrashDeleteAll) el.btnScheduleTrashDeleteAll.disabled = expired.length === 0;
+  if (el.btnScheduleTrashFoldAll) el.btnScheduleTrashFoldAll.disabled = expired.length === 0;
+  if (el.btnScheduleTrashExpandAll) el.btnScheduleTrashExpandAll.disabled = expired.length === 0;
+
+  if (!expired.length) {
+    const p = document.createElement("p");
+    p.className = "status";
+    p.textContent = rtcReady ? "垃圾桶为空" : "RTC 尚未就绪，清理功能已暂时禁用";
+    el.scheduleTrashList.appendChild(p);
+    renderPager(el.scheduleTrashPager, 1, 1, () => {});
+    st.scheduleTrashPage = 1;
+    return;
+  }
+
+  const totalPages = Math.max(1, Math.ceil(expired.length / PAGE_SIZE));
+  st.scheduleTrashPage = clamp(st.scheduleTrashPage, 1, totalPages);
+  const start = (st.scheduleTrashPage - 1) * PAGE_SIZE;
+  expired.slice(start, start + PAGE_SIZE).forEach((it) => {
+    const wrap = document.createElement("div");
+    wrap.className = "list-item is-past";
+    const head = document.createElement("div");
+    head.className = "item-head";
+    const left = document.createElement("div");
+    left.className = "item-left";
+    const meta = document.createElement("div");
+    meta.className = "item-repeat";
+    meta.textContent = `过期一次性 #${Math.max(0, toInt(it.number, 0))}`;
+    const preview = document.createElement("span");
+    preview.className = "item-preview item-time-preview";
+    preview.textContent = `${schDate(it)} ${schTime(it)}`;
+    const actions = document.createElement("div");
+    actions.className = "item-actions";
+    const toggle = document.createElement("button");
+    toggle.className = "item-toggle ghost";
+    toggle.type = "button";
+    const del = document.createElement("button");
+    del.className = "del";
+    del.type = "button";
+    del.textContent = "-";
+    del.title = "删除此过期日程";
+    del.addEventListener("click", () => {
+      st.schedules = st.schedules.filter((x) => x.id !== it.id);
+      delete st.scheduleCollapsed[it.id];
+      delete st.scheduleTrashCollapsed[it.id];
+      renderScheduleViews();
+      queueScheduleAutoSave("已删除 1 条过期日程");
+    });
+    actions.append(toggle, del);
+    left.append(meta, preview);
+    head.append(left, actions);
+
+    const body = document.createElement("div");
+    body.className = "item-body";
+    const row = document.createElement("div");
+    row.className = "item-row trash-item-row";
+
+    const dateInput = document.createElement("input");
+    dateInput.type = "date";
+    dateInput.value = schDate(it);
+    dateInput.addEventListener("change", () => {
+      const parts = dateInput.value.split("-").map((v) => toInt(v, 0));
+      if (parts.length !== 3 || parts[0] < 2000 || parts[0] > 2099 || parts[1] < 1 || parts[1] > 12 || parts[2] < 1 || parts[2] > 31) {
+        dateInput.value = schDate(it);
+        return;
+      }
+      const changedDay = new Date(parts[0], parts[1] - 1, parts[2]);
+      if (changedDay.getFullYear() !== parts[0] || changedDay.getMonth() + 1 !== parts[1] || changedDay.getDate() !== parts[2]) {
+        dateInput.value = schDate(it);
+        return;
+      }
+      it.Y = parts[0];
+      it.M = parts[1];
+      it.D = parts[2];
+      it.week = weekMon(changedDay);
+      renderScheduleViews();
+      queueScheduleAutoSave("过期日程日期已修改");
+    });
+
+    const timeInput = document.createElement("input");
+    timeInput.type = "time";
+    timeInput.value = schTime(it);
+    timeInput.addEventListener("change", () => {
+      const parts = timeInput.value.split(":").map((v) => toInt(v, -1));
+      if (parts.length !== 2 || parts[0] < 0 || parts[0] > 23 || parts[1] < 0 || parts[1] > 59) {
+        timeInput.value = schTime(it);
+        return;
+      }
+      it.h = parts[0];
+      it.i = parts[1];
+      renderScheduleViews();
+      queueScheduleAutoSave("过期日程时间已修改");
+    });
+
+    const repeat = document.createElement("select");
+    [["none", "不重复"], ["daily", "每日重复"], ["weekly", "每周重复"], ["monthly", "每月重复"], ["yearly", "每年重复"]].forEach(([value, text]) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = text;
+      repeat.appendChild(option);
+    });
+    repeat.value = schRepeat(it);
+    repeat.addEventListener("change", () => {
+      const baseDay = new Date(it.Y, it.M - 1, it.D);
+      setSchRepeat(it, repeat.value, baseDay);
+      renderScheduleViews();
+      queueScheduleAutoSave("过期日程重复规则已修改");
+    });
+
+    const intervalInput = document.createElement("input");
+    intervalInput.type = "number";
+    intervalInput.min = "0";
+    intervalInput.step = "1";
+    intervalInput.value = String(Math.max(0, toInt(it.interval, 0)));
+    intervalInput.addEventListener("change", () => {
+      it.interval = Math.max(0, toInt(intervalInput.value, 0));
+      intervalInput.value = String(it.interval);
+      queueScheduleAutoSave("过期日程提醒间隔已修改");
+    });
+
+    const timesInput = document.createElement("input");
+    timesInput.type = "number";
+    timesInput.min = "0";
+    timesInput.step = "1";
+    timesInput.value = String(Math.max(0, toInt(it.times, 0)));
+    timesInput.addEventListener("change", () => {
+      it.times = Math.max(0, toInt(timesInput.value, 0));
+      timesInput.value = String(it.times);
+      queueScheduleAutoSave("过期日程提醒次数已修改");
+    });
+
+    const textInput = document.createElement("textarea");
+    textInput.rows = 2;
+    textInput.placeholder = "内容（可选）";
+    textInput.value = it.text || "";
+    autoGrow(textInput);
+    textInput.addEventListener("input", () => {
+      it.text = textInput.value.replace(/\r?\n+/g, " ").trim();
+      autoGrow(textInput);
+      queueScheduleAutoSave("过期日程内容已修改");
+    });
+
+    row.append(
+      trashEditorField(dateInput, "日期", `trashDate-${it.id}`),
+      trashEditorField(timeInput, "时间", `trashTime-${it.id}`),
+      trashEditorField(repeat, "重复规则", `trashRepeat-${it.id}`),
+      trashEditorField(intervalInput, "提醒间隔(秒)", `trashInterval-${it.id}`),
+      trashEditorField(timesInput, "提醒次数", `trashTimes-${it.id}`),
+      trashEditorField(textInput, "日程内容", `trashText-${it.id}`)
+    );
+    body.appendChild(row);
+    wrap.append(head, body);
+
+    const syncFold = () => {
+      const folded = st.scheduleTrashCollapsed[it.id] !== false;
+      wrap.classList.toggle("item-folded", folded);
+      toggle.textContent = folded ? "编辑" : "收起";
+      preview.textContent = `${schDate(it)} ${schTime(it)}`;
+    };
+    toggle.addEventListener("click", () => {
+      st.scheduleTrashCollapsed[it.id] = !(st.scheduleTrashCollapsed[it.id] !== false);
+      syncFold();
+      if (st.scheduleTrashCollapsed[it.id] === false) fitTextarea(textInput);
+    });
+    syncFold();
+    el.scheduleTrashList.appendChild(wrap);
+  });
+
+  renderPager(el.scheduleTrashPager, st.scheduleTrashPage, totalPages, (nextPage) => {
+    st.scheduleTrashPage = nextPage;
+    renderScheduleTrash();
+  });
+}
+
+function deleteAllExpiredSchedules() {
+  const expired = expiredOneTimeSchedules();
+  if (!expired.length) return;
+  if (!window.confirm(`确定删除全部 ${expired.length} 条过期一次性日程吗？此操作会立即进入保存队列。`)) return;
+  const ids = new Set(expired.map((it) => it.id));
+  st.schedules = st.schedules.filter((it) => !ids.has(it.id));
+  expired.forEach((it) => {
+    delete st.scheduleCollapsed[it.id];
+    delete st.scheduleTrashCollapsed[it.id];
+  });
+  st.scheduleTrashPage = 1;
+  renderScheduleViews();
+  queueScheduleAutoSave(`已删除 ${expired.length} 条过期日程`);
+}
+
+async function loadSchedules(options = {}) {
+  const expectedRevision = Number.isFinite(options.expectedRevision) ? options.expectedRevision : st.scheduleRevision;
   try {
     const r = await fetch("/api/schedule"); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`);
+    if (st.scheduleRevision !== expectedRevision) {
+      setScheduleUiStatus("检测到本地日程修改，已跳过重新加载以避免覆盖");
+      return { ok: true, skipped: true };
+    }
     st.schedules = parseSchedules(raw);
     st.schedulePage = 1;
+    st.scheduleTrashPage = 1;
     st.scheduleCollapsed = {};
-    renderSchedules();
-    setStatus(el.scheduleStatus, "日程表已加载");
-  } catch (e) { setStatus(el.scheduleStatus, `加载失败: ${e.message}`, true); }
+    st.scheduleTrashCollapsed = {};
+    renderScheduleViews();
+    setScheduleUiStatus("日程表已加载");
+    return { ok: true, skipped: false };
+  } catch (e) {
+    setScheduleUiStatus(`加载失败: ${e.message}`, true);
+    return { ok: false, message: e?.message || String(e) };
+  }
 }
 
 async function saveSchedules(options = {}) {
   const reload = options.reload !== false;
   const showStatus = options.showStatus !== false;
+  const savedRevision = st.scheduleRevision;
   try {
-    const b = new FormData(); b.append("content", schedulesToCsv(st.schedules));
+    const content = schedulesToCsv(st.schedules);
+    const b = new FormData(); b.append("content", content);
     const r = await fetch("/api/schedule", { method: "POST", body: b }); const raw = await r.text(); if (!r.ok) throw new Error(raw || `HTTP ${r.status}`);
-    if (reload) await loadSchedules();
-    if (showStatus) setStatus(el.scheduleStatus, raw || "日程已保存");
-    return { ok: true, message: raw || "日程已保存" };
+    let outdated = st.scheduleRevision !== savedRevision;
+    if (reload && !outdated) {
+      const loadResult = await loadSchedules({ expectedRevision: savedRevision });
+      if (!loadResult.ok) {
+        const message = `日程已保存，但重新加载失败: ${loadResult.message || "未知错误"}`;
+        if (showStatus) setScheduleUiStatus(message, true);
+        return { ok: true, outdated: false, reloadFailed: true, message };
+      }
+      outdated = st.scheduleRevision !== savedRevision || !!loadResult?.skipped;
+    }
+    if (showStatus) setScheduleUiStatus(outdated ? "当前快照已保存；检测到后续修改，未重新加载" : (raw || "日程已保存"));
+    return { ok: true, outdated, message: raw || "日程已保存" };
   } catch (e) {
     const msg = e?.message || String(e);
-    if (showStatus) setStatus(el.scheduleStatus, `保存失败: ${msg}`, true);
+    if (showStatus) setScheduleUiStatus(`保存失败: ${msg}`, true);
     return { ok: false, message: msg };
   }
 }
@@ -826,7 +1105,7 @@ async function saveSchedulesManual() {
     st.scheduleAutoTimer = null;
   }
   const ret = await enqueueScheduleSave({ reload: true, showStatus: true });
-  setScheduleRetryVisible(!ret.ok);
+  setScheduleRetryVisible(!ret.ok || (!!ret.outdated && !isScheduleAutoSaveEnabled()));
   return ret;
 }
 
@@ -852,7 +1131,7 @@ function addSchedule() {
     times: Math.max(0, toInt(el.scheduleAddTimes ? el.scheduleAddTimes.value : 3, 3)),
     text: String(el.scheduleAddText.value || "").replace(/\r?\n+/g, " ").trim()
   };
-  setSchRepeat(it, el.scheduleAddRepeat.value, d); st.schedules.push(it); el.scheduleAddText.value = ""; st.schedulePage = 1; renderSchedules(); queueScheduleAutoSave();
+  setSchRepeat(it, el.scheduleAddRepeat.value, d); st.schedules.push(it); el.scheduleAddText.value = ""; st.schedulePage = 1; renderScheduleViews(); queueScheduleAutoSave();
 }
 
 function rtcPayload() {
@@ -893,7 +1172,7 @@ async function loadRtc() {
       st.schedulePage = 1;
     }
     if (!isScheduleEditorBusy()) {
-      renderSchedules();
+      renderScheduleViews();
     }
   }
   catch (e) { setStatus(el.rtcStatus, `RTC读取失败: ${e.message}`, true); }
@@ -912,7 +1191,7 @@ async function rtcSet() {
       el.scheduleDate.value = `${d.year}-${pad2(d.month)}-${pad2(d.day)}`;
       st.schedulePage = 1;
     }
-    renderSchedules();
+    renderScheduleViews();
     setStatus(el.rtcStatus, "RTC设置成功");
   }
   catch (e) { setStatus(el.rtcStatus, `RTC设置失败: ${e.message}`, true); }
@@ -932,7 +1211,7 @@ async function rtcSyncPhone() {
       el.scheduleDate.value = `${d.year}-${pad2(d.month)}-${pad2(d.day)}`;
       st.schedulePage = 1;
     }
-    renderSchedules();
+    renderScheduleViews();
     setStatus(el.rtcStatus, "已同步手机时间");
   }
   catch (e) { setStatus(el.rtcStatus, `同步失败: ${e.message}`, true); }
@@ -1096,6 +1375,9 @@ function bind() {
 
   el.scheduleDate.addEventListener("change", () => { st.scheduleDateTouched = true; st.schedulePage = 1; renderSchedules(); });
   el.btnScheduleAdd.addEventListener("click", addSchedule);
+  if (el.btnScheduleTrashFoldAll) el.btnScheduleTrashFoldAll.addEventListener("click", () => setScheduleTrashCollapsedAll(true));
+  if (el.btnScheduleTrashExpandAll) el.btnScheduleTrashExpandAll.addEventListener("click", () => setScheduleTrashCollapsedAll(false));
+  if (el.btnScheduleTrashDeleteAll) el.btnScheduleTrashDeleteAll.addEventListener("click", deleteAllExpiredSchedules);
   if (el.btnScheduleSave) el.btnScheduleSave.addEventListener("click", async () => { await saveSchedulesManual(); });
   if (el.btnScheduleRetry) el.btnScheduleRetry.addEventListener("click", async () => { await saveSchedulesManual(); });
   if (el.scheduleAutoSaveEnable) {
@@ -1103,9 +1385,9 @@ function bind() {
       saveAutoSavePrefs();
       if (!isScheduleAutoSaveEnabled()) {
         if (st.scheduleAutoTimer) { clearTimeout(st.scheduleAutoTimer); st.scheduleAutoTimer = null; }
-        setStatus(el.scheduleStatus, "日程自动保存已关闭");
+        setScheduleUiStatus("日程自动保存已关闭");
       } else {
-        setStatus(el.scheduleStatus, "日程自动保存已开启");
+        setScheduleUiStatus("日程自动保存已开启");
       }
     });
   }

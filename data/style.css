@@ -258,6 +258,31 @@ button:disabled {
   line-height: 1.2;
 }
 
+.trash-help,
+.trash-count {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.trash-count {
+  min-height: 19px;
+}
+
+.trash-toolbar .danger {
+  margin-left: auto;
+  border-color: rgba(255, 109, 109, 0.9);
+  color: var(--danger);
+  background: rgba(255, 109, 109, 0.06);
+  box-shadow: 0 0 10px rgba(255, 109, 109, 0.12), inset 0 0 10px rgba(255, 109, 109, 0.04);
+}
+
+.trash-toolbar .danger:hover:not(:disabled) {
+  background: rgba(255, 109, 109, 0.15);
+  box-shadow: 0 0 14px rgba(255, 109, 109, 0.22);
+}
+
 .input-btn {
   display: grid;
   grid-template-columns: 1fr auto;
@@ -472,6 +497,10 @@ button:disabled {
   gap: 8px;
 }
 
+.trash-item-row {
+  grid-template-columns: 132px 120px 130px 104px 104px minmax(180px, 1fr);
+}
+
 .item-body {
   display: block;
 }
@@ -530,7 +559,8 @@ button:disabled {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
-  .item-row {
+  .item-row,
+  .trash-item-row {
     grid-template-columns: 1fr;
   }
 }
@@ -559,5 +589,9 @@ button:disabled {
 
   .item-preview {
     max-width: 42vw;
+  }
+
+  .trash-toolbar .danger {
+    margin-left: 0;
   }
 }
