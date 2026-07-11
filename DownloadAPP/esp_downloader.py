@@ -18,6 +18,8 @@ from tkinter import ttk
 
 MAIN_ENV = "4d_systems_esp32s3_gen4_r8n16"
 CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
+AUTO_PORT_LABEL = "自动选择"
+BAUD_RATES = ("921600", "460800", "115200")
 
 
 def runtime_dir() -> Path:
@@ -30,6 +32,7 @@ APP_DIR = runtime_dir()
 SOURCE_DIR = Path(__file__).resolve().parent
 PROJECT_DIR = SOURCE_DIR.parent
 CONFIG_PATH = APP_DIR / "downloader_config.json"
+RESOURCE_DIR = Path(getattr(sys, "_MEIPASS", SOURCE_DIR))
 
 DRIVE_TYPE_NAMES = {
     0: "未知",
@@ -57,7 +60,7 @@ def default_main_firmware() -> str:
 
 
 def default_hardware_firmware() -> str:
-    for name in ("hardware_test.bin", "hardware.bin", "test_firmware.bin"):
+    for name in ("hardware_test.bin", "hardware_test.bin.bin", "hardware.bin", "test_firmware.bin"):
         if (APP_DIR / name).exists():
             return name
     return "hardware_test.bin"
@@ -73,10 +76,26 @@ def default_update_dir() -> str:
     return "Update"
 
 
+def support_bin_path(name: str) -> Path:
+    external = APP_DIR / name
+    if external.exists():
+        return external
+    bundled = RESOURCE_DIR / name
+    if bundled.exists():
+        return bundled
+    build_dir = PROJECT_DIR / ".pio" / "build" / MAIN_ENV
+    if name in ("bootloader.bin", "partitions.bin"):
+        return build_dir / name
+    if name == "boot_app0.bin":
+        return Path.home() / ".platformio" / "packages" / "framework-arduinoespressif32" / "tools" / "partitions" / name
+    return external
+
+
 def default_config() -> dict:
     return {
-        "serial_port": "",
-        "upload_baud": "460800",
+        "serial_port": AUTO_PORT_LABEL,
+        "auto_serial": True,
+        "upload_baud": "921600",
         "monitor_baud": "115200",
         "main_firmware": default_main_firmware(),
         "hardware_firmware": default_hardware_firmware(),
@@ -165,13 +184,29 @@ def get_volume_label(root: str) -> str:
     return name.value if ok else ""
 
 
-def list_serial_ports() -> list[str]:
+def port_sort_key(port: str) -> tuple[str, int | str]:
+    prefix = "".join(ch for ch in port if not ch.isdigit()).upper()
+    digits = "".join(ch for ch in port if ch.isdigit())
+    return prefix, int(digits) if digits else port.upper()
+
+
+def list_serial_port_infos() -> list[dict]:
     try:
         from serial.tools import list_ports
 
-        ports = [port.device for port in list_ports.comports()]
-        if ports:
-            return sorted(set(ports))
+        infos = []
+        for port in list_ports.comports():
+            infos.append(
+                {
+                    "device": port.device,
+                    "description": port.description or "",
+                    "hwid": port.hwid or "",
+                    "manufacturer": port.manufacturer or "",
+                    "product": port.product or "",
+                }
+            )
+        if infos:
+            return sorted(infos, key=lambda item: port_sort_key(item["device"]))
     except Exception:
         pass
 
@@ -193,7 +228,11 @@ def list_serial_ports() -> list[str]:
                     index += 1
         except OSError:
             pass
-    return sorted(set(ports))
+    return [{"device": port, "description": "", "hwid": "", "manufacturer": "", "product": ""} for port in sorted(set(ports), key=port_sort_key)]
+
+
+def list_serial_ports() -> list[str]:
+    return [item["device"] for item in list_serial_port_infos()]
 
 
 def list_candidate_drives(include_fixed: bool = False) -> list[dict]:
@@ -281,10 +320,12 @@ class EspDownloaderApp:
         self.log("ESP 独立烧录工具已启动。")
         self.log(f"运行目录: {APP_DIR}")
         self.log("不依赖 PlatformIO；请把 firmware.bin、hardware_test.bin 和 Update 文件夹放在程序目录。")
+        self.log("烧录会自动写入 bootloader、分区表、boot_app0 和所选程序 bin。")
 
     def make_variables(self) -> None:
         self.port_var = tk.StringVar(value=str(self.config.get("serial_port", "")))
-        self.upload_baud_var = tk.StringVar(value=str(self.config.get("upload_baud", "460800")))
+        self.auto_serial_var = tk.BooleanVar(value=bool(self.config.get("auto_serial", True)))
+        self.upload_baud_var = tk.StringVar(value=str(self.config.get("upload_baud", "921600")))
         self.monitor_baud_var = tk.StringVar(value=str(self.config.get("monitor_baud", "115200")))
         self.main_firmware_var = tk.StringVar(value=str(self.config.get("main_firmware", default_main_firmware())))
         self.hardware_firmware_var = tk.StringVar(value=str(self.config.get("hardware_firmware", default_hardware_firmware())))
@@ -330,18 +371,26 @@ class EspDownloaderApp:
         parent.columnconfigure(1, weight=1)
 
         ttk.Label(parent, text="串口").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
-        self.port_combo = ttk.Combobox(parent, textvariable=self.port_var, width=20)
+        self.port_combo = ttk.Combobox(parent, textvariable=self.port_var, width=18)
         self.port_combo.grid(row=0, column=1, sticky="w", pady=4)
-        ttk.Button(parent, text="刷新串口", command=self.refresh_ports).grid(row=0, column=2, sticky="w", padx=8, pady=4)
+        ttk.Checkbutton(parent, text="自动", variable=self.auto_serial_var, command=self.on_auto_serial_changed).grid(
+            row=0, column=2, sticky="w", padx=(8, 0), pady=4
+        )
+        ttk.Button(parent, text="自动选择", command=self.select_serial_port_now).grid(row=0, column=3, sticky="w", padx=8, pady=4)
+        ttk.Button(parent, text="刷新串口", command=self.refresh_ports).grid(row=0, column=4, sticky="w", padx=(0, 8), pady=4)
 
-        ttk.Label(parent, text="烧录波特率").grid(row=0, column=3, sticky="e", padx=(16, 8), pady=4)
-        ttk.Entry(parent, textvariable=self.upload_baud_var, width=12).grid(row=0, column=4, sticky="w", pady=4)
+        ttk.Label(parent, text="烧录波特率").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Combobox(parent, textvariable=self.upload_baud_var, values=BAUD_RATES, width=12, state="readonly").grid(
+            row=1, column=1, sticky="w", pady=4
+        )
 
-        ttk.Label(parent, text="监视波特率").grid(row=0, column=5, sticky="e", padx=(16, 8), pady=4)
-        ttk.Entry(parent, textvariable=self.monitor_baud_var, width=12).grid(row=0, column=6, sticky="w", pady=4)
+        ttk.Label(parent, text="监视波特率").grid(row=1, column=2, sticky="e", padx=(16, 8), pady=4)
+        ttk.Combobox(parent, textvariable=self.monitor_baud_var, values=BAUD_RATES, width=12, state="readonly").grid(
+            row=1, column=3, sticky="w", pady=4
+        )
 
         actions = ttk.Frame(parent)
-        actions.grid(row=1, column=0, columnspan=7, sticky="ew", pady=(12, 4))
+        actions.grid(row=2, column=0, columnspan=7, sticky="ew", pady=(12, 4))
         actions.columnconfigure((0, 1), weight=1)
         btn_main = ttk.Button(actions, text="下载主程序", style="Primary.TButton", command=self.start_download_main)
         btn_test = ttk.Button(actions, text="下载硬件测试程序", style="Primary.TButton", command=self.start_download_hardware)
@@ -350,7 +399,7 @@ class EspDownloaderApp:
         self.task_buttons.extend([btn_main, btn_test])
 
         monitors = ttk.Frame(parent)
-        monitors.grid(row=2, column=0, columnspan=7, sticky="ew", pady=(8, 0))
+        monitors.grid(row=3, column=0, columnspan=7, sticky="ew", pady=(8, 0))
         ttk.Button(monitors, text="启动串口监视器", command=self.start_serial_monitor).grid(row=0, column=0, padx=(0, 8))
         ttk.Button(monitors, text="停止串口监视器", command=self.stop_serial_monitor).grid(row=0, column=1, padx=(0, 8))
         ttk.Button(monitors, text="停止当前任务", command=self.stop_current_task).grid(row=0, column=2, padx=(0, 8))
@@ -362,7 +411,7 @@ class EspDownloaderApp:
             "硬件测试程序下载：只烧录硬件测试 bin，不写入 MSD。"
         )
         ttk.Label(parent, text=info, wraplength=900, foreground="#475569").grid(
-            row=3, column=0, columnspan=7, sticky="ew", pady=(12, 0)
+            row=4, column=0, columnspan=7, sticky="ew", pady=(12, 0)
         )
 
     def build_settings_tab(self, parent: ttk.Frame) -> None:
@@ -373,25 +422,30 @@ class EspDownloaderApp:
         self.add_path_row(parent, 1, "硬件测试 bin", self.hardware_firmware_var, self.pick_hardware_firmware)
         self.add_path_row(parent, 2, "Update 文件夹", self.update_dir_var, self.pick_update_dir)
         self.add_entry(parent, 3, 0, "程序偏移", self.app_offset_var)
-        self.add_entry(parent, 3, 3, "烧录波特率", self.upload_baud_var)
-        self.add_entry(parent, 4, 0, "监视波特率", self.monitor_baud_var)
+        self.add_baud_row(parent, 3, 3, "烧录波特率", self.upload_baud_var)
+        self.add_baud_row(parent, 4, 0, "监视波特率", self.monitor_baud_var)
         self.add_entry(parent, 4, 3, "MSD卷标", self.usb_label_var)
 
-        ttk.Label(parent, text="MSD盘符").grid(row=5, column=0, sticky="w", pady=6, padx=(0, 8))
+        ttk.Checkbutton(parent, text="自动选择串口", variable=self.auto_serial_var, command=self.on_auto_serial_changed).grid(
+            row=5, column=0, columnspan=2, sticky="w", pady=(8, 4)
+        )
+        ttk.Button(parent, text="立即自动选择", command=self.select_serial_port_now).grid(row=5, column=2, sticky="w", padx=8, pady=(8, 4))
+
+        ttk.Label(parent, text="MSD盘符").grid(row=6, column=0, sticky="w", pady=6, padx=(0, 8))
         self.usb_combo = ttk.Combobox(parent, textvariable=self.usb_drive_var)
-        self.usb_combo.grid(row=5, column=1, sticky="ew", pady=6)
-        ttk.Button(parent, text="刷新MSD", command=self.refresh_drives).grid(row=5, column=2, sticky="w", padx=8, pady=6)
+        self.usb_combo.grid(row=6, column=1, sticky="ew", pady=6)
+        ttk.Button(parent, text="刷新MSD", command=self.refresh_drives).grid(row=6, column=2, sticky="w", padx=8, pady=6)
         ttk.Checkbutton(parent, text="主程序下载后格式化MSD并复制Update", variable=self.format_before_copy_var).grid(
-            row=6, column=0, columnspan=4, sticky="w", pady=(8, 4)
+            row=7, column=0, columnspan=4, sticky="w", pady=(8, 4)
         )
 
         note = "默认从 exe 所在目录读取 firmware.bin、hardware_test.bin、Update；也可以在这里选择绝对路径。"
         ttk.Label(parent, text=note, wraplength=880, foreground="#475569").grid(
-            row=7, column=0, columnspan=5, sticky="ew", pady=(8, 4)
+            row=8, column=0, columnspan=5, sticky="ew", pady=(8, 4)
         )
 
         buttons = ttk.Frame(parent)
-        buttons.grid(row=8, column=0, columnspan=5, sticky="e", pady=(12, 0))
+        buttons.grid(row=9, column=0, columnspan=5, sticky="e", pady=(12, 0))
         ttk.Button(buttons, text="保存设置", command=self.save_settings).grid(row=0, column=0, padx=(0, 8))
         ttk.Button(buttons, text="重新载入设置", command=self.reload_settings).grid(row=0, column=1)
 
@@ -434,6 +488,12 @@ class EspDownloaderApp:
         ttk.Label(parent, text=label).grid(row=row, column=column, sticky="w", pady=6, padx=(0, 8))
         ttk.Entry(parent, textvariable=variable).grid(row=row, column=column + 1, sticky="ew", pady=6, padx=(0, 8))
 
+    def add_baud_row(self, parent: ttk.Frame, row: int, column: int, label: str, variable: tk.StringVar) -> None:
+        ttk.Label(parent, text=label).grid(row=row, column=column, sticky="w", pady=6, padx=(0, 8))
+        ttk.Combobox(parent, textvariable=variable, values=BAUD_RATES, width=12, state="readonly").grid(
+            row=row, column=column + 1, sticky="w", pady=6, padx=(0, 8)
+        )
+
     def add_path_row(self, parent: ttk.Frame, row: int, label: str, variable: tk.StringVar, command) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=6, padx=(0, 8))
         ttk.Entry(parent, textvariable=variable).grid(row=row, column=1, columnspan=3, sticky="ew", pady=6)
@@ -443,8 +503,9 @@ class EspDownloaderApp:
         self.config.update(
             {
                 "serial_port": self.port_var.get().strip(),
-                "upload_baud": self.upload_baud_var.get().strip() or "460800",
-                "monitor_baud": self.monitor_baud_var.get().strip() or "115200",
+                "auto_serial": bool(self.auto_serial_var.get()),
+                "upload_baud": self.normalize_baud(self.upload_baud_var.get(), "921600"),
+                "monitor_baud": self.normalize_baud(self.monitor_baud_var.get(), "115200"),
                 "main_firmware": self.main_firmware_var.get().strip() or "firmware.bin",
                 "hardware_firmware": self.hardware_firmware_var.get().strip() or "hardware_test.bin",
                 "app_offset": self.app_offset_var.get().strip() or "0x10000",
@@ -457,9 +518,10 @@ class EspDownloaderApp:
         return dict(self.config)
 
     def apply_config_to_ui(self) -> None:
-        self.port_var.set(str(self.config.get("serial_port", "")))
-        self.upload_baud_var.set(str(self.config.get("upload_baud", "460800")))
-        self.monitor_baud_var.set(str(self.config.get("monitor_baud", "115200")))
+        self.port_var.set(str(self.config.get("serial_port", AUTO_PORT_LABEL)))
+        self.auto_serial_var.set(bool(self.config.get("auto_serial", True)))
+        self.upload_baud_var.set(self.normalize_baud(str(self.config.get("upload_baud", "921600")), "921600"))
+        self.monitor_baud_var.set(self.normalize_baud(str(self.config.get("monitor_baud", "115200")), "115200"))
         self.main_firmware_var.set(str(self.config.get("main_firmware", default_main_firmware())))
         self.hardware_firmware_var.set(str(self.config.get("hardware_firmware", default_hardware_firmware())))
         self.app_offset_var.set(str(self.config.get("app_offset", "0x10000")))
@@ -467,6 +529,10 @@ class EspDownloaderApp:
         self.usb_drive_var.set(str(self.config.get("usb_drive", "")))
         self.usb_label_var.set(str(self.config.get("usb_label", "TESTTFT")))
         self.format_before_copy_var.set(bool(self.config.get("format_before_copy", True)))
+
+    def normalize_baud(self, value: str, fallback: str) -> str:
+        value = str(value).strip()
+        return value if value in BAUD_RATES else fallback
 
     def pick_main_firmware(self) -> None:
         self.pick_bin(self.main_firmware_var, "选择主程序 firmware.bin")
@@ -506,10 +572,86 @@ class EspDownloaderApp:
 
     def refresh_ports(self) -> None:
         ports = list_serial_ports()
-        self.port_combo["values"] = ports
-        if not self.port_var.get() and ports:
+        self.port_combo["values"] = [AUTO_PORT_LABEL] + ports
+        if self.auto_serial_var.get() and self.port_var.get() not in ports:
+            self.port_var.set(AUTO_PORT_LABEL)
+        elif not self.port_var.get() and ports:
             self.port_var.set(ports[0])
         self.log(f"串口刷新完成: {', '.join(ports) if ports else '未发现串口'}")
+
+    def on_auto_serial_changed(self) -> None:
+        if self.auto_serial_var.get():
+            self.port_var.set(AUTO_PORT_LABEL)
+            self.log("已启用自动串口选择。")
+        else:
+            ports = list_serial_ports()
+            if self.port_var.get() == AUTO_PORT_LABEL and ports:
+                self.port_var.set(ports[0])
+            self.log("已关闭自动串口选择。")
+
+    def select_serial_port_now(self) -> None:
+        self.collect_config_from_ui()
+        try:
+            port = self.auto_select_serial_port()
+        except RuntimeError as exc:
+            messagebox.showwarning("自动选择串口", str(exc))
+            return
+        messagebox.showinfo("自动选择串口", f"已选择 {port}")
+
+    def auto_select_serial_port(self) -> str:
+        infos = list_serial_port_infos()
+        if not infos:
+            raise RuntimeError("未发现可用串口。")
+        scored = sorted(infos, key=lambda item: (-self.serial_score(item), port_sort_key(item["device"])))
+        selected = scored[0]
+        score = self.serial_score(selected)
+        if len(scored) > 1:
+            details = ", ".join(f"{item['device']}({self.serial_score(item)})" for item in scored)
+            self.log(f"自动串口候选: {details}")
+        port = selected["device"]
+        desc = selected.get("description") or selected.get("product") or selected.get("hwid") or "无描述"
+        if len(scored) > 1 and score == 0:
+            self.log(f"未识别到明显ESP串口，按端口顺序选择: {port}")
+        else:
+            self.log(f"自动选择串口: {port} - {desc}")
+        self.config["serial_port"] = port
+        self.call_on_ui(lambda: self.port_var.set(port))
+        return port
+
+    def serial_score(self, info: dict) -> int:
+        text = " ".join(
+            str(info.get(key, "")) for key in ("device", "description", "hwid", "manufacturer", "product")
+        ).lower()
+        score = 0
+        weighted_keywords = {
+            "esp32": 100,
+            "esp": 90,
+            "jtag": 80,
+            "usb serial": 70,
+            "uart": 65,
+            "cp210": 60,
+            "ch340": 60,
+            "ch910": 60,
+            "wch": 55,
+            "silicon labs": 55,
+            "ftdi": 50,
+            "prolific": 45,
+            "usb": 20,
+        }
+        for keyword, weight in weighted_keywords.items():
+            if keyword in text:
+                score += weight
+        return score
+
+    def get_serial_port_for_task(self) -> str:
+        configured = self.config.get("serial_port", "").strip()
+        if self.config.get("auto_serial", True) or not configured or configured == AUTO_PORT_LABEL:
+            return self.auto_select_serial_port()
+        available = list_serial_ports()
+        if configured not in available:
+            self.log(f"配置串口 {configured} 当前不可用，尝试自动选择。")
+            return self.auto_select_serial_port()
+        return configured
 
     def refresh_drives(self) -> None:
         drives = list_candidate_drives(include_fixed=False)
@@ -685,16 +827,29 @@ class EspDownloaderApp:
         if rc != 0:
             raise RuntimeError(f"{title}失败，退出码 {rc}")
 
+    def flash_pairs_for_firmware(self, firmware: Path) -> list[str]:
+        app_offset = self.config.get("app_offset", "0x10000").strip() or "0x10000"
+        pairs = [
+            ("0x0000", support_bin_path("bootloader.bin")),
+            ("0x8000", support_bin_path("partitions.bin")),
+            ("0xe000", support_bin_path("boot_app0.bin")),
+            (app_offset, firmware),
+        ]
+        args: list[str] = []
+        for offset, image in pairs:
+            if not image.exists():
+                raise RuntimeError(f"缺少启动烧录文件: {image}")
+            args.extend([offset, str(image)])
+        return args
+
     def burn_firmware(self, firmware_value: str, title: str) -> None:
-        port = self.config.get("serial_port", "").strip()
-        if not port:
-            raise RuntimeError("请先选择串口。")
+        port = self.get_serial_port_for_task()
         firmware = resolve_app_path(firmware_value)
         if not firmware.exists():
             raise RuntimeError(f"找不到固件文件: {firmware}")
-        offset = self.config.get("app_offset", "0x10000").strip() or "0x10000"
-        baud = self.config.get("upload_baud", "460800").strip() or "460800"
+        baud = self.normalize_baud(self.config.get("upload_baud", "921600"), "921600")
         self.stop_serial_monitor()
+        flash_args = self.flash_pairs_for_firmware(firmware)
         self.esptool(
             [
                 "--chip",
@@ -709,8 +864,7 @@ class EspDownloaderApp:
                 "hard_reset",
                 "write_flash",
                 "-z",
-                offset,
-                str(firmware),
+                *flash_args,
             ],
             title,
         )
@@ -746,10 +900,8 @@ class EspDownloaderApp:
         self.burn_firmware(self.config.get("hardware_firmware", "hardware_test.bin"), "烧录硬件测试 bin")
 
     def erase_flash_worker(self) -> None:
-        port = self.config.get("serial_port", "").strip()
-        if not port:
-            raise RuntimeError("请先选择串口。")
-        baud = self.config.get("upload_baud", "460800").strip() or "460800"
+        port = self.get_serial_port_for_task()
+        baud = self.normalize_baud(self.config.get("upload_baud", "921600"), "921600")
         self.stop_serial_monitor()
         self.esptool(
             [
@@ -874,12 +1026,13 @@ class EspDownloaderApp:
             messagebox.showinfo("串口监视器", "串口监视器已经在运行。")
             return
         self.collect_config_from_ui()
-        port = self.config.get("serial_port", "").strip()
-        if not port:
-            messagebox.showwarning("串口监视器", "请先选择串口。")
+        try:
+            port = self.get_serial_port_for_task()
+        except RuntimeError as exc:
+            messagebox.showwarning("串口监视器", str(exc))
             return
         try:
-            baud = int(self.config.get("monitor_baud", "115200").strip() or "115200")
+            baud = int(self.normalize_baud(self.config.get("monitor_baud", "115200"), "115200"))
         except ValueError:
             messagebox.showwarning("串口监视器", "监视波特率无效。")
             return

@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = []
+datas = [('C:\\Users\\Juliet Persia\\Documents\\PlatformIO\\Projects\\TestTFT\\DownloadAPP\\bootloader.bin', '.'), ('C:\\Users\\Juliet Persia\\Documents\\PlatformIO\\Projects\\TestTFT\\DownloadAPP\\partitions.bin', '.'), ('C:\\Users\\Juliet Persia\\Documents\\PlatformIO\\Projects\\TestTFT\\DownloadAPP\\boot_app0.bin', '.')]
 binaries = []
 hiddenimports = []
 tmp_ret = collect_all('esptool')
